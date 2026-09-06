@@ -9,6 +9,7 @@ import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { resolvePlayback } from '@/lib/providers/registry';
 import type { PlaybackRequest } from '@/lib/providers/types';
 import { AdSlot } from '@/features/ads/AdSlot';
+import { isInWatchlist } from '@/features/watchlist/queries';
 
 const TITLE_TYPES: readonly TitleType[] = ['movie', 'tv'];
 
@@ -134,13 +135,14 @@ export default async function TitlePage({ params }: TitleParams) {
   }
 
   const availability = await resolveAvailability(title);
+  const inWatchlist = await isInWatchlist(title.id);
   const jsonLd = buildJsonLd(title, canonicalUrl(type, slug));
 
   return (
     <>
       {/* Escaped so title/synopsis text can never break out of the script tag. */}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }} />
-      <TitleDetail title={title} availability={availability} />
+      <TitleDetail title={title} availability={availability} initialInWatchlist={inWatchlist} />
       {/* Ad (Spec Section 11): one rectangle below the title details — below the
           fold, after the content, never between the user and the Play action. */}
       <AdSlot slot="titleRectangle" className="pb-8" />

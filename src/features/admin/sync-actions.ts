@@ -1,6 +1,7 @@
 'use server';
 
 import { syncCatalogFromTmdb } from '@/features/catalog/tmdb-sync';
+import { recordSyncRun } from '@/features/catalog/sync-run-log';
 import { requirePermission } from '@/lib/permissions/check';
 import { PERMISSIONS } from '@/lib/permissions/permissions';
 import type { SyncActionState } from './sync-state';
@@ -56,6 +57,13 @@ export async function syncCatalogAction(
 
   try {
     const result = await syncCatalogFromTmdb({ source, type, genre, yearFrom, yearTo, pages });
+    // Bookkeeping (Spec Section 10): imports row + audit_logs row. Best-effort —
+    // recordSyncRun logs and swallows its own failures.
+    await recordSyncRun({
+      ok: true,
+      source: source === 'discover' ? `discover:${type}${genre ? `:${genre}` : ''}` : 'charts',
+      result,
+    });
     return {
       status: 'ok',
       message: result.message,
@@ -68,6 +76,11 @@ export async function syncCatalogAction(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    await recordSyncRun({
+      ok: false,
+      source: source === 'discover' ? `discover:${type}${genre ? `:${genre}` : ''}` : 'charts',
+      error: message,
+    });
     return {
       status: 'error',
       message:

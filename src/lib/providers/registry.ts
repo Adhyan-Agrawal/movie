@@ -12,7 +12,7 @@
  */
 
 import type { PlaybackError, PlaybackRequest, PlaybackSource, ProviderAdapter } from './types';
-import { type ProviderConfig, VIDSRC_PROVIDER_CONFIG } from './config';
+import { type ProviderConfig, PROVIDER_CONFIGS } from './config';
 import { createVidsrcAdapter } from './vidsrc';
 
 interface RegistryEntry {
@@ -20,9 +20,15 @@ interface RegistryEntry {
   adapter: ProviderAdapter;
 }
 
-const REGISTRY: readonly RegistryEntry[] = [
-  { config: VIDSRC_PROVIDER_CONFIG, adapter: createVidsrcAdapter(VIDSRC_PROVIDER_CONFIG) },
-];
+/**
+ * All adapters are built from the same template-driven embed adapter today —
+ * the differences between providers are entirely configuration (domains, path
+ * templates, priorities).
+ */
+const REGISTRY: readonly RegistryEntry[] = PROVIDER_CONFIGS.map((config) => ({
+  config,
+  adapter: createVidsrcAdapter(config),
+}));
 
 export function getAdapter(id: string): ProviderAdapter | undefined {
   return REGISTRY.find((entry) => entry.config.id === id)?.adapter;
@@ -42,9 +48,15 @@ export interface ResolvedPlayback {
 }
 
 /**
- * Resolve a sanitized playback source for a request. Never throws — every
+ * Resolve sanitized playback sources for a request. Never throws — every
  * failure is normalized into `error` so the player can render an honest
  * unavailable/blocked state with retry.
+ *
+ * Every enabled provider is attempted (in priority order) and its best source
+ * is collected, so the player's source selector offers one entry per provider
+ * ("Server 1..N" in priority order). `source` is the highest-priority success;
+ * a provider that fails simply contributes no source — the viewer can still
+ * switch to the others.
  */
 export async function resolvePlayback(request: PlaybackRequest): Promise<ResolvedPlayback> {
   const entries = REGISTRY.filter((entry) => entry.config.enabled).sort(
@@ -52,6 +64,7 @@ export async function resolvePlayback(request: PlaybackRequest): Promise<Resolve
   );
 
   const attempted: string[] = [];
+  const collected: PlaybackSource[] = [];
   let lastError: PlaybackError | null = null;
 
   for (const entry of entries) {
@@ -59,19 +72,30 @@ export async function resolvePlayback(request: PlaybackRequest): Promise<Resolve
     try {
       const sources = await entry.adapter.resolve(request);
       if (sources.length > 0) {
-        const best = sources[0]!;
-        return { source: best, sources, error: null, providerId: entry.config.id, attempted };
+        collected.push(...sources);
+      } else {
+        // Provider is enabled but produced no source (e.g. unsupported request).
+        lastError = {
+          code: 'not-found',
+          message: 'No authorized source is available from this provider.',
+          recoverable: true,
+          providerId: entry.config.id,
+        };
       }
-      // Provider is enabled but produced no source (e.g. unsupported request).
-      lastError = {
-        code: 'not-found',
-        message: 'No authorized source is available from this provider.',
-        recoverable: true,
-        providerId: entry.config.id,
-      };
     } catch (error) {
       lastError = entry.adapter.normalizeError(error);
     }
+  }
+
+  if (collected.length > 0) {
+    const best = collected[0]!;
+    return {
+      source: best,
+      sources: collected,
+      error: null,
+      providerId: best.providerId ?? null,
+      attempted,
+    };
   }
 
   if (entries.length === 0) {

@@ -68,29 +68,31 @@ export function buildVidsrcUrl(
     });
   }
 
-  const id = resolveMediaId(request, providerId);
+  const id = resolveMediaId(request, config);
   const path = buildPath(config, request, id, Boolean(options.shorthand), providerId);
   const url = assertSafeUrl(config, path, providerId);
   return url.toString();
 }
 
-/** Choose and validate the provider id (IMDb preferred, then TMDB). */
-function resolveMediaId(request: PlaybackRequest, providerId: string): string {
+/** Choose and validate the provider id (provider's preferred type first). */
+function resolveMediaId(request: PlaybackRequest, config: ProviderConfig): string {
+  const providerId = config.id;
   const imdb = request.imdbId?.trim();
   const tmdb = request.tmdbId?.trim();
+  const preferTmdb = config.preferredId === 'tmdb';
 
-  if (imdb) {
-    if (!IMDB_RE.test(imdb)) {
-      throw invalidRequest('The IMDb identifier is malformed.', providerId);
-    }
-    return imdb;
+  // Validate both when present; use whichever the provider prefers.
+  if (imdb && !IMDB_RE.test(imdb)) {
+    throw invalidRequest('The IMDb identifier is malformed.', providerId);
   }
-  if (tmdb) {
-    if (!TMDB_RE.test(tmdb)) {
-      throw invalidRequest('The TMDB identifier is malformed.', providerId);
-    }
-    return tmdb;
+  if (tmdb && !TMDB_RE.test(tmdb)) {
+    throw invalidRequest('The TMDB identifier is malformed.', providerId);
   }
+
+  const first = preferTmdb ? tmdb : imdb;
+  const second = preferTmdb ? imdb : tmdb;
+  if (first) return first;
+  if (second) return second;
   // No usable identifier — ambiguous/invalid; recover rather than guess.
   throw invalidRequest('No TMDB or IMDb identifier is available to resolve playback.', providerId);
 }

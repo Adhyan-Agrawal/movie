@@ -27,6 +27,37 @@ export interface TmdbSeason {
   episode_count: number | null;
 }
 
+/** One `/tv/{id}/season/{n}` payload (trimmed to the fields we store). */
+export interface TmdbSeasonDetail {
+  id?: number;
+  season_number?: number | null;
+  episodes?: TmdbEpisodeEntry[];
+}
+
+export interface TmdbEpisodeEntry {
+  id: number;
+  episode_number: number;
+  name: string | null;
+  overview: string | null;
+  air_date: string | null;
+  runtime: number | null;
+  still_path: string | null;
+}
+
+/** A `credits` append_to_response payload (trimmed to the cast we keep). */
+export interface TmdbCredits {
+  cast?: TmdbCastEntry[];
+}
+
+export interface TmdbCastEntry {
+  id: number;
+  name: string | null;
+  character: string | null;
+  known_for_department: string | null;
+  profile_path: string | null;
+  order: number | null;
+}
+
 export interface TmdbMovieDetail {
   id: number;
   imdb_id: string | null;
@@ -42,6 +73,7 @@ export interface TmdbMovieDetail {
   genres: TmdbGenre[];
   release_dates?: { results?: { iso_3166_1: string; release_dates?: { certification: string }[] }[] };
   external_ids?: { imdb_id: string | null };
+  credits?: TmdbCredits;
 }
 
 export interface TmdbTvDetail {
@@ -59,6 +91,7 @@ export interface TmdbTvDetail {
   genres: TmdbGenre[];
   content_ratings?: { results?: { iso_3166_1: string; rating: string }[] };
   seasons?: TmdbSeason[];
+  credits?: TmdbCredits;
 }
 
 export interface NormalizedSeason {
@@ -69,6 +102,28 @@ export interface NormalizedSeason {
   airDate: string | null;
   posterUrl: string | null;
   episodeCount: number | null;
+}
+
+/** Top-billed cast member, mapped to `people` + `title_people` rows. */
+export interface NormalizedCastMember {
+  tmdbId: number;
+  name: string;
+  character: string | null;
+  profileUrl: string | null;
+  knownFor: string | null;
+  creditOrder: number;
+}
+
+/** One episode of one season, mapped to an `episodes` row. */
+export interface NormalizedEpisode {
+  seasonNumber: number;
+  episodeNumber: number;
+  name: string;
+  overview: string;
+  airDate: string | null;
+  runtimeMinutes: number | null;
+  stillUrl: string | null;
+  tmdbId: number;
 }
 
 export interface NormalizedTitle {
@@ -88,6 +143,8 @@ export interface NormalizedTitle {
   score: number | null;
   genres: string[];
   seasons: Omit<NormalizedSeason, 'titleId'>[];
+  /** Top-billed cast (movies and TV share TMDB's `credits` payload shape). */
+  cast: NormalizedCastMember[];
 }
 
 export function slugify(s: string): string {
@@ -137,6 +194,7 @@ export function normalizeMovie(d: TmdbMovieDetail): NormalizedTitle | null {
     score: typeof d.vote_average === 'number' ? Math.round(d.vote_average * 10) : null,
     genres: (d.genres ?? []).map((g) => g.name),
     seasons: [],
+    cast: normalizeCast(d.credits),
   };
 }
 
@@ -171,5 +229,53 @@ export function normalizeTv(d: TmdbTvDetail): NormalizedTitle | null {
         posterUrl: s.poster_path ? `${TMDB_IMG}/w500${s.poster_path}` : null,
         episodeCount: s.episode_count,
       })),
+    cast: normalizeCast(d.credits),
   };
+}
+
+/** Cap on stored cast members per title — top-billed only (v1 has no crew). */
+export const MAX_CAST_MEMBERS = 15;
+
+/**
+ * Normalize a TMDB `credits` payload into top-billed cast. Keeps the first
+ * {@link MAX_CAST_MEMBERS} entries that are plausibly actors: TMDB credits can
+ * include voice-only or in-memory-only entries with no profile art; a profile
+ * path OR a known-for department of "Acting" filters the obvious non-actors
+ * without dropping unphotographed guest cast.
+ */
+export function normalizeCast(
+  credits: TmdbCredits | undefined,
+  max = MAX_CAST_MEMBERS,
+): NormalizedCastMember[] {
+  return (credits?.cast ?? [])
+    .filter((c) => c.id && c.name && (c.profile_path || c.known_for_department === 'Acting'))
+    .slice(0, max)
+    .map((c, i) => ({
+      tmdbId: c.id,
+      name: c.name as string,
+      character: c.character || null,
+      profileUrl: c.profile_path ? `${TMDB_IMG}/w185${c.profile_path}` : null,
+      knownFor: c.known_for_department || null,
+      creditOrder: typeof c.order === 'number' && c.order >= 0 ? c.order : i,
+    }));
+}
+
+/**
+ * Normalize a `/tv/{id}/season/{n}` payload into episode rows. Skips entries
+ * without an id, a name, or a positive episode number (TMDB occasionally
+ * returns placeholder rows for unaired episodes).
+ */
+export function normalizeEpisodes(season: TmdbSeasonDetail): NormalizedEpisode[] {
+  return (season.episodes ?? [])
+    .filter((e) => e.id && e.episode_number > 0 && e.name)
+    .map((e) => ({
+      seasonNumber: season.season_number ?? 0,
+      episodeNumber: e.episode_number,
+      name: e.name as string,
+      overview: e.overview ?? '',
+      airDate: e.air_date,
+      runtimeMinutes: e.runtime ?? null,
+      stillUrl: e.still_path ? `${TMDB_IMG}/w300${e.still_path}` : null,
+      tmdbId: e.id,
+    }));
 }

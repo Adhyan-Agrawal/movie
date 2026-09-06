@@ -7,10 +7,11 @@ import { buttonClasses } from '@/components/ui/Button';
 import { Container } from '@/components/ui/Container';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { MediaRow } from './MediaRow';
+import { SeasonEpisodeList } from './SeasonEpisodeList';
 import { WatchlistButton } from './WatchlistButton';
 import { ShareButton } from './ShareButton';
 import { formatRuntime } from './title-detail-helpers';
-import { getSimilarTitles } from '../queries';
+import { getSimilarTitles, listCastForTitle, listSeasonsForTitle } from '../queries';
 import type { MediaRow as MediaRowType, Title } from '../types';
 
 /** Playback availability, driven by provider/consent policy (Spec Sections 4, 9). */
@@ -42,18 +43,26 @@ function isRemoteUrl(url: string | undefined): boolean {
 
 /**
  * Premium title-detail layout (Spec Section 4): backdrop hero band with
- * legibility scrims, poster, metadata, synopsis, honest not-yet-available
- * states for episodes and credits, similar titles, and a props-driven
+ * legibility scrims, poster, metadata, synopsis, seasons/episodes and cast
+ * from the real `seasons`/`episodes`/`title_people` tables (honest not-yet-
+ * imported states when they're empty), similar titles, and a props-driven
  * availability state. Never presents a broken iframe as the primary experience.
  */
 export async function TitleDetail({
   title,
   availability = 'available',
+  initialInWatchlist = false,
 }: {
   title: Title;
   availability?: TitleAvailability;
+  /** Resolved server-side from the signed-in viewer's watchlist. */
+  initialInWatchlist?: boolean;
 }) {
-  const similar = await getSimilarTitles(title);
+  const [similar, seasons, cast] = await Promise.all([
+    getSimilarTitles(title),
+    title.type === 'tv' ? listSeasonsForTitle(title.id) : Promise.resolve([]),
+    listCastForTitle(title.id),
+  ]);
   const runtime = formatRuntime(title.runtimeMinutes);
   const state = AVAILABILITY[availability];
   const watchHref = `/watch/${title.type}/${title.slug}`;
@@ -190,7 +199,7 @@ export async function TitleDetail({
                   </button>
                 )}
 
-                <WatchlistButton titleName={title.name} />
+                <WatchlistButton titleId={title.id} titleName={title.name} initialInWatchlist={initialInWatchlist} />
 
                 {title.trailerUrl ? (
                   <a
@@ -236,25 +245,64 @@ export async function TitleDetail({
                 <h2 id="episodes-heading" className="text-lg font-semibold tracking-tight">
                   Episodes
                 </h2>
-                <EmptyState
-                  icon="▦"
-                  title="No episode details yet"
-                  description="Episode details aren’t available for this title yet."
-                  className="py-10"
-                />
+                {seasons.length > 0 ? (
+                  <SeasonEpisodeList seasons={seasons} titleSlug={title.slug} titleName={title.name} />
+                ) : (
+                  <EmptyState
+                    icon="▦"
+                    title="No episode details yet"
+                    description="Episode details aren’t available for this title yet."
+                    className="py-10"
+                  />
+                )}
               </section>
             ) : null}
 
             <section aria-labelledby="credits-heading" className="flex flex-col gap-4">
               <h2 id="credits-heading" className="text-lg font-semibold tracking-tight">
-                Cast &amp; crew
+                Cast
               </h2>
-              <EmptyState
-                icon="◎"
-                title="No cast information yet"
-                description="Cast information isn’t available for this title yet."
-                className="py-10"
-              />
+              {cast.length > 0 ? (
+                <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                  {cast.map((member) => (
+                    <li
+                      key={member.personId}
+                      className="flex items-center gap-3 rounded-md border border-border bg-surface/40 p-3"
+                    >
+                      {member.profileUrl ? (
+                        <Image
+                          src={member.profileUrl}
+                          alt=""
+                          width={56}
+                          height={84}
+                          sizes="56px"
+                          className="h-[84px] w-14 shrink-0 rounded object-cover"
+                        />
+                      ) : (
+                        <div
+                          aria-hidden="true"
+                          className="flex h-[84px] w-14 shrink-0 items-center justify-center rounded bg-surface-raised text-content-subtle"
+                        >
+                          ◎
+                        </div>
+                      )}
+                      <div className="flex min-w-0 flex-col">
+                        <p className="truncate text-sm font-semibold text-content">{member.name}</p>
+                        {member.character ? (
+                          <p className="truncate text-xs text-content-muted">{member.character}</p>
+                        ) : null}
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <EmptyState
+                  icon="◎"
+                  title="No cast information yet"
+                  description="Cast information isn’t available for this title yet."
+                  className="py-10"
+                />
+              )}
             </section>
           </div>
 

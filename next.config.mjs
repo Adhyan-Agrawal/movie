@@ -1,14 +1,23 @@
 /**
  * Provider embed hosts allowed to be framed (Spec Sections 9 & 15). This MUST
- * stay in lockstep with `VIDSRC_PROVIDER_CONFIG.allowedDomains` in
- * `src/lib/providers/config.ts` — that file is the single source of truth for
- * provider domains, but next.config runs before the TS module graph is built,
- * so the host list is mirrored here. If the provider allowlist changes, update
- * both. `buildVidsrcUrl`/`assertSafeUrl` independently enforce the same
- * allowlist server-side, so a drift here can never produce an unsafe URL — it
- * would only over- or under-restrict framing.
+ * stay in lockstep with the provider configs in `src/lib/providers/config.ts`
+ * (allowedDomains per provider). That file is the single source of truth, but
+ * next.config runs before the TS module graph is built, so the host list is
+ * mirrored here. If the provider allowlist changes, update both.
+ * `buildVidsrcUrl`/`assertSafeUrl` independently enforce the same allowlist
+ * server-side, so a drift here can never produce an unsafe URL — it would only
+ * over- or under-restrict framing.
  */
-const PROVIDER_FRAME_HOSTS = ['https://vsembed.su', 'https://*.vsembed.su'];
+const PROVIDER_FRAME_HOSTS = [
+  'https://vidup.to',
+  'https://*.vidup.to',
+  'https://2embed.cc',
+  'https://*.2embed.cc',
+  'https://vsembed.su',
+  'https://*.vsembed.su',
+  'https://vidsrc.mov',
+  'https://*.vidsrc.mov',
+];
 
 /**
  * Content-Security-Policy (Spec Sections 9 & 15). Delivers the mandated

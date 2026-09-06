@@ -1,6 +1,8 @@
 import 'server-only';
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { repoListTitlesPaged } from '@/features/catalog/repository';
+import type { Title, TitleType } from '@/features/catalog/types';
 import type { Json } from '@/lib/supabase/types';
 import type {
   AdminAccountRow,
@@ -63,6 +65,42 @@ export async function getAdminCounts(): Promise<AdminCounts> {
     profiles: profiles.count ?? 0,
     playbackSessions: playbackSessions.count ?? 0,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Catalog titles
+// ---------------------------------------------------------------------------
+
+/** One page of admin-catalog titles plus the exact matching total. */
+export interface AdminTitlesPage {
+  rows: Title[];
+  /** Total rows matching the filters — never capped by a page/range limit. */
+  total: number;
+}
+
+/**
+ * Paged, searchable title listing for the admin catalog (Spec Section 10).
+ *
+ * Unlike the public catalog queries (which return a single filtered array and
+ * would silently truncate at Supabase's default 1,000-row cap), this pages
+ * in-DB via `.range()` and returns the exact matching count alongside the page,
+ * so the console can show the TRUE total. It still reads through the
+ * RLS-scoped server client, and `titles` is queried directly: the admin role
+ * holds `catalog.read` (via the titles_editor_read policy), so drafts are
+ * included alongside published titles — exactly what RLS allows the caller.
+ */
+export async function listAdminTitles({
+  query,
+  page = 1,
+  pageSize = 50,
+  type,
+}: {
+  query?: string;
+  page?: number;
+  pageSize?: number;
+  type?: TitleType;
+} = {}): Promise<AdminTitlesPage> {
+  return repoListTitlesPaged({ query, page, pageSize, type });
 }
 
 // ---------------------------------------------------------------------------

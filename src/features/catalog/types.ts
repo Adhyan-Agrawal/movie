@@ -54,3 +54,36 @@ export interface MediaRow {
   reason?: string;
   titles: Title[];
 }
+
+/** One episode row (client-safe DTO). */
+export interface Episode {
+  id: string;
+  seasonNumber: number;
+  episodeNumber: number;
+  name: string;
+  overview: string;
+  /** ISO date (YYYY-MM-DD) or null when unaired/unknown. */
+  airDate: string | null;
+  runtimeMinutes: number | null;
+  stillUrl: string | null;
+}
+
+/** One season with its imported episode rows (`episodes` may be empty —
+ * `episodeCount` then carries the honest "N episodes" count). */
+export interface Season {
+  id: string;
+  seasonNumber: number;
+  name: string | null;
+  overview: string;
+  airDate: string | null;
+  episodeCount: number | null;
+  episodes: Episode[];
+}
+
+/** One cast credit joined with its person row (client-safe DTO). */
+export interface CastMember {
+  personId: string;
+  name: string;
+  character: string | null;
+  profileUrl: string | null;
+}

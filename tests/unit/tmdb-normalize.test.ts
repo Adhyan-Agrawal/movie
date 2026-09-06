@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import {
+  MAX_CAST_MEMBERS,
+  normalizeCast,
+  normalizeEpisodes,
   normalizeMovie,
   normalizeTv,
   posterSrc,
   slugify,
   validYear,
+  type TmdbCredits,
   type TmdbMovieDetail,
+  type TmdbSeasonDetail,
   type TmdbTvDetail,
 } from '@/features/catalog/tmdb-normalize';
 
@@ -171,5 +176,115 @@ describe('normalizeTv', () => {
 
   it('rejects series without a name or overview', () => {
     expect(normalizeTv({ ...TV_FIXTURE, overview: '' })).toBeNull();
+  });
+});
+
+/** TMDB `credits` append payload (trimmed) — Breaking Bad's top billing. */
+const CREDITS_FIXTURE = {
+  cast: [
+    { id: 17419, name: 'Bryan Cranston', character: 'Walter White', known_for_department: 'Acting', profile_path: '/1fjpTCGbQPCy0nuW2vW9Hq4cZ0.jpg', order: 0 },
+    { id: 34395, name: 'Anna Gunn', character: 'Skyler White', known_for_department: 'Acting', profile_path: '/qzHLMjKVnd7TvrIXOvC5mnnaqbP.jpg', order: 1 },
+    // No profile art but an actor — must be KEPT.
+    { id: 1234, name: 'Unphotographed Actor', character: 'Guest', known_for_department: 'Acting', profile_path: null, order: 2 },
+    // Profile art exists but not an actor — still kept (profile-path rule).
+    { id: 5678, name: 'Cameo Director', character: 'Himself', known_for_department: 'Directing', profile_path: '/dir.jpg', order: 3 },
+    // No profile art AND not acting — must be DROPPED.
+    { id: 9012, name: 'Voice Only', character: 'Narrator (voice)', known_for_department: 'Sound', profile_path: null, order: 4 },
+    // No name — must be DROPPED.
+    { id: 3456, name: null, character: 'Ghost', known_for_department: 'Acting', profile_path: null, order: 5 },
+  ],
+} satisfies TmdbCredits;
+
+describe('normalizeCast', () => {
+  const cast = normalizeCast(CREDITS_FIXTURE);
+
+  it('maps identity, character, billing order, and profile url', () => {
+    expect(cast).toHaveLength(4);
+    expect(cast[0]).toEqual({
+      tmdbId: 17419,
+      name: 'Bryan Cranston',
+      character: 'Walter White',
+      profileUrl: 'https://image.tmdb.org/t/p/w185/1fjpTCGbQPCy0nuW2vW9Hq4cZ0.jpg',
+      knownFor: 'Acting',
+      creditOrder: 0,
+    });
+    expect(cast[1]!.character).toBe('Skyler White');
+  });
+
+  it('keeps actors without a profile photo, drops non-actors without one', () => {
+    expect(cast.map((c) => c.name)).toContain('Unphotographed Actor');
+    expect(cast.map((c) => c.name)).not.toContain('Voice Only');
+    expect(cast.map((c) => c.name)).not.toContain('Ghost');
+  });
+
+  it('caps stored cast at the top-billed limit', () => {
+    const many = Array.from({ length: MAX_CAST_MEMBERS + 10 }, (_, i) => ({
+      id: 1000 + i,
+      name: `Actor ${i}`,
+      character: `Role ${i}`,
+      known_for_department: 'Acting',
+      profile_path: `/p${i}.jpg`,
+      order: i,
+    }));
+    expect(normalizeCast({ cast: many })).toHaveLength(MAX_CAST_MEMBERS);
+  });
+
+  it('handles missing credits payloads', () => {
+    expect(normalizeCast(undefined)).toEqual([]);
+    expect(normalizeCast({})).toEqual([]);
+  });
+
+  it('is wired into normalizeMovie and normalizeTv', () => {
+    expect(normalizeMovie({ ...MOVIE_FIXTURE, credits: CREDITS_FIXTURE })!.cast).toHaveLength(4);
+    expect(normalizeTv({ ...TV_FIXTURE, credits: CREDITS_FIXTURE })!.cast).toHaveLength(4);
+    expect(normalizeTv(TV_FIXTURE)!.cast).toEqual([]);
+  });
+});
+
+/** `/tv/1396/season/1` payload (trimmed) — real episode shapes. */
+const SEASON_FIXTURE = {
+  id: 3572,
+  season_number: 1,
+  episodes: [
+    { id: 62085, episode_number: 1, name: 'Pilot', overview: 'Diagnosed with terminal cancer, a chemistry teacher turns to cooking meth.', air_date: '2008-01-20', runtime: 58, still_path: '/ck00.jpg' },
+    { id: 62086, episode_number: 2, name: "Cat's in the Bag...", overview: 'Walt and Jesse deal with the aftermath.', air_date: '2008-01-27', runtime: 48, still_path: null },
+    // Unaired placeholder — no name, must be DROPPED.
+    { id: 99999, episode_number: 3, name: null, overview: null, air_date: null, runtime: null, still_path: null },
+    // Bad episode number, must be DROPPED.
+    { id: 99998, episode_number: 0, name: 'Special', overview: 'x', air_date: null, runtime: 30, still_path: null },
+  ],
+} satisfies TmdbSeasonDetail;
+
+describe('normalizeEpisodes', () => {
+  const eps = normalizeEpisodes(SEASON_FIXTURE);
+
+  it('maps number, name, overview, air date, runtime, still, and tmdb id', () => {
+    expect(eps).toHaveLength(2);
+    expect(eps[0]).toEqual({
+      seasonNumber: 1,
+      episodeNumber: 1,
+      name: 'Pilot',
+      overview: 'Diagnosed with terminal cancer, a chemistry teacher turns to cooking meth.',
+      airDate: '2008-01-20',
+      runtimeMinutes: 58,
+      stillUrl: 'https://image.tmdb.org/t/p/w300/ck00.jpg',
+      tmdbId: 62085,
+    });
+    expect(eps[1]!.stillUrl).toBeNull();
+    expect(eps[1]!.runtimeMinutes).toBe(48);
+  });
+
+  it('drops placeholder rows without a name or positive episode number', () => {
+    expect(eps.map((e) => e.episodeNumber)).toEqual([1, 2]);
+  });
+
+  it('defaults the season number when the payload omits it', () => {
+    const noSeasonNumber = normalizeEpisodes({ episodes: SEASON_FIXTURE.episodes });
+    expect(noSeasonNumber[0]!.seasonNumber).toBe(0);
+  });
+
+  it('handles empty season payloads', () => {
+    expect(normalizeEpisodes({})).toEqual([]);
+    expect(normalizeEpisodes({ episodes: [] })).toEqual([]);
   });
 });

@@ -1,0 +1,12 @@
+import { chromium } from 'playwright';
+const browser = await chromium.launch();
+const page = await (await browser.newContext()).newPage();
+await page.goto('http://localhost:3100/signin', { waitUntil: 'networkidle', timeout: 90000 });
+await page.fill('input[name="email"]', 'adhyanagrawal777@gmail.com');
+await page.fill('input[name="password"]', 'lumora@2007');
+await page.click('button[type="submit"]');
+await page.waitForURL((u) => !u.pathname.startsWith('/signin'), { timeout: 60000 });
+await page.goto('http://localhost:3100/admin', { waitUntil: 'networkidle', timeout: 90000 });
+const tiles = await page.locator('[aria-label="Key metrics"] > div').allInnerTexts();
+console.log(tiles.map(t => t.replace(/\n+/g, ' ')).join('\n'));
+await browser.close();

@@ -1,7 +1,7 @@
 import 'server-only';
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
-import type { MaturityRating, Title, TitleType } from './types';
+import type { CastMember, MaturityRating, Season, Title, TitleType } from './types';
 import type { TitleFilters } from './queries';
 
 /**
@@ -160,6 +160,38 @@ export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[
   return out;
 }
 
+/** Paged listing result: one `range`d page plus the exact matching total. */
+export interface PagedTitles {
+  rows: Title[];
+  /** Total rows matching the filters (from the count, never the page length). */
+  total: number;
+}
+
+/**
+ * Paged variant of {@link repoListTitles} for the admin console. An un-paged
+ * read silently truncates at Supabase's default 1,000-row cap, so this pages
+ * in-DB with `.range()` and asks Postgres for the exact matching count in the
+ * same request (`count: 'exact'` is computed over the FULL filtered set, not
+ * just the page). RLS still applies, so the caller pages through exactly the
+ * rows they are allowed to see — drafts included for `catalog.read` holders.
+ */
+export async function repoListTitlesPaged(
+  filters: TitleFilters & { page: number; pageSize: number },
+): Promise<PagedTitles> {
+  const db = await getSupabaseServerClient();
+
+  let query = db.from('titles').select(TITLE_SELECT, { count: 'exact' });
+  if (filters.type) query = query.eq('type', filters.type);
+  if (filters.query) query = query.ilike('name', `%${filters.query}%`);
+  query = query.order('name', { ascending: true });
+
+  const page = Math.max(1, filters.page);
+  const pageSize = Math.max(1, filters.pageSize);
+  const { data, error, count } = await query.range((page - 1) * pageSize, page * pageSize - 1);
+  if (error) throw new Error(`repoListTitlesPaged: ${error.message}`);
+  return { rows: (data ?? []).map((r) => toTitle(r as unknown as TitleRow)), total: count ?? 0 };
+}
+
 /** Similar titles by shared-genre overlap (transparent v1 rule, Section 13). */
 export async function repoGetSimilarTitles(title: Title, limit = 6): Promise<Title[]> {
   // Pull a candidate pool of the same type and rank by genre overlap in-memory.
@@ -171,4 +203,129 @@ export async function repoGetSimilarTitles(title: Title, limit = 6): Promise<Tit
     .sort((a, b) => b.overlap - a.overlap || (b.t.score ?? 0) - (a.t.score ?? 0))
     .slice(0, limit)
     .map((x) => x.t);
+}
+
+/** Shape of a `seasons` row. */
+interface SeasonRow {
+  id: string;
+  title_id: string;
+  season_number: number;
+  name: string | null;
+  overview: string;
+  air_date: string | null;
+  episode_count: number | null;
+}
+
+/** Shape of an `episodes` row. */
+interface EpisodeRow {
+  id: string;
+  title_id: string;
+  season_id: string | null;
+  season_number: number | null;
+  episode_number: number;
+  name: string;
+  overview: string;
+  air_date: string | null;
+  runtime_minutes: number | null;
+  still_url: string | null;
+}
+
+/** Shape of a `title_people` row joined with its person. */
+interface CastCreditRow {
+  credit_order: number;
+  character: string | null;
+  people: { id: string; name: string; profile_url: string | null } | null;
+}
+
+// Like TITLE_SELECT: opaque select strings + explicit row casts, because the
+// generated Database types carry no FK relationships for these tables.
+const SEASON_SELECT =
+  'id, title_id, season_number, name, overview, air_date, episode_count';
+const EPISODE_SELECT =
+  'id, title_id, season_id, season_number, episode_number, name, overview, ' +
+  'air_date, runtime_minutes, still_url';
+const CAST_SELECT = 'credit_order, character, people ( id, name, profile_url )';
+
+/**
+ * Seasons (with any imported episode rows) for one title, ordered by season
+ * number. Seasons whose episodes haven't been imported yet still return —
+ * their `episodeCount` carries the honest "N episodes" count and `episodes`
+ * stays empty, so the UI never fabricates per-episode detail.
+ */
+export async function repoListSeasonsForTitle(titleId: string): Promise<Season[]> {
+  const db = await getSupabaseServerClient();
+  const { data: seasons, error: seasonErr } = await db
+    .from('seasons')
+    .select(SEASON_SELECT)
+    .eq('title_id', titleId)
+    .order('season_number', { ascending: true });
+  if (seasonErr) throw new Error(`repoListSeasonsForTitle: ${seasonErr.message}`);
+  if (!seasons || seasons.length === 0) return [];
+
+  const { data: episodes, error: episodeErr } = await db
+    .from('episodes')
+    .select(EPISODE_SELECT)
+    .eq('title_id', titleId)
+    .order('season_number', { ascending: true })
+    .order('episode_number', { ascending: true });
+  if (episodeErr) throw new Error(`repoListSeasonsForTitle: ${episodeErr.message}`);
+
+  // Group episode rows under their season (fall back to season_number when the
+  // row somehow lost its season_id link).
+  const bySeasonId = new Map<string, Season['episodes']>();
+  const byNumber = new Map<number, Season['episodes']>();
+  for (const row of (episodes ?? []) as unknown as EpisodeRow[]) {
+    const episode = {
+      id: row.id,
+      seasonNumber: row.season_number ?? 0,
+      episodeNumber: row.episode_number,
+      name: row.name,
+      overview: row.overview,
+      airDate: row.air_date,
+      runtimeMinutes: row.runtime_minutes,
+      stillUrl: row.still_url,
+    };
+    if (row.season_id) {
+      const list = bySeasonId.get(row.season_id) ?? [];
+      list.push(episode);
+      bySeasonId.set(row.season_id, list);
+    } else {
+      const list = byNumber.get(episode.seasonNumber) ?? [];
+      list.push(episode);
+      byNumber.set(episode.seasonNumber, list);
+    }
+  }
+
+  return (seasons as unknown as SeasonRow[]).map((s) => ({
+    id: s.id,
+    seasonNumber: s.season_number,
+    name: s.name,
+    overview: s.overview,
+    airDate: s.air_date,
+    episodeCount: s.episode_count,
+    episodes: bySeasonId.get(s.id) ?? byNumber.get(s.season_number) ?? [],
+  }));
+}
+
+/** Cast credits (person joined) for one title, ordered by billing. */
+export async function repoListCastForTitle(titleId: string): Promise<CastMember[]> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db
+    .from('title_people')
+    .select(CAST_SELECT)
+    .eq('title_id', titleId)
+    .eq('credit_type', 'cast')
+    .order('credit_order', { ascending: true });
+  if (error) throw new Error(`repoListCastForTitle: ${error.message}`);
+  const out: CastMember[] = [];
+  for (const row of (data ?? []) as unknown as CastCreditRow[]) {
+    if (!row.people) continue;
+    out.push({
+      personId: row.people.id,
+      name: row.people.name,
+      character: row.character ?? null,
+      profileUrl: row.people.profile_url ?? null,
+    });
+  }
+  return out;
 }

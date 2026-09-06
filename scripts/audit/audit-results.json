@@ -1,0 +1,84 @@
+{
+  "baseline": {
+    "titles": 3402,
+    "accounts": 1,
+    "profiles": 1,
+    "playback_sessions": 0,
+    "ad_providers": 1,
+    "ad_placements": 5,
+    "audit_logs": 0,
+    "imports": 0,
+    "site_settings": 0,
+    "feature_flags": 0,
+    "ad_placement_slugs": "ERR column ad_placements.slug does not exist",
+    "ad_provider_rows": "ERR column ad_providers.slug does not exist",
+    "stream_sources": "ERR Could not find the table 'public.stream_sources' in the schema cache"
+  },
+  "results": [
+    {
+      "section": "11a. Access control — anonymous",
+      "verdict": "WORKING",
+      "evidence": "GET /admin (no cookies) -> 404; GET /admin/users -> 404; GET / -> 200. Expected 404 for /admin* when anonymous."
+    },
+    {
+      "section": "0. Admin sign-in",
+      "verdict": "WORKING",
+      "evidence": "Signed in, landed on http://localhost:3100/account"
+    },
+    {
+      "section": "1. /admin Dashboard",
+      "verdict": "WORKING",
+      "evidence": "Stat tiles: Titles (total)\n\ni\n\n3,402\n\nTitles (published)\n\ni\n\n3,402\n\nAccounts\n\ni\n\n1\n\nProfiles\n\ni\n\n1\n\nPlayback sessions\n\ni\n\n0\n  DB baseline: titles=3402, accounts=1, profiles=1, playback_sessions=0\n  Audit empty state shown: true\n  consoleErrors=0\n  pageErrors=0\n  http>=400=0"
+    },
+    {
+      "section": "2. /admin/catalog/titles",
+      "verdict": "PARTIALLY WORKING",
+      "evidence": "Rows rendered: 1000 (DB has 3402 titles).\n  Sort by Name: first row before=\"You Maniac\" asc=\"¡Mucha Lucha!\" desc=\"Zoids: Chaotic Century\" (order changed: true)\n  Action buttons disabled (honest affordances): {\"publish\":true,\"archive\":true,\"delete\":true,\"publishTitle\":\"Publish, archive, and delete actions arrive with the catalog-management phase.\"}\n  Dedicated search box: false; select filters: 0 (page has no filter/search UI beyond sorting — noted)\n  consoleErrors=0\n  pageErrors=0\n  http>=400=0 [ADDITIONAL] Page renders 1000 rows but DB has 3416 titles — Supabase default 1000-row cap, no pagination/search/filter UI on the admin titles page (only client-side column sorting). 2416 titles invisible from this screen."
+    },
+    {
+      "section": "7. /admin/settings",
+      "verdict": "WORKING",
+      "evidence": "site_settings rows=0, feature_flags rows=0 in DB. Page table rows: 0. Empty-state text: \"No settings or feature flags stored yetValues configured through the settings phase will appear here. Until then, app behav\"\n  Page excerpt: Skip to content◆Lumora⌂Home▤Browse🎬Movies📺TV⌕Search＋Watchlist☺Account◆ Lumora⌕Search titles, people…Sign in☺Lumora AdminContent operations▦Dashboard⛃Catalog⟳TMDB sync⧉Providers◫Ads☺Users⚙Settings☰Audit✚Health⇪ImportsSettingsSite settings and feature flags from the database (settings.manage), shown read-only. Editing and rollback arrive with the settings phase.⚙No settings or feature flags stored yetValues configured through the settings phase will appear here. Until then, app behavior comes fr\n  consoleErrors=0\n  pageErrors=0\n  http>=400=0"
+    },
+    {
+      "section": "8. /admin/audit",
+      "verdict": "WORKING",
+      "evidence": "audit_logs rows in DB=0. Page table rows: 0. Empty-state: \"No audit events recorded yetActions taken through the admin console will appear here.BrowseAll titlesMoviesTVSearchAccountOvervi\"\n  Page excerpt: Skip to content◆Lumora⌂Home▤Browse🎬Movies📺TV⌕Search＋Watchlist☺Account◆ Lumora⌕Search titles, people…Sign in☺Lumora AdminContent operations▦Dashboard⛃Catalog⟳TMDB sync⧉Providers◫Ads☺Users⚙Settings☰Audit✚Health⇪ImportsAudit logAppend-only record of sensitive actions from the audit_logs table (audit.read) — actor, target, before/after, reason, and outcome.☰No audit events recorded yetActions taken \n  consoleErrors=0\n  pageErrors=0\n  http>=400=0"
+    },
+    {
+      "section": "9. /admin/health",
+      "verdict": "WORKING",
+      "evidence": "Status text found: [\"TMDB sync⧉Providers◫Ads☺Users⚙Settings☰Audit✚Health⇪ImportsHealthDependency configuration as reported by\",\"ApplicationConfiguredServing — this page was rendered by the live server.SupabaseConfiguredConfigured —\",\"TMDBConfiguredConfigured — catalog sync can reach the TMDB API.✚Live health checks arrive with the monit\",\"database, auth, storage, TMDB, and playback providers — with latency, history, and alerting — will be report\",\"app-pages-browser)/./node_modules/next/dist/next-devtools/userspace/app/segment-explorer-node.js\\\\\\\",[\\\\\\\"a\",\"app-pages-internals.js\\\\\\\"],\\\\\\\"SegmentViewNode\\\\\\\"]\\\\n7:\\\\\\\"$Sreact.fragment\\\\\\\"\\\\n18:I[\\\\\\\"(app-pages-browser)/./sr\",\"app/layout\\\\\\\",\\\\\\\"static/chunks/app/layout.js\\\\\\\"],\\\\\\\"Rail\\\\\\\"]\\\\n1b:I[\\\\\\\"(app-pages-browser)/./src/components/sh\",\"app/layout\\\\\\\",\\\\\\\"static/chunks/app/layout.js\\\\\\\"],\\\\\\\"TopBar\\\\\\\"]\\\\n1e:I[\\\\\\\"(app-pages-browser)/./node_modules/ne\"]\n  Badges: \n  Page excerpt: Skip to content◆Lumora⌂Home▤Browse🎬Movies📺TV⌕Search＋Watchlist☺Account◆ Lumora⌕Search titles, people…Sign in☺Lumora AdminContent operations▦Dashboard⛃Catalog⟳TMDB sync⧉Providers◫Ads☺Users⚙Settings☰Audit✚Health⇪ImportsHealthDependency configuration as reported by /api/health. Continuous probes, latency, and per-component status arrive with the monitoring phase.ApplicationConfiguredServing — this page was rendered by the live server.SupabaseConfiguredConfigured — the console reads live data through the RLS-scoped client.TMDBConfiguredConfigured — catalog sync can reach the TMDB API.✚Live health\n  consoleErrors=0\n  pageErrors=0\n  http>=400=0"
+    },
+    {
+      "section": "10. /admin/imports",
+      "verdict": "WORKING",
+      "evidence": "imports rows in DB=0. Page table rows: 0. Empty-state: \"No imports have run yetRuns of the TMDB sync and future CSV/JSON imports will be recorded here.BrowseAll titlesMoviesTVSearchAccountOverviewWatchlistS\" Mentions TMDB sync: true\n  Page excerpt: Skip to content◆Lumora⌂Home▤Browse🎬Movies📺TV⌕Search＋Watchlist☺Account◆ Lumora⌕Search titles, people…Sign in☺Lumora AdminContent operations▦Dashboard⛃Catalog⟳TMDB sync⧉Providers◫Ads☺Users⚙Settings☰Audit✚Health⇪ImportsImportsIngestion jobs recorded in the imports table. The CSV/JSON import wizard arrives with the ingestion phase; the catalog is populated today through the TMDB sync (Catalog → Sync\n  consoleErrors=0\n  pageErrors=0\n  http>=400=0"
+    },
+    {
+      "section": "11b. Access control — signed-in non-admin",
+      "verdict": "WORKING",
+      "evidence": "Viewer (audit-viewer-1788693833388@lumora-test.local) signed in, landed at http://localhost:3100/account. GET /admin as viewer -> HTTP 404; 404 page rendered: true. Body excerpt: \"Skip to content◆Lumora⌂Home▤Browse🎬Movies📺TV⌕Search＋Watchlist☺Account◆ Lumora⌕Search titles, people…Sign in☺404We couldn’t find thatThe page or title you’re looking for may have moved or is no longe\"\n  consoleErrors=1 :: Failed to load resource: the server responded with a status of 404 (Not Found)\n  pageErrors=0\n  http>=400=1 :: 404 GET http://localhost:3100/admin"
+    },
+    {
+      "section": "3. /admin/sync (TMDB sync)",
+      "verdict": "WORKING",
+      "evidence": "Modes: charts default (aria-pressed=true); discover toggle reveals genre/year controls: true; back to charts hides them: true.\n  Genre dropdown options: 29 (from DB genres table: 28) — All genres, Action, Action & Adventure, Adventure, Animation, Comedy, Crime, Documentary, Drama, Family …\n  1-page charts sync result panel: \"Synced 39 movies and 39 series (charts). | 487 seasons · 25 genres · 1 failed to fetch\"\n  Titles in DB: 3416 -> 3416 (delta 0); imports rows: 0; audit_logs rows: 0\n  consoleErrors=0 ; pageErrors=0; http>=400="
+    },
+    {
+      "section": "4. /admin/providers",
+      "verdict": "WORKING",
+      "evidence": "DB providers table rows: 0 (empty in DB).\n  Database-providers section text: \"Database providers\\\",\\\"children\\\":[[\\\"$\\\",\\\"h2\\\",null,{\\\"className\\\":\\\"mb-3 font-display text-lg font-semibold\\\",\\\"children\\\":\\\"Configured in the database\\\"},\\\"$115\\\",\\\"$118\\\",1],\\\"$119\\\"]},\\\"$115\\\",\\\"$117\\\",1],[\\\"$\\\",\\\"section\\\",null,{\\\"aria-label\\\":\\\"Built-in providers\\\",\\\"children\\\":[[\\\"$\\\",\\\"h2\\\"\n  Built-in provider cards rendered: 3 — headings: VSEmbed (Vidsrc)\n  Mentions Vidsrc: true, VSEmbed: true\n  consoleErrors=0 ; pageErrors=0; http>=400="
+    },
+    {
+      "section": "5. /admin/ads",
+      "verdict": "WORKING",
+      "evidence": "Placement rows rendered in table: 5. Expected keys found on page: 5/5 (home-leaderboard, browse-leaderboard, title-rectangle, watch-preroll, watch-banner)\n  DB ad_placements: browse-leaderboard(banner,enabled), home-leaderboard(banner,enabled), title-rectangle(banner,enabled), watch-banner(banner,enabled), watch-preroll(preroll,enabled)\n  Adsterra context on page: \"Adsterra placements across the site — below-the-fold banners plus one skippable player pre-roll.ProviderAdsterra unconfiguredNo Adsterra zone keys are set. Ev\"\n  ad_providers DB row: [{\"key\":\"browse-leaderboard\",\"name\":\"Browse/Movies/TV leaderboard\",\"format\":\"banner\",\"enabled\":true},{\"key\":\"home-leaderboard\",\"name\":\"Home leaderboard\",\"format\":\"banner\",\"enabled\":true},{\"key\":\"title-rectangle\",\"name\":\"Title detail rectangle\",\"format\":\"banner\",\"enabled\":true},{\"key\":\"watch-banner\",\"name\":\"Watch page banner\",\"format\":\"banner\",\"enabled\":true},{\"key\":\"watch-preroll\",\"name\":\"Player pre-roll\",\"format\":\"preroll\",\"enabled\":true}]\n  consoleErrors=0 ; pageErrors=0; http>=400="
+    },
+    {
+      "section": "6. /admin/users",
+      "verdict": "WORKING",
+      "evidence": "1 account row rendered (DB accounts=1: the admin's own account, display_name \"Viewer\", active). Search: \"Viewer\"->1 row, \"viewer\" (case-insensitive)->1 row, \"f42de85c\" (account id)->1 row; \"adhyan\"->0 rows + honest \"No matching accounts\" empty state (accounts table intentionally carries no email). Suspend disabled=true, Revoke disabled=true, both titled \"Suspend and revoke-sessions actions arrive with the user-management phase.\" consoleErrors=0, pageErrors=0, http>=400=0. NOTE: only 1 account exists in the whole system — no test users."
+    }
+  ]
+}

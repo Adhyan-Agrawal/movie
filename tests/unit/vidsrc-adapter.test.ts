@@ -193,11 +193,19 @@ describe('vidsrc adapter', () => {
 });
 
 describe('registry.resolvePlayback', () => {
-  it('returns the resolved source for a valid movie request', async () => {
+  it('returns one source per enabled provider, best (highest priority) first', async () => {
     const resolved = await resolvePlayback(movieTmdb);
     expect(resolved.source).not.toBeNull();
-    expect(resolved.providerId).toBe('vidsrc');
-    expect(resolved.sources).toHaveLength(1);
+    // All four configured providers resolve the same request; the highest
+    // priority provider (vidup, Server 1) wins.
+    expect(resolved.providerId).toBe('vidup');
+    expect(resolved.sources).toHaveLength(4);
+    expect(resolved.sources.map((s) => s.providerId)).toEqual([
+      'vidup',
+      '2embed',
+      'vidsrc',
+      'vidsrc-mov',
+    ]);
     expect(resolved.error).toBeNull();
     expect(resolved.attempted).toContain('vidsrc');
   });

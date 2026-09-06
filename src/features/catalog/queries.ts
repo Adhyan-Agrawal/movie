@@ -1,5 +1,5 @@
 import { features } from '@/lib/env';
-import type { Title, TitleType } from './types';
+import type { CastMember, Season, Title, TitleType } from './types';
 
 /**
  * Read API over the catalog (Section 6: services -> repositories).
@@ -84,6 +84,37 @@ export async function getSimilarTitles(title: Title, limit = 6): Promise<Title[]
     return await repoGetSimilarTitles(title, limit);
   } catch (err) {
     warnFailure('getSimilarTitles', err);
+    return [];
+  }
+}
+
+/**
+ * Seasons (with any imported episodes) for a TV title, ordered by season
+ * number. Returns [] when the title has no seasons or Supabase is not
+ * configured — the UI then renders its honest empty state.
+ */
+export async function listSeasonsForTitle(titleId: string): Promise<Season[]> {
+  if (!features.supabaseConfigured) return [];
+  try {
+    const { repoListSeasonsForTitle } = await import('./repository');
+    return await repoListSeasonsForTitle(titleId);
+  } catch (err) {
+    warnFailure('listSeasonsForTitle', err);
+    return [];
+  }
+}
+
+/**
+ * Cast credits for a title, ordered by billing. Returns [] when the title has
+ * no imported cast or Supabase is not configured.
+ */
+export async function listCastForTitle(titleId: string): Promise<CastMember[]> {
+  if (!features.supabaseConfigured) return [];
+  try {
+    const { repoListCastForTitle } = await import('./repository');
+    return await repoListCastForTitle(titleId);
+  } catch (err) {
+    warnFailure('listCastForTitle', err);
     return [];
   }
 }

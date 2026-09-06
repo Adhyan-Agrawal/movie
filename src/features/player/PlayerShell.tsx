@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
@@ -9,6 +9,11 @@ import type { PlaybackError, PlaybackSource } from '@/lib/providers/types';
 import { type PlayerState, playerStateForError } from './player-states';
 import { PlayerControlsBar } from './PlayerControlsBar';
 import { PreRollAd } from '@/features/ads/PreRollAd';
+import {
+  reportPlaybackEndAction,
+  reportPlaybackHeartbeatAction,
+  reportPlaybackStartAction,
+} from '@/features/playback/session-actions';
 
 /**
  * Player surface (Spec Section 9). Responsive 16:9 external-provider iframe with
@@ -28,7 +33,8 @@ import { PreRollAd } from '@/features/ads/PreRollAd';
  */
 
 export interface PlayerShellProps {
-  title: { name: string; slug: string; type: 'movie' | 'tv' };
+  /** `id` is the catalog title id used for session/watch-history recording. */
+  title: { id: string; name: string; slug: string; type: 'movie' | 'tv' };
   source: PlaybackSource | null;
   error?: PlaybackError | null;
   sources?: PlaybackSource[];
@@ -45,15 +51,14 @@ export interface PlayerShellProps {
 const PREROLL_SESSION_KEY = 'lumora:preroll-shown';
 
 /**
- * TODO(playback-telemetry): iframe/embed providers do not emit reliable
- * heartbeat or completion events, so Lumora must persist its OWN watch-progress
- * (Spec Section 9 & the `watch_progress` table in Section 7). This is an
- * intentional no-op placeholder — wire it to the playback session/heartbeat API
- * (Section 14) once available. It must never scrape the iframe; position will
- * come from Lumora's own controls when native playback lands.
+ * Playback session recording (Spec Sections 9, 14, 18). The external embed
+ * exposes no position telemetry, so Lumora records its OWN session events —
+ * start / heartbeat / end — via server actions into `playback_sessions` (which
+ * drives the account History page). Never a fabricated position: the honest
+ * limitation is "watched on {date}", not a fake progress bar.
  */
-function recordHeartbeat(_input: { positionSeconds?: number }): void {
-  // no-op
+function recordHeartbeat(sessionId: string | null): void {
+  if (sessionId) void reportPlaybackHeartbeatAction(sessionId);
 }
 
 /** Client stub for the "report playback issue" action (Spec Section 9 & 14).
@@ -107,6 +112,13 @@ export function PlayerShell({
   // public player (see the watch route's PUBLIC SOURCE LABELING note).
   const providerName = providerLabel ?? source?.label ?? 'Server 1';
 
+  // Active server: defaults to the highest-priority source; the selector
+  // switches it. Falls back to the default when the selection disappears
+  // (e.g. after a server-side re-resolution).
+  const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
+  const activeSource = sources.find((s) => s.id === activeSourceId) ?? source;
+  const activeHasUrl = Boolean(activeSource?.url);
+
   const [consented, setConsented] = useState(false);
   const [state, setState] = useState<PlayerState>('loading');
   const [reloadKey, setReloadKey] = useState(0);
@@ -125,17 +137,46 @@ export function PlayerShell({
     }
   }, [preroll]);
 
-  const showConsent = hasSource && gate && !consented;
-  const showAd = hasSource && !showConsent && preroll !== null && !adDone;
-  const showIframe = hasSource && (!gate || consented) && adDone;
+  // Gate on the ACTIVE source: if the viewer switched to a server that has no
+  // URL (shouldn't happen — the registry only lists resolvable sources), the
+  // player renders the unavailable panel for that server.
+  const showConsent = activeHasUrl && gate && !consented;
+  const showAd = activeHasUrl && !showConsent && preroll !== null && !adDone;
+  const showIframe = activeHasUrl && (!gate || consented) && adDone;
   const iframeFailed = showIframe && state === 'provider-error';
 
-  // Lumora-owned progress cadence — provider telemetry is unavailable.
+  // Lumora-owned session recording — provider telemetry is unavailable.
+  const sessionIdRef = useRef<string | null>(null);
+  const [sessionReady, setSessionReady] = useState(false);
+
   useEffect(() => {
-    if (!showIframe || state !== 'ready') return;
-    const interval = window.setInterval(() => recordHeartbeat({}), 30_000);
+    if (!showIframe) return;
+    // One session row per player mount (reloadKey re-mounts count as replays).
+    let cancelled = false;
+    sessionIdRef.current = null;
+    void reportPlaybackStartAction(title.id).then((r) => {
+      if (!cancelled && r.ok && r.sessionId) {
+        sessionIdRef.current = r.sessionId;
+        setSessionReady(true);
+      }
+    });
+    return () => {
+      cancelled = true;
+      const id = sessionIdRef.current;
+      if (id) void reportPlaybackEndAction(id);
+      sessionIdRef.current = null;
+      setSessionReady(false);
+    };
+  }, [showIframe, reloadKey, title.id]);
+
+  useEffect(() => {
+    if (!showIframe || !sessionReady) return;
+    const id = sessionIdRef.current;
+    if (!id) return;
+    recordHeartbeat(id); // first beat at mount
+    const interval = window.setInterval(() => recordHeartbeat(id), 30_000);
     return () => window.clearInterval(interval);
-  }, [showIframe, state]);
+  }, [showIframe, sessionReady]);
 
   function handleConsent() {
     setConsented(true);
@@ -165,9 +206,10 @@ export function PlayerShell({
   }
 
   function handleSelectSource(id: string) {
-    // Selecting a source (re)loads it. With one authorized source this reloads
-    // the current one; it becomes a true switch when more providers exist.
+    // Switching servers: the active source changes and the iframe re-mounts
+    // (fresh load) with the newly selected source's URL.
     if (!id) return;
+    setActiveSourceId(id);
     setState('loading');
     setReloadKey((key) => key + 1);
   }
@@ -246,8 +288,8 @@ export function PlayerShell({
                 so we do not lazy-load and delay playback.
             */}
             <iframe
-              key={reloadKey}
-              src={source!.url}
+              key={`${activeSource!.id}-${reloadKey}`}
+              src={activeSource!.url}
               title={`${title.name} — external video player (${providerName})`}
               className="absolute inset-0 h-full w-full border-0"
               referrerPolicy="strict-origin-when-cross-origin"
@@ -265,7 +307,7 @@ export function PlayerShell({
         backHref={`/title/${title.type}/${title.slug}`}
         backLabel={`Back to ${title.name} details`}
         sources={sources}
-        selectedSourceId={source?.id ?? null}
+        selectedSourceId={activeSource?.id ?? null}
         onSelectSource={handleSelectSource}
         onReportIssue={handleReport}
         reported={reported}
