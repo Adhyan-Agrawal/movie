@@ -4,61 +4,25 @@
    - Environments: .env
 
  ✓ Starting...
- ✓ Ready in 3.1s
- ✓ Compiled /middleware in 333ms (170 modules)
- ○ Compiling / ...
- ✓ Compiled / in 4.7s (729 modules)
- GET / 200 in 6823ms
- ○ Compiling /movies ...
- ✓ Compiled /movies in 1604ms (735 modules)
- GET /movies 200 in 2500ms
- ✓ Compiled /tv in 437ms (724 modules)
- GET /tv 200 in 1165ms
- ✓ Compiled /browse in 386ms (727 modules)
- GET /browse 200 in 1206ms
- ○ Compiling /search ...
- ✓ Compiled /search in 846ms (855 modules)
- GET /search 200 in 1339ms
- ○ Compiling /title/[type]/[slug] ...
- ✓ Compiled /title/[type]/[slug] in 840ms (894 modules)
- GET /title/tv/breaking-bad-1396 200 in 3794ms
- ○ Compiling /watch/[type]/[slug] ...
- ✓ Compiled /watch/[type]/[slug] in 1000ms (915 modules)
- GET /watch/tv/breaking-bad-1396?season=1&episode=1 200 in 2661ms
+ ✓ Ready in 3s
+ ○ Compiling /middleware ...
+ ✓ Compiled /middleware in 1011ms (170 modules)
+ ○ Compiling /account ...
+ ✓ Compiled /account in 6.4s (858 modules)
+ GET /account 200 in 7095ms
+ ○ Compiling /_not-found ...
+ ✓ Compiled /_not-found in 986ms (850 modules)
+ GET /admin 404 in 1295ms
+ GET /account 200 in 198ms
+ GET /account 200 in 313ms
  ○ Compiling /admin ...
- ✓ Compiled /admin in 681ms (935 modules)
- GET /admin 200 in 1246ms
- ○ Compiling /account ...
- ✓ Compiled /account in 582ms (947 modules)
- GET /account 200 in 925ms
- ○ Compiling /api/health ...
- ✓ Compiled /api/health in 629ms (964 modules)
- GET /api/health 200 in 852ms
- ○ Compiling /sitemap.xml ...
- ✓ Compiled /sitemap.xml in 774ms (968 modules)
- GET /sitemap.xml 200 in 1250ms
- ✓ Compiled in 1222ms (283 modules)
- ✓ Compiled /watch/[type]/[slug] in 491ms (487 modules)
- GET /watch/movie/the-dark-knight-155 200 in 1670ms
- ✓ Compiled in 429ms (283 modules)
- ✓ Compiled in 280ms (283 modules)
- ✓ Compiled in 286ms (283 modules)
- ✓ Compiled in 952ms (453 modules)
- ✓ Compiled in 256ms (283 modules)
- ✓ Compiled in 397ms (453 modules)
- ✓ Compiled in 302ms (283 modules)
- ✓ Compiled in 403ms (283 modules)
- ✓ Compiled in 282ms (283 modules)
- ✓ Compiled in 221ms (283 modules)
- ✓ Compiled in 235ms (283 modules)
- ✓ Compiled in 354ms (283 modules)
- ✓ Compiled in 457ms (283 modules)
- ○ Compiling /account ...
- ✓ Compiled /account in 1250ms (876 modules)
- GET /account 200 in 1976ms
- ✓ Compiled /admin in 230ms (608 modules)
- GET /admin 200 in 1638ms
- ✓ Compiled /api/health in 306ms (625 modules)
- GET /api/health 200 in 866ms
- GET /account 200 in 323ms
- GET /admin 200 in 378ms
+ ✓ Compiled /admin in 633ms (863 modules)
+ GET /admin 200 in 2110ms
+ ✓ Compiled /api/health in 486ms (880 modules)
+ GET /api/health 200 in 1215ms
+ GET /account 200 in 301ms
+ GET /admin 404 in 113ms
+ GET /account 200 in 252ms
+ GET /admin 404 in 108ms
+ ✓ Compiled in 576ms (431 modules)
+ ✓ Compiled in 487ms (431 modules)

@@ -2,28 +2,50 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
 /**
- * Session-refresh middleware (Spec Section 6).
+ * Session-refresh + admin-gate middleware (Spec Sections 6, 8).
  *
- * Server Components cannot write cookies, so the server Supabase client
- * (`src/lib/supabase/server.ts`) intentionally swallows cookie writes and
- * relies on THIS middleware to rotate the auth session. On every matched
- * request we construct a request-scoped Supabase client, call `getUser()` to
- * refresh an expiring access token, and forward any refreshed auth cookies onto
- * both the request (for downstream Server Components in the same pass) and the
- * response (so the browser stores them).
+ * Session refresh: Server Components cannot write cookies, so the server
+ * Supabase client (`src/lib/supabase/server.ts`) intentionally swallows cookie
+ * writes and relies on THIS middleware to rotate the auth session. On every
+ * matched request we construct a request-scoped Supabase client, call
+ * `getUser()` to refresh an expiring access token, and forward any refreshed
+ * auth cookies onto both the request and the response.
  *
- * If Supabase isn't configured yet (local UI work), we no-op and pass through.
+ * Admin gate: /admin is authorized HERE, before any rendering starts, so that
+ * unauthorized requests get a genuine HTTP 404. (A `notFound()` thrown inside
+ * the admin layout still renders the not-found UI, but the segment has a
+ * `loading.tsx` streaming boundary — the 200 status is already sent by the time
+ * the check resolves, and a 200 would confirm the console exists.) We rewrite
+ * to an unmatched path instead of redirecting, so the URL stays `/admin` and
+ * the response is indistinguishable from a route that never existed.
  *
- * NOTE: this does not yet enforce route authorization — protected admin/account
- * routes gate via `requirePermission` in their own server components + RLS. This
- * middleware only keeps the session fresh.
+ * If Supabase isn't configured (mock mode), every admin check fails closed.
  */
+
+/** Any one of these grants console entry — mirrors ADMIN_PERMISSIONS in the admin layout. */
+const ADMIN_PERMISSION_KEYS = [
+  'catalog.read',
+  'users.read',
+  'settings.manage',
+  'analytics.read',
+  'audit.read',
+  'provider.manage',
+  'ads.manage',
+  'roles.manage',
+] as const;
+
+/** An unmatched path: rewriting here yields the standard 404 + not-found page. */
+const NOT_FOUND_PATH = '/-not-found';
+
 export async function middleware(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // Supabase not configured — nothing to refresh.
+  // Supabase not configured — nothing to refresh, and every admin check fails closed.
   if (!url || !anonKey) {
+    if (request.nextUrl.pathname.startsWith('/admin')) {
+      return NextResponse.rewrite(new URL(NOT_FOUND_PATH, request.url));
+    }
     return NextResponse.next({ request });
   }
 
@@ -50,10 +72,51 @@ export async function middleware(request: NextRequest) {
 
   // Touching getUser() triggers the token refresh + setAll() above when needed.
   // Never throw out of middleware — a transient auth error must not 500 the app.
+  let userId: string | null = null;
   try {
-    await supabase.auth.getUser();
+    const { data } = await supabase.auth.getUser();
+    userId = data.user?.id ?? null;
   } catch {
     // Ignore; the request proceeds unauthenticated and downstream RLS/guards apply.
+  }
+
+  // Admin gate (runs BEFORE rendering, so the 404 status is never streamed away).
+  if (request.nextUrl.pathname.startsWith('/admin')) {
+    let authorized = false;
+    if (userId) {
+      try {
+        // Same 3-step resolution as `hasPermission` in check.ts (flat queries —
+        // the nested-select type shape doesn't match PostgREST's embed output).
+        // Runs under RLS with the user's session (self-readable memberships).
+        const { data: memberships } = await supabase
+          .from('account_members')
+          .select('role_id')
+          .eq('account_id', userId);
+        const roleIds = (memberships ?? []).map((m) => m.role_id);
+
+        if (roleIds.length > 0) {
+          const { data: grants } = await supabase
+            .from('role_permissions')
+            .select('permission_id')
+            .in('role_id', roleIds);
+          const permissionIds = [...new Set((grants ?? []).map((g) => g.permission_id))];
+
+          if (permissionIds.length > 0) {
+            const { data: perms } = await supabase
+              .from('permissions')
+              .select('key')
+              .in('id', permissionIds);
+            const keys = new Set((perms ?? []).map((p) => p.key));
+            authorized = ADMIN_PERMISSION_KEYS.some((k) => keys.has(k));
+          }
+        }
+      } catch {
+        authorized = false;
+      }
+    }
+    if (!authorized) {
+      return NextResponse.rewrite(new URL(NOT_FOUND_PATH, request.url));
+    }
   }
 
   return response;

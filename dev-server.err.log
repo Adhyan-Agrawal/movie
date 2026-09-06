@@ -1,15 +1,17 @@
-playback.resolve {
-  titleId: '257934d3-184e-4ffa-ba4f-d6fdffdfdf24',
-  type: 'tv',
-  providerId: 'vidsrc',
-  sourceKind: 'embed',
-  ok: true
-}
-playback.resolve {
-  titleId: 'ca0b0712-bd97-4188-8158-63d34f33a395',
-  type: 'movie',
-  providerId: 'vidsrc',
-  sourceKind: 'embed',
-  ok: true
-}
-<w> [webpack.cache.PackFileCacheStrategy] Caching failed for pack: Error: ENOENT: no such file or directory, rename 'D:\movie platform\.next\cache\webpack\client-development\1.pack.gz_' -> 'D:\movie platform\.next\cache\webpack\client-development\1.pack.gz'
+middleware { path: '/account', hasUser: false }
+<w> [webpack.cache.PackFileCacheStrategy] Serializing big strings (108kiB) impacts deserialization performance (consider using Buffer instead and decode when needed)
+<w> [webpack.cache.PackFileCacheStrategy] Serializing big strings (259kiB) impacts deserialization performance (consider using Buffer instead and decode when needed)
+middleware { path: '/admin', hasUser: false }
+middleware REWRITE->404 { path: '/admin' }
+middleware { path: '/account', hasUser: false }
+middleware { path: '/account', hasUser: true }
+middleware { path: '/admin', hasUser: true }
+middleware { path: '/api/health', hasUser: true }
+middleware { path: '/account', hasUser: false }
+middleware { path: '/admin', hasUser: false }
+middleware REWRITE->404 { path: '/admin' }
+middleware { path: '/account', hasUser: true }
+middleware { path: '/admin', hasUser: true }
+middleware REWRITE->404 { path: '/admin' }
+<w> [webpack.cache.PackFileCacheStrategy] Serializing big strings (108kiB) impacts deserialization performance (consider using Buffer instead and decode when needed)
+<w> [webpack.cache.PackFileCacheStrategy] Serializing big strings (259kiB) impacts deserialization performance (consider using Buffer instead and decode when needed)

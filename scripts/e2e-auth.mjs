@@ -44,19 +44,18 @@ async function check(path, mustHave, mustNotHave) {
   if (!pass) process.exitCode = 1;
 }
 
-// Signed-in: account shows the email; admin console renders (admin role), not the unauthorized state.
+// Signed-in: account shows the email; admin console renders (admin role), not a 404.
 await check('/account', ['Signed in as', email], ['Sign in to continue']);
-await check('/admin', ['Admin', 'Titles', 'Users'], ['Admin access required']);
+await check('/admin', ['Admin', 'Titles', 'Users'], []);
 await check('/api/health', ['status'], []);
 
-// Anonymous: account + admin show their unauthorized states.
+// Anonymous: account shows its sign-in state; /admin must 404 (existence hidden).
 console.log('\nAnonymous checks:');
 const a1 = await fetch(`${BASE}/account`);
 const h1 = await a1.text();
 console.log(`${a1.status} /account -> ${h1.includes('Sign in to continue') ? 'unauthorized state ✓' : 'NOT GATED ✗'}`);
 const a2 = await fetch(`${BASE}/admin`);
-const h2 = await a2.text();
-console.log(`${a2.status} /admin -> ${h2.includes('Admin access required') ? 'unauthorized state ✓' : 'NOT GATED ✗'}`);
+console.log(`${a2.status} /admin -> ${a2.status === 404 ? '404 (hidden) ✓' : `EXPOSED (status ${a2.status}) ✗`}`);
 
 await supabase.auth.signOut();
 console.log('\nDone.');
