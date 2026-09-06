@@ -35,8 +35,8 @@ const AVAILABILITY: Record<
   },
 };
 
-/** True when the artwork is a real remote image (TMDB-style https URL). */
-function isRemoteUrl(url: string | undefined): url is string {
+/** True when the artwork is a real remote image (TMDB-style http(s) URL). */
+function isRemoteUrl(url: string | undefined): boolean {
   return url !== undefined && (url.startsWith('https://') || url.startsWith('http://'));
 }
 
@@ -69,7 +69,7 @@ export async function TitleDetail({
     <article aria-labelledby="title-heading" className="flex flex-col gap-10 pb-8">
       {/* Backdrop hero band */}
       <section className="relative overflow-hidden">
-        {isRemoteUrl(title.backdropUrl) ? (
+        {isRemoteUrl(title.backdropUrl) && title.backdropUrl ? (
           /* Decorative backdrop — the adjacent text carries the meaning. */
           <Image
             src={title.backdropUrl}
@@ -105,7 +105,7 @@ export async function TitleDetail({
                   title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined
                 }
               >
-                {isRemoteUrl(title.posterUrl) ? (
+                {isRemoteUrl(title.posterUrl) && title.posterUrl ? (
                   <Image
                     src={title.posterUrl}
                     alt={`Poster for ${title.name}`}

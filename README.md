@@ -83,8 +83,10 @@ The app runs against the **live Supabase database** (migrations 0001–0004
 applied, RLS on every table, RBAC permission checks wired into the admin
 console and `/api/health`). The catalog reads real titles from Postgres under
 RLS — seeded with real movies/series via `node scripts/seed-real-titles.mjs`
-(see [docs/SETUP.md](docs/SETUP.md)). When Supabase is not configured the app
-degrades gracefully to the local mock catalog. Provider playback resolves from
+and grown through the admin TMDB sync (genre/year filters) plus search
+auto-import (see [docs/SETUP.md](docs/SETUP.md)). There is no mock data: when
+Supabase is not configured or the catalog is empty, the UI renders honest
+empty states. Provider playback resolves from
 each title's real TMDB/IMDb id and is allowlisted at both the server
 (`assertSafeUrl`) and browser (CSP `frame-src`) layers. Later phases (per
 prompt.md Section 19) cover engagement, CMS, commercial (ads/email/analytics),
@@ -93,5 +95,5 @@ and launch hardening.
 ## Getting started
 
 See **[docs/SETUP.md](docs/SETUP.md)** for environment variables, applying
-migrations in order (0001 → 0004), seeding the real catalog, and fallback-mode
-details.
+migrations in order (0001 → 0004), seeding the real catalog, the admin TMDB
+sync, and unconfigured-mode details.

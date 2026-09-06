@@ -113,42 +113,54 @@ node scripts/seed-real-titles.mjs   # 22 curated real titles, idempotent
 ```
 
 This deletes the fictional placeholder titles and upserts real ones as
-published/public. To enrich the catalog with official TMDB metadata (posters,
-certifications, more titles) from a network that can reach api.themoviedb.org:
+published/public.
 
-```bash
-node scripts/seed-tmdb.mjs [--pages=N]   # fetches popular + top-rated
-```
+### Growing the catalog
 
-`seed-tmdb` uses the same slug convention (`<name>-<tmdbId>`), so it refreshes
-the same rows rather than duplicating them. Use only content and provider
-references you are authorized to use.
+Three ways, all using the same slug convention (`<name>-<tmdbId>`) so they
+refresh existing rows rather than duplicating:
+
+1. **Admin sync button** (preferred): sign in as an admin and open **/admin →
+   TMDB sync**. Two modes — *Charts* (popular + top-rated) and *Browse by
+   genre & year* (TMDB discover with genre/year-range filters and up to 50
+   pages per run, so any slice of the catalog can be imported). Requires
+   `catalog.create`; runs server-side with the env key, which never reaches
+   the browser. Imports posters/backdrops, certifications, genres, IMDb ids,
+   and TV seasons.
+2. **Search auto-import**: when a user searches for something the catalog
+   doesn't have, the search action queries TMDB and imports the top matches
+   automatically — the catalog grows with what people look for. Capped per
+   query; degrades silently to local results when TMDB is unreachable.
+3. **CLI**: `node scripts/seed-tmdb.mjs [--pages=N]`.
+
+**Note:** some networks/ISPs block `api.themoviedb.org`. If the sync reports
+it can't reach TMDB, run it from a network with access (e.g. your cloud
+deployment) — the error state says so explicitly.
 
 ### Verify
 
 `node scripts/verify-db.mjs` reports tables/RLS/policy counts and seed rows;
 `node scripts/verify-0004.mjs` confirms the hardening policies landed.
 
-## Mock mode (fallback)
+## Unconfigured mode (no Supabase)
 
-The app is fully runnable **without** Supabase. When
+## Unconfigured mode (no Supabase)
+
+The app still runs **without** Supabase env vars, but shows honest empty
+states instead of sample data — no fabricated content anywhere. When
 `NEXT_PUBLIC_SUPABASE_URL` / `NEXT_PUBLIC_SUPABASE_ANON_KEY` are unset,
 `features.supabaseConfigured` is `false` and:
 
-- Catalog read services fall back to the local mock catalog
-  (`src/features/catalog/mock-data.ts`); home/browse responses are flagged
-  `usingMockData` and the "Showing sample catalog" banner is shown so the UI is
-  honest about the source. With Supabase configured, the repository
-  (`src/features/catalog/repository.ts`) reads live rows under RLS and any
-  transient repository failure degrades back to mock rather than erroring.
+- Catalog read services return empty results / `null`: home and browse pages
+  render their empty-catalog states. (With Supabase configured, the repository
+  `src/features/catalog/repository.ts` reads live rows under RLS; a transient
+  failure logs a warning and renders the same empty states rather than
+  erroring.)
 - The browser/server Supabase client factories throw a descriptive error if
   called — always gate calls behind `features.supabaseConfigured`.
 - Permission checks (`hasPermission`) return `false`, so nothing privileged is
-  exposed: the admin console shows its unauthorized state and `/api/health`
-  returns only the minimal liveness payload.
-
-This lets design, accessibility, and UI work proceed before any infrastructure
-exists. Configure Supabase (steps 2–4) to switch to live data.
+  exposed: `/admin` returns 404 and `/api/health` returns only the minimal
+  liveness payload.
 
 ## Troubleshooting
 

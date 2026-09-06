@@ -4,8 +4,8 @@ import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
 import type { Title } from '../types';
 
-/** True when the artwork is a real remote image (TMDB-style https URL). */
-function isRemoteUrl(url: string | undefined): url is string {
+/** True when the artwork is a real remote image (TMDB-style http(s) URL). */
+function isRemoteUrl(url: string | undefined): boolean {
   return url !== undefined && (url.startsWith('https://') || url.startsWith('http://'));
 }
 
@@ -50,7 +50,7 @@ export function MediaCard({
         )}
         style={title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined}
       >
-        {isRemoteUrl(title.posterUrl) ? (
+        {isRemoteUrl(title.posterUrl) && title.posterUrl ? (
           <Image
             src={title.posterUrl}
             alt={`${title.name} poster`}

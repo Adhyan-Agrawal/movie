@@ -4,8 +4,8 @@ import { Badge } from '@/components/ui/Badge';
 import { buttonClasses } from '@/components/ui/Button';
 import type { Title } from '../types';
 
-/** True when the artwork is a real remote image (TMDB-style https URL). */
-function isRemoteUrl(url: string | undefined): url is string {
+/** True when the artwork is a real remote image (TMDB-style http(s) URL). */
+function isRemoteUrl(url: string | undefined): boolean {
   return url !== undefined && (url.startsWith('https://') || url.startsWith('http://'));
 }
 
@@ -19,7 +19,7 @@ export function Hero({ title }: { title: Title }) {
       aria-labelledby="hero-title"
       className="relative flex min-h-[62vh] flex-col justify-end overflow-hidden md:min-h-[72vh]"
     >
-      {isRemoteUrl(title.backdropUrl) ? (
+      {isRemoteUrl(title.backdropUrl) && title.backdropUrl ? (
         /* Decorative backdrop — the section's text carries the meaning. */
         <Image
           src={title.backdropUrl}

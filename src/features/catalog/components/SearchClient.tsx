@@ -18,7 +18,8 @@ import type { Title } from '../types';
  * server action through `useTransition` so no catalog logic ships to the client.
  */
 
-const TRENDING = ['Aurora Drift', 'Sci-Fi', 'The Lantern District', 'Thriller', 'Emberfall', 'Drama'];
+/** Real genre names only — no fictional title suggestions. */
+const TRENDING = ['Sci-Fi', 'Thriller', 'Drama', 'Crime', 'Fantasy', 'Mystery'];
 const RECENTS_KEY = 'lumora:recent-searches';
 const MAX_RECENTS = 6;
 const DEBOUNCE_MS = 250;
