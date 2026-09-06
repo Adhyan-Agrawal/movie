@@ -15,14 +15,22 @@ const PROVIDER_FRAME_HOSTS = ['https://vsembed.su', 'https://*.vsembed.su'];
  * `frame-src` provider allowlist, `frame-ancestors 'none'` (no one may frame
  * Lumora — matches X-Frame-Options: DENY), and `object-src 'none'`.
  *
- * HONEST LIMITATION: `script-src` includes `'unsafe-inline'` because Next.js
- * injects inline bootstrap/hydration scripts and this app does not yet run a
- * nonce-issuing middleware. That is weaker than the spec's ideal "strict CSP."
- * Tightening to nonce-based `script-src` (removing `'unsafe-inline'`) is a
- * follow-up that belongs in middleware, where a per-request nonce can be minted
- * and threaded into Next's script tags. The framing controls below are the part
- * the spec calls out for the provider embed and are fully enforced today.
+ * HONEST LIMITATIONS:
+ *  - `script-src` includes `'unsafe-inline'` because Next.js injects inline
+ *    bootstrap/hydration scripts and this app does not yet run a nonce-issuing
+ *    middleware. Tightening to nonce-based `script-src` is a follow-up that
+ *    belongs in middleware.
+ *  - DEVELOPMENT ONLY: `'unsafe-eval'` is added because React's dev-mode
+ *    runtime (source maps, error formatting, refresh) uses eval; without it
+ *    client components fail to hydrate. Production builds never include it.
+ * The framing controls below are the part the spec calls out for the provider
+ * embed and are fully enforced today.
  */
+const isDev = process.env.NODE_ENV !== 'production';
+const SCRIPT_SRC = isDev
+  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
+  : "script-src 'self' 'unsafe-inline'";
+
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
   "base-uri 'self'",
@@ -33,7 +41,7 @@ const CONTENT_SECURITY_POLICY = [
   "img-src 'self' https://image.tmdb.org data: blob:",
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
-  "script-src 'self' 'unsafe-inline'",
+  SCRIPT_SRC,
   "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.themoviedb.org",
   "media-src 'self' blob:",
 ].join('; ');

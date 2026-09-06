@@ -8,6 +8,7 @@ import { truncate } from '@/features/catalog/components/title-detail-helpers';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { resolvePlayback } from '@/lib/providers/registry';
 import type { PlaybackRequest } from '@/lib/providers/types';
+import { AdSlot } from '@/features/ads/AdSlot';
 
 const TITLE_TYPES: readonly TitleType[] = ['movie', 'tv'];
 
@@ -140,6 +141,9 @@ export default async function TitlePage({ params }: TitleParams) {
       {/* Escaped so title/synopsis text can never break out of the script tag. */}
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: serializeJsonLd(jsonLd) }} />
       <TitleDetail title={title} availability={availability} />
+      {/* Ad (Spec Section 11): one rectangle below the title details — below the
+          fold, after the content, never between the user and the Play action. */}
+      <AdSlot slot="titleRectangle" className="pb-8" />
     </>
   );
 }

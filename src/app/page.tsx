@@ -4,6 +4,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { getHomeData } from '@/features/catalog/data';
 import { Hero } from '@/features/catalog/components/Hero';
 import { ContinueWatchingRow, MediaRow } from '@/features/catalog/components/MediaRow';
+import { AdSlot } from '@/features/ads/AdSlot';
 
 export default async function HomePage() {
   const { hero, continueWatching, rows, degraded } = await getHomeData();
@@ -40,6 +41,9 @@ export default async function HomePage() {
 
       <div className="flex flex-col gap-10">
         <ContinueWatchingRow entries={continueWatching} />
+        {/* Ad (Spec Section 11): one leaderboard below the fold — after the first
+            content rows, before the rest. Low density by design. */}
+        {rows.length > 1 ? <AdSlot slot="homeLeaderboard" /> : null}
         {rows.map((row) => (
           <MediaRow key={row.id} row={row} />
         ))}

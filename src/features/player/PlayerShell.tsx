@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import type { PlaybackError, PlaybackSource } from '@/lib/providers/types';
 import { type PlayerState, playerStateForError } from './player-states';
 import { PlayerControlsBar } from './PlayerControlsBar';
+import { PreRollAd } from '@/features/ads/PreRollAd';
 
 /**
  * Player surface (Spec Section 9). Responsive 16:9 external-provider iframe with
@@ -15,6 +16,10 @@ import { PlayerControlsBar } from './PlayerControlsBar';
  * and an explicit consent gate. Renders honest loading / consent-required /
  * blocked-unavailable / error states and NEVER presents a broken iframe as the
  * primary experience.
+ *
+ * Commercial (Spec Section 11): when a pre-roll zone is configured, a skippable
+ * ad gate plays ABOVE the player after consent and before the provider iframe
+ * mounts — once per tab session.
  *
  * This component does not scrape, read, or inject scripts into the iframe — it
  * cannot, and must not try. Because embed providers expose no reliable
@@ -29,7 +34,15 @@ export interface PlayerShellProps {
   sources?: PlaybackSource[];
   providerLabel?: string;
   consentRequired?: boolean;
+  /**
+   * Pre-roll ad zone (Spec Section 11). Resolved server-side from env and
+   * passed here — env vars are stripped from client bundles. Null = no pre-roll.
+   */
+  preroll?: { adsterraKey: string; width: number; height: number } | null;
 }
+
+/** SessionStorage marker so the pre-roll shows once per tab session. */
+const PREROLL_SESSION_KEY = 'lumora:preroll-shown';
 
 /**
  * TODO(playback-telemetry): iframe/embed providers do not emit reliable
@@ -84,20 +97,37 @@ export function PlayerShell({
   sources = [],
   providerLabel,
   consentRequired,
+  preroll = null,
 }: PlayerShellProps) {
   const router = useRouter();
 
   const hasSource = Boolean(source?.url);
   const gate = consentRequired ?? source?.consentRequired ?? false;
-  const providerName = providerLabel ?? source?.providerLabel ?? 'an external provider';
+  // Public label only — the upstream provider's real name never renders in the
+  // public player (see the watch route's PUBLIC SOURCE LABELING note).
+  const providerName = providerLabel ?? source?.label ?? 'Server 1';
 
   const [consented, setConsented] = useState(false);
   const [state, setState] = useState<PlayerState>('loading');
   const [reloadKey, setReloadKey] = useState(0);
   const [reported, setReported] = useState(false);
+  // Pre-roll gate: no ad configured = already done. The session-once check
+  // runs after mount (sessionStorage is not available during SSR) so the
+  // initial render matches the server and hydration never mismatches.
+  const [adDone, setAdDone] = useState(!preroll);
+
+  useEffect(() => {
+    if (!preroll) return;
+    try {
+      if (sessionStorage.getItem(PREROLL_SESSION_KEY)) setAdDone(true);
+    } catch {
+      // Private mode — best effort only.
+    }
+  }, [preroll]);
 
   const showConsent = hasSource && gate && !consented;
-  const showIframe = hasSource && (!gate || consented);
+  const showAd = hasSource && !showConsent && preroll !== null && !adDone;
+  const showIframe = hasSource && (!gate || consented) && adDone;
   const iframeFailed = showIframe && state === 'provider-error';
 
   // Lumora-owned progress cadence — provider telemetry is unavailable.
@@ -153,6 +183,22 @@ export function PlayerShell({
           />
         ) : showConsent ? (
           <ConsentPanel providerName={providerName} onLoad={handleConsent} />
+        ) : showAd ? (
+          <PreRollAd
+            adsterraKey={preroll!.adsterraKey}
+            width={preroll!.width}
+            height={preroll!.height}
+            titleName={title.name}
+            onDone={() => {
+              try {
+                sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
+              } catch {
+                // Private mode — best effort only.
+              }
+              setAdDone(true);
+              setState('loading');
+            }}
+          />
         ) : iframeFailed ? (
           <UnavailablePanel
             message={unavailableMessage({ code: 'provider-error', message: '', recoverable: true })}

@@ -1,183 +1,21 @@
-<w> [webpack.cache.PackFileCacheStrategy] Serializing big strings (108kiB) impacts deserialization performance (consider using Buffer instead and decode when needed)
-<w> [webpack.cache.PackFileCacheStrategy] Serializing big strings (259kiB) impacts deserialization performance (consider using Buffer instead and decode when needed)
- ⨯ [Error: Failed to find Server Action "6075210c3e45056cae6e860083c355548883382cfe". This request might be from an older or newer deployment.
-Read more: https://nextjs.org/docs/messages/failed-to-find-server-action]
- ⨯ [Error: Failed to find Server Action "6075210c3e45056cae6e860083c355548883382cfe". This request might be from an older or newer deployment.
-Read more: https://nextjs.org/docs/messages/failed-to-find-server-action] {
-  page: '/signin'
+playback.resolve {
+  titleId: '257934d3-184e-4ffa-ba4f-d6fdffdfdf24',
+  type: 'tv',
+  providerId: 'vidsrc',
+  sourceKind: 'embed',
+  ok: true
 }
-catalog.sync: tv/popular page 1 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 1 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 1 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 1 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 2 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 2 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 2 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 2 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 3 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 3 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 3 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 3 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 4 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 4 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 4 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 4 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 5 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 5 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 5 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 5 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 6 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 6 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 6 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 6 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 7 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 7 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 7 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 7 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 8 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 8 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 8 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 8 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 9 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 9 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 9 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 9 failed { message: 'fetch failed' }
-catalog.sync: tv/popular page 10 failed { message: 'fetch failed' }
-catalog.sync: movie/popular page 10 failed { message: 'fetch failed' }
-catalog.sync: tv/top_rated page 10 failed { message: 'fetch failed' }
-catalog.sync: movie/top_rated page 10 failed { message: 'fetch failed' }
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
- ⨯ ./src/features/admin/ImportWizard.tsx
-Error: 
-
-Caused by:
-    0: Failed to read source code from D:\movie platform\src\features\admin\ImportWizard.tsx
-    1: The system cannot find the file specified. (os error 2)
-
-Import trace for requested module:
-./src/features/admin/ImportWizard.tsx
+playback.resolve {
+  titleId: 'ca0b0712-bd97-4188-8158-63d34f33a395',
+  type: 'movie',
+  providerId: 'vidsrc',
+  sourceKind: 'embed',
+  ok: true
+}
+playback.resolve {
+  titleId: 'ca0b0712-bd97-4188-8158-63d34f33a395',
+  type: 'movie',
+  providerId: 'vidsrc',
+  sourceKind: 'embed',
+  ok: true
+}

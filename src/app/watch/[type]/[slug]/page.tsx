@@ -11,6 +11,8 @@ import type { PlaybackRequest } from '@/lib/providers/types';
 import { resolvePlayback } from '@/lib/providers/registry';
 import { PlayerShell } from '@/features/player/PlayerShell';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
+import { getAdSlot } from '@/features/ads/config';
+import { AdSlot } from '@/features/ads/AdSlot';
 
 /**
  * Watch route (Spec Section 3 & 9). Server component: loads the title, resolves
@@ -83,17 +85,38 @@ export default async function WatchPage({
   const resolved = await resolvePlayback(request);
   const providerConfig = getProviderConfig('vidsrc');
 
-  // Safe diagnostics only (Spec Section 9): provider id, title id, type, and the
-  // resolved source kind. Never log the iframe URL, query strings, or tokens.
+  // Pre-roll ad zone (Spec Section 11): resolved server-side so the key never
+  // ships to the client except inside Adsterra's public embed pattern.
+  const prerollSlot = getAdSlot('watchPreroll');
+  const preroll = prerollSlot.adsterraKey
+    ? { adsterraKey: prerollSlot.adsterraKey, width: prerollSlot.width, height: prerollSlot.height }
+    : null;
+
+  // Safe diagnostics only (Spec Section 9): title id, type, and whether a
+  // source resolved. Never log the provider id/name, iframe URL, query
+  // strings, or tokens — the public payload must not name the upstream source.
   console.warn('playback.resolve', {
     titleId: title.id,
     type: title.type,
-    providerId: resolved.providerId,
     sourceKind: resolved.source?.kind ?? null,
     ok: resolved.source !== null,
   });
 
-  const providerLabel = resolved.source?.providerLabel ?? providerConfig?.displayName ?? 'an external provider';
+  // PUBLIC SOURCE LABELING: the public player never names the upstream
+  // provider — not in labels, ids, or serialized props. Sources are branded
+  // "Server 1", "Server 2", … in resolution order; every identifying field is
+  // overwritten so nothing upstream reaches the client payload. The real
+  // provider identity stays in the admin console and server logs. The consent
+  // copy in PlayerShell still discloses that playback runs via an EXTERNAL
+  // service (cookies/terms apply) — just unbranded.
+  const publicSources = resolved.sources.map((s, i) => ({
+    ...s,
+    id: `server-${i + 1}`,
+    label: `Server ${i + 1}`,
+    providerId: `server-${i + 1}`,
+    providerLabel: `Server ${i + 1}`,
+  }));
+  const providerLabel = 'Server 1';
   const consentRequired = resolved.source?.consentRequired ?? providerConfig?.consentRequired ?? true;
 
   return (
@@ -101,12 +124,17 @@ export default async function WatchPage({
       <div className="mx-auto flex max-w-5xl flex-col gap-5">
         <PlayerShell
           title={{ name: title.name, slug: title.slug, type: title.type }}
-          source={resolved.source}
+          source={publicSources[0] ?? resolved.source}
           error={resolved.error}
-          sources={resolved.sources}
+          sources={publicSources}
           providerLabel={providerLabel}
           consentRequired={consentRequired}
+          preroll={preroll}
         />
+
+        {/* Ad (Spec Section 11): one banner below the player header — never
+            above the fold of the player itself. */}
+        <AdSlot slot="watchBanner" />
 
         <header className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">

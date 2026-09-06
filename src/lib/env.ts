@@ -19,6 +19,10 @@ const serverSchema = z.object({
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
   TMDB_API_KEY: z.string().min(1).optional(),
   TMDB_API_BASE_URL: z.string().url().default('https://api.themoviedb.org/3'),
+  /** Adsterra zone keys (Spec Section 11) — one per ad format/placement. */
+  ADSTERRA_KEY_LEADERBOARD: z.string().min(1).optional(),
+  ADSTERRA_KEY_RECTANGLE: z.string().min(1).optional(),
+  ADSTERRA_KEY_PREROLL: z.string().min(1).optional(),
 });
 
 type PublicEnv = z.infer<typeof publicSchema>;
@@ -58,6 +62,9 @@ export function serverEnv(): ServerEnv {
     SUPABASE_SERVICE_ROLE_KEY: process.env.SUPABASE_SERVICE_ROLE_KEY,
     TMDB_API_KEY: process.env.TMDB_API_KEY,
     TMDB_API_BASE_URL: process.env.TMDB_API_BASE_URL,
+    ADSTERRA_KEY_LEADERBOARD: process.env.ADSTERRA_KEY_LEADERBOARD,
+    ADSTERRA_KEY_RECTANGLE: process.env.ADSTERRA_KEY_RECTANGLE,
+    ADSTERRA_KEY_PREROLL: process.env.ADSTERRA_KEY_PREROLL,
   });
 
   if (!parsed.success) {

@@ -3,6 +3,7 @@ import { Container } from '@/components/ui/Container';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { listAllGenres } from '@/features/catalog/queries';
 import { BrowseResults, parseTitleFilters, type SearchParamsRecord } from '@/features/catalog/components/BrowseResults';
+import { AdSlot } from '@/features/ads/AdSlot';
 
 export const metadata: Metadata = {
   title: 'Browse',
@@ -18,6 +19,8 @@ export default async function BrowsePage({ searchParams }: { searchParams: Promi
     <Container>
       <PageHeader title="Browse" description="Everything on Lumora, filtered your way." />
       <BrowseResults filters={filters} sp={sp} basePath="/browse" genres={genres} />
+      {/* Ad (Spec Section 11): one leaderboard below the results — below the fold. */}
+      <AdSlot slot="browseLeaderboard" />
     </Container>
   );
 }

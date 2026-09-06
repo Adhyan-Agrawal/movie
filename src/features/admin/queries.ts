@@ -149,3 +149,21 @@ export async function listFeatureFlags(): Promise<AdminFeatureFlagRow[]> {
   if (error) throw new Error(`listFeatureFlags failed: ${error.message}`);
   return data ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Ads
+// ---------------------------------------------------------------------------
+
+/** Public ad placements (ad_placements is public-readable when enabled). */
+export async function listAdminAdPlacements(limit = 100): Promise<
+  Array<{ key: string; name: string; format: string; enabled: boolean }>
+> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db
+    .from('ad_placements')
+    .select('key, name, format, enabled')
+    .order('key')
+    .limit(limit);
+  if (error) throw new Error(`listAdminAdPlacements failed: ${error.message}`);
+  return data ?? [];
+}
