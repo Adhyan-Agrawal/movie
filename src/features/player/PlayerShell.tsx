@@ -183,12 +183,17 @@ export function PlayerShell({
               and are NOT edited here; they must add that directive for this
               iframe to load under a strict CSP.
 
-              sandbox: intentionally minimal for an embed provider — allow the
-                player's own scripts and same-origin storage (resume), plus the
-                Remote Playback/presentation API for casting. We deliberately
-                OMIT allow-top-navigation(-by-user-activation) so the embed can
-                never hijack/redirect the top window, and omit allow-popups by
-                default (enable only if the provider contract requires it).
+              sandbox: intentionally ABSENT. The provider's player refuses to
+                run inside a sandboxed frame (it detects the attribute and
+                blocks playback with "This content can't be embedded in a
+                sandboxed frame"), and for a cross-origin embed the
+                `allow-scripts allow-same-origin` combination grants the embed
+                its own origin's full privileges anyway — it isolates nothing.
+                What actually constrains this iframe: the CSP `frame-src`
+                allowlist (only the provider's domain may be framed),
+                `frame-ancestors 'none'` on our pages, the server-side
+                `assertSafeUrl` host allowlist, and cross-origin isolation (its
+                scripts cannot touch our DOM or cookies regardless of sandbox).
               referrerPolicy: send only our origin cross-origin (supports the
                 provider's origin allowlisting without leaking the watch path).
               loading="eager": arriving at /watch IS the intentional play action,
@@ -199,7 +204,6 @@ export function PlayerShell({
               src={source!.url}
               title={`${title.name} — external video player (${providerName})`}
               className="absolute inset-0 h-full w-full border-0"
-              sandbox="allow-scripts allow-same-origin allow-presentation"
               referrerPolicy="strict-origin-when-cross-origin"
               allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
               allowFullScreen

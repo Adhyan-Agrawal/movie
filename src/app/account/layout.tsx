@@ -4,6 +4,7 @@ import { Container } from '@/components/ui/Container';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { AccountNav } from '@/features/account/AccountNav';
 import { UnauthorizedState } from '@/features/account/UnauthorizedState';
+import { SignOutButton } from '@/features/auth/SignOutButton';
 import { features } from '@/lib/env';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 
@@ -41,6 +42,7 @@ export default async function AccountLayout({ children }: { children: React.Reac
             ? `Signed in as ${user.email ?? 'your Lumora account'}`
             : 'Manage your profiles, preferences, and devices.'
         }
+        actions={user ? <SignOutButton /> : undefined}
       />
 
       {user ? (
@@ -54,7 +56,7 @@ export default async function AccountLayout({ children }: { children: React.Reac
         </div>
       ) : (
         <div className="py-10">
-          <UnauthorizedState />
+          <UnauthorizedState next="/account" />
         </div>
       )}
     </Container>

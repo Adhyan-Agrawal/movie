@@ -37,3 +37,28 @@
  ○ Compiling /sitemap.xml ...
  ✓ Compiled /sitemap.xml in 774ms (968 modules)
  GET /sitemap.xml 200 in 1250ms
+ ✓ Compiled in 1222ms (283 modules)
+ ✓ Compiled /watch/[type]/[slug] in 491ms (487 modules)
+ GET /watch/movie/the-dark-knight-155 200 in 1670ms
+ ✓ Compiled in 429ms (283 modules)
+ ✓ Compiled in 280ms (283 modules)
+ ✓ Compiled in 286ms (283 modules)
+ ✓ Compiled in 952ms (453 modules)
+ ✓ Compiled in 256ms (283 modules)
+ ✓ Compiled in 397ms (453 modules)
+ ✓ Compiled in 302ms (283 modules)
+ ✓ Compiled in 403ms (283 modules)
+ ✓ Compiled in 282ms (283 modules)
+ ✓ Compiled in 221ms (283 modules)
+ ✓ Compiled in 235ms (283 modules)
+ ✓ Compiled in 354ms (283 modules)
+ ✓ Compiled in 457ms (283 modules)
+ ○ Compiling /account ...
+ ✓ Compiled /account in 1250ms (876 modules)
+ GET /account 200 in 1976ms
+ ✓ Compiled /admin in 230ms (608 modules)
+ GET /admin 200 in 1638ms
+ ✓ Compiled /api/health in 306ms (625 modules)
+ GET /api/health 200 in 866ms
+ GET /account 200 in 323ms
+ GET /admin 200 in 378ms

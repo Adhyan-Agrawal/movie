@@ -43,6 +43,12 @@ export function TopBar() {
           <span className="hidden sm:inline">Search titles, people…</span>
         </Link>
         <Link
+          href="/signin"
+          className="hidden h-10 items-center rounded-md border border-border bg-surface/60 px-4 text-sm font-medium text-content transition-colors hover:border-border-strong sm:flex"
+        >
+          Sign in
+        </Link>
+        <Link
           href="/account"
           aria-label="Account"
           className="grid h-10 w-10 place-items-center rounded-full border border-border bg-surface-raised text-content-muted transition-colors hover:text-content"

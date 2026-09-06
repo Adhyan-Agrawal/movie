@@ -4,10 +4,11 @@ import { cn } from '@/lib/cn';
 
 /**
  * Reusable "not signed in" panel (Section 0: every feature needs an
- * unauthorized state). Auth routes are not built yet, so both actions link to
- * the home route as a safe placeholder.
+ * unauthorized state). Links to the real sign-in / sign-up routes.
  */
-export function UnauthorizedState({ className }: { className?: string }) {
+export function UnauthorizedState({ className, next }: { className?: string; next?: string }) {
+  const signinHref = next ? `/signin?next=${encodeURIComponent(next)}` : '/signin';
+
   return (
     <div
       className={cn(
@@ -30,14 +31,13 @@ export function UnauthorizedState({ className }: { className?: string }) {
         </p>
       </div>
       <div className="flex flex-wrap items-center justify-center gap-2">
-        <Link href="/" className={buttonClasses({ variant: 'primary' })}>
+        <Link href={signinHref} className={buttonClasses({ variant: 'primary' })}>
           Sign in
         </Link>
-        <Link href="/" className={buttonClasses({ variant: 'ghost' })}>
-          Back to home
+        <Link href="/signup" className={buttonClasses({ variant: 'secondary' })}>
+          Create account
         </Link>
       </div>
-      <p className="text-xs text-content-subtle">Sign-in routes aren’t available in this build yet.</p>
     </div>
   );
 }
