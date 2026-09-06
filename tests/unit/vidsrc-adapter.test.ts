@@ -197,14 +197,14 @@ describe('registry.resolvePlayback', () => {
     const resolved = await resolvePlayback(movieTmdb);
     expect(resolved.source).not.toBeNull();
     // All four configured providers resolve the same request; the highest
-    // priority provider (vidup, Server 1) wins.
-    expect(resolved.providerId).toBe('vidup');
+    // priority provider (vidsrc.mov, Server 1) wins.
+    expect(resolved.providerId).toBe('vidsrc-mov');
     expect(resolved.sources).toHaveLength(4);
     expect(resolved.sources.map((s) => s.providerId)).toEqual([
-      'vidup',
+      'vidsrc-mov',
       '2embed',
       'vidsrc',
-      'vidsrc-mov',
+      'vidup',
     ]);
     expect(resolved.error).toBeNull();
     expect(resolved.attempted).toContain('vidsrc');

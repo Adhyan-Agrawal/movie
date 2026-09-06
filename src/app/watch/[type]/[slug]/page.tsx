@@ -184,7 +184,13 @@ export default async function WatchPage({
     <Container className="py-4 md:py-6">
       <div className="mx-auto flex max-w-5xl flex-col gap-5">
         <PlayerShell
-          title={{ id: title.id, name: title.name, slug: title.slug, type: title.type }}
+          title={{
+            id: title.id,
+            name: title.name,
+            slug: title.slug,
+            type: title.type,
+            ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
+          }}
           source={publicSources[0] ?? resolved.source}
           error={resolved.error}
           sources={publicSources}

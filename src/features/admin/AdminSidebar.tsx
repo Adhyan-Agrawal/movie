@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/cn';
+import { Logo } from '@/components/ui/Logo';
 import { ADMIN_NAV, type AdminNavItem } from './nav';
 
 /**
@@ -50,7 +51,9 @@ export function AdminSidebar() {
       )}
     >
       <div className="hidden px-3 py-4 md:block">
-        <p className="font-display text-sm font-bold text-content">Lumora Admin</p>
+        <p className="flex items-center gap-2 font-display text-sm font-bold text-content">
+          <Logo size={18} /> Lumora Admin
+        </p>
         <p className="text-xs text-content-subtle">Content operations</p>
       </div>
       <ul className="flex gap-1 overflow-x-auto py-2 md:flex-col md:overflow-visible md:py-0">

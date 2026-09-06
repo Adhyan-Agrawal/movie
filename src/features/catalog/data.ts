@@ -19,6 +19,12 @@ export interface HomeData {
   rows: MediaRow[];
   /** True when the live catalog could not be read (unconfigured or DB error). */
   degraded: boolean;
+  /**
+   * True when the request carries a session. Signed-in viewers get the
+   * server-side continue-watching row; guests get the browser-local guest row
+   * instead — one or the other, never both (Spec Sections 4, 8).
+   */
+  signedIn: boolean;
 }
 
 /** Build home rows (featured hero + genre/newest rows) from a live title set. */
@@ -77,17 +83,31 @@ async function loadContinueWatching(): Promise<ContinueWatchingEntry[]> {
   }
 }
 
+/** True when the request carries a session (drives guest vs. server rows). */
+async function loadSignedIn(): Promise<boolean> {
+  if (!features.supabaseConfigured) return false;
+  try {
+    const { isSignedIn } = await import('@/features/playback/progress-queries');
+    return await isSignedIn();
+  } catch {
+    return false;
+  }
+}
+
 export async function getHomeData(): Promise<HomeData> {
   if (!features.supabaseConfigured) {
-    return { hero: null, continueWatching: [], rows: [], degraded: true };
+    return { hero: null, continueWatching: [], rows: [], degraded: true, signedIn: false };
   }
 
   try {
-    const titles = await listTitles({ sort: 'trending' });
-    const continueWatching = await loadContinueWatching();
+    const [titles, continueWatching, signedIn] = await Promise.all([
+      listTitles({ sort: 'trending' }),
+      loadContinueWatching(),
+      loadSignedIn(),
+    ]);
     if (!titles.length) {
       // DB reachable but empty catalog — honest empty state, not mock data.
-      return { hero: null, continueWatching, rows: [], degraded: false };
+      return { hero: null, continueWatching, rows: [], degraded: false, signedIn };
     }
 
     const hero = titles.find((t) => t.featured) ?? titles[0]!;
@@ -98,11 +118,12 @@ export async function getHomeData(): Promise<HomeData> {
       continueWatching,
       rows,
       degraded: false,
+      signedIn,
     };
   } catch (err) {
     console.warn('catalog.getHomeData: repository failed, returning empty catalog', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return { hero: null, continueWatching: [], rows: [], degraded: true };
+    return { hero: null, continueWatching: [], rows: [], degraded: true, signedIn: false };
   }
 }

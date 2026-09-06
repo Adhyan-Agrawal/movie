@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
 import { cn } from '@/lib/cn';
+import { Logo } from '@/components/ui/Logo';
 
 /**
  * Top bar with a command-search entry point (Section 5). Becomes opaque on
@@ -26,8 +27,9 @@ export function TopBar() {
         scrolled ? 'border-b border-border bg-base/85 backdrop-blur-md' : 'bg-transparent',
       )}
     >
-      <Link href="/" className="font-display text-lg font-bold md:hidden" aria-label="Lumora home">
-        <span className="text-primary">◆</span> Lumora
+      <Link href="/" className="flex items-center gap-2 font-display text-lg font-bold md:hidden" aria-label="Lumora home">
+        <Logo size={24} priority />
+        <span>Lumora</span>
       </Link>
 
       <div className="ml-auto flex items-center gap-3">

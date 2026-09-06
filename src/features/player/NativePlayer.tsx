@@ -3,14 +3,17 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Hls from 'hls.js';
 import { reportProgressAction } from '@/features/playback/progress-actions';
+import { updateGuestPosition } from '@/features/playback/guest-watch';
 
 /**
  * Native HTML5 player (Spec Section 9) for Lumora-hosted mp4/hls/dash sources.
  *
  * Unlike the external embed this player owns real telemetry: timeupdate (throttled),
  * pause, and ended all report the TRUE position to watch_progress, which drives
- * resume and the continue-watching row. Everything is fire-and-forget — a failed
- * report must never interrupt playback.
+ * resume and the continue-watching row. Guests (signed out) get the same feature
+ * locally: when the server report has no session to attach to, the position is
+ * written to this browser's guest store instead. Everything is fire-and-forget —
+ * a failed report must never interrupt playback.
  *
  * HLS strategy: native HLS where the browser supports it (Safari), hls.js via
  * MSE elsewhere, and an honest "unsupported" state when neither works. DASH is
@@ -21,6 +24,8 @@ import { reportProgressAction } from '@/features/playback/progress-actions';
 export interface NativePlayerProps {
   source: { url: string; kind: 'mp4' | 'hls' | 'dash' };
   titleId: string;
+  /** Title slug — the guest (localStorage) fallback key. */
+  titleSlug: string;
   episodeId?: string;
   /** Saved resume position (seconds), applied once after metadata loads. */
   initialPosition?: number;
@@ -36,6 +41,7 @@ const REPORT_INTERVAL_SECONDS = 5;
 export function NativePlayer({
   source,
   titleId,
+  titleSlug,
   episodeId,
   initialPosition,
   onReady,
@@ -48,16 +54,26 @@ export function NativePlayer({
   const lastReportedRef = useRef(0);
 
   // Report the current position; fire-and-forget, never throws into playback.
+  // Signed-out viewers have no watch_progress row — their position goes to the
+  // local guest store instead so their continue-watching row still works.
   const report = useCallback(
     (video: HTMLVideoElement) => {
+      const positionSeconds = video.currentTime;
+      const durationSeconds = Number.isFinite(video.duration) ? video.duration : undefined;
       void reportProgressAction({
         titleId,
         ...(episodeId ? { episodeId } : {}),
-        positionSeconds: video.currentTime,
-        durationSeconds: Number.isFinite(video.duration) ? video.duration : undefined,
-      }).catch(() => {});
+        positionSeconds,
+        durationSeconds,
+      })
+        .then((result) => {
+          if (!result.ok) updateGuestPosition(titleSlug, positionSeconds, durationSeconds);
+        })
+        .catch(() => {
+          updateGuestPosition(titleSlug, positionSeconds, durationSeconds);
+        });
     },
-    [titleId, episodeId],
+    [titleId, titleSlug, episodeId],
   );
 
   useEffect(() => {

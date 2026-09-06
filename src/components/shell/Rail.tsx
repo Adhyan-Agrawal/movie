@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/cn';
+import { Logo } from '@/components/ui/Logo';
 import { ACCOUNT_NAV, PRIMARY_NAV, type NavItem } from './nav-items';
 
 function isActive(pathname: string, href: string): boolean {
@@ -49,9 +50,7 @@ export function Rail() {
     >
       <div className="flex flex-col gap-1">
         <Link href="/" className="mb-4 flex h-12 items-center gap-3 px-3" aria-label="Lumora home">
-          <span aria-hidden="true" className="grid w-6 shrink-0 place-items-center text-xl text-primary">
-            ◆
-          </span>
+          <Logo size={26} className="w-6 shrink-0" priority />
           <span className="font-display text-lg font-bold opacity-0 transition-opacity duration-150 group-hover/rail:opacity-100">
             Lumora
           </span>

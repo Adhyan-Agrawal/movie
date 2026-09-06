@@ -74,8 +74,8 @@ export interface ProviderConfig {
  *
  * PUBLIC NUMBERING (do not change without updating the watch route): sources
  * are labeled "Server 1..N" in registry priority order, so priority defines
- * the public server number — vidup = Server 1, 2embed = Server 2, VSEmbed =
- * Server 3, vidsrc.mov = Server 4.
+ * the public server number — vidsrc.mov = Server 1, 2embed = Server 2, VSEmbed =
+ * Server 3, vidup = Server 4.
  *
  * VERIFICATION STATUS (Spec Section 0 — never claim an integration works
  * without testing):
@@ -102,7 +102,7 @@ export const VIDUP_PROVIDER_CONFIG: ProviderConfig = {
   tvSeriesPathTemplate: '/tv/{id}',
   episodePathTemplate: '/tv/{id}/{season}/{episode}',
   shorthandEpisodeTemplate: '/tv/{id}/{season}/{episode}',
-  defaultPriority: 400, // Server 1
+  defaultPriority: 100, // Server 4
   timeoutMs: 8000,
   enabledRegions: ['*'],
   consentRequired: true,
@@ -163,7 +163,7 @@ export const MOVSRC_PROVIDER_CONFIG: ProviderConfig = {
   tvSeriesPathTemplate: '/embed/tv/{id}',
   episodePathTemplate: '/embed/tv/{id}/{season}/{episode}',
   shorthandEpisodeTemplate: '/embed/tv/{id}/{season}/{episode}',
-  defaultPriority: 100, // Server 4
+  defaultPriority: 400, // Server 1
   timeoutMs: 8000,
   enabledRegions: ['*'],
   consentRequired: true,

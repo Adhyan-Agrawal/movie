@@ -110,6 +110,7 @@ export interface TmdbMovieDetail {
   release_dates?: { results?: { iso_3166_1: string; release_dates?: { certification: string }[] }[] };
   external_ids?: { imdb_id: string | null };
   credits?: TmdbCredits;
+  videos?: TmdbVideos;
 }
 
 export interface TmdbTvDetail {
@@ -128,6 +129,7 @@ export interface TmdbTvDetail {
   content_ratings?: { results?: { iso_3166_1: string; rating: string }[] };
   seasons?: TmdbSeason[];
   credits?: TmdbCredits;
+  videos?: TmdbVideos;
 }
 
 export interface NormalizedSeason {
@@ -181,6 +183,8 @@ export interface NormalizedTitle {
   seasons: Omit<NormalizedSeason, 'titleId'>[];
   /** Top-billed cast (movies and TV share TMDB's `credits` payload shape). */
   cast: NormalizedCastMember[];
+  /** Official YouTube trailer URL from the `videos` payload, when present. */
+  trailerUrl: string | null;
 }
 
 export function slugify(s: string): string {
@@ -231,6 +235,7 @@ export function normalizeMovie(d: TmdbMovieDetail): NormalizedTitle | null {
     genres: (d.genres ?? []).map((g) => g.name),
     seasons: [],
     cast: normalizeCast(d.credits),
+    trailerUrl: normalizeTrailer(d.videos),
   };
 }
 
@@ -266,6 +271,7 @@ export function normalizeTv(d: TmdbTvDetail): NormalizedTitle | null {
         episodeCount: s.episode_count,
       })),
     cast: normalizeCast(d.credits),
+    trailerUrl: normalizeTrailer(d.videos),
   };
 }
 

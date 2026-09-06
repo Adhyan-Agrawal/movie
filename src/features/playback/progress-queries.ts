@@ -50,6 +50,13 @@ export async function getResumePosition(
   return { positionSeconds: data.position_seconds, progress: data.progress };
 }
 
+/** True when the request carries a signed-in session. */
+export async function isSignedIn(): Promise<boolean> {
+  const db = await getSupabaseServerClient();
+  const { data } = await db.auth.getUser();
+  return data.user !== null;
+}
+
 /** Recent embed sessions considered for the continue-watching fallback. */
 const SESSION_WINDOW_DAYS = 30;
 /** Upper bound on session rows scanned while deduplicating titles. */

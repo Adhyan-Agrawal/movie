@@ -9,6 +9,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { MediaRow } from './MediaRow';
 import { SeasonEpisodeList } from './SeasonEpisodeList';
 import { WatchlistButton } from './WatchlistButton';
+import { TrailerButton } from './TrailerButton';
 import { ShareButton } from './ShareButton';
 import { formatRuntime } from './title-detail-helpers';
 import { getSimilarTitles, listCastForTitle, listSeasonsForTitle } from '../queries';
@@ -202,15 +203,7 @@ export async function TitleDetail({
                 <WatchlistButton titleId={title.id} titleName={title.name} initialInWatchlist={initialInWatchlist} />
 
                 {title.trailerUrl ? (
-                  <a
-                    href={title.trailerUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    aria-label={`Watch the trailer for ${title.name} (opens in a new tab)`}
-                    className={buttonClasses({ size: 'lg', variant: 'secondary' })}
-                  >
-                    <span aria-hidden="true">▶</span> Trailer
-                  </a>
+                  <TrailerButton trailerUrl={title.trailerUrl} titleName={title.name} />
                 ) : null}
 
                 <ShareButton url={shareUrl} titleName={title.name} />

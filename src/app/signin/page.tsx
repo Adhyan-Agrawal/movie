@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Container } from '@/components/ui/Container';
 import { buttonClasses } from '@/components/ui/Button';
+import { Logo } from '@/components/ui/Logo';
 import { SignInForm } from '@/features/auth/SignInForm';
 
 export const metadata: Metadata = {
@@ -30,8 +31,9 @@ export default async function SignInPage({
     <Container className="pb-16">
       <div className="mx-auto flex max-w-md flex-col gap-6 py-12">
         <div className="flex flex-col items-center gap-1.5 text-center">
-          <Link href="/" className="font-display text-2xl font-bold" aria-label="Lumora home">
-            <span className="text-primary">◆</span> Lumora
+          <Link href="/" className="flex items-center gap-2 font-display text-2xl font-bold" aria-label="Lumora home">
+            <Logo size={28} />
+            <span>Lumora</span>
           </Link>
           <h1 className="text-xl font-semibold text-content">Sign in to Lumora</h1>
           <p className="text-sm text-content-muted">

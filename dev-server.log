@@ -5,13 +5,125 @@
 
  ✓ Starting...
  ✓ Ready in 3.2s
- ✓ Compiled /middleware in 303ms (170 modules)
+ ✓ Compiled /middleware in 328ms (170 modules)
+ ○ Compiling /watch/[type]/[slug] ...
+ ✓ Compiled /watch/[type]/[slug] in 2.8s (864 modules)
+ GET /watch/movie/the-dark-knight-155 200 in 5659ms
+ ✓ Compiled in 2.1s (268 modules)
+ ✓ Compiled in 288ms (268 modules)
+ ✓ Compiled in 504ms (269 modules)
+ ✓ Compiled in 177ms (269 modules)
+ ✓ Compiled in 288ms (269 modules)
+ ✓ Compiled in 265ms (269 modules)
+ ✓ Compiled in 243ms (269 modules)
+ ✓ Compiled in 194ms (269 modules)
+ ✓ Compiled in 228ms (269 modules)
+ ✓ Compiled in 194ms (269 modules)
+ ✓ Compiled in 220ms (269 modules)
+ ✓ Compiled in 189ms (269 modules)
+ ✓ Compiled in 181ms (269 modules)
+ ✓ Compiled in 185ms (269 modules)
+ ✓ Compiled in 188ms (269 modules)
+ ✓ Compiled in 176ms (269 modules)
+ ✓ Compiled in 190ms (269 modules)
+ ✓ Compiled in 240ms (269 modules)
+ ✓ Compiled in 191ms (269 modules)
+ ✓ Compiled in 524ms (269 modules)
+ ✓ Compiled in 286ms (269 modules)
+ ○ Compiling /signin ...
+ ✓ Compiled /signin in 809ms (780 modules)
+ GET /signin 200 in 1376ms
+ ○ Compiling /account ...
+ ✓ Compiled /account in 863ms (871 modules)
+ GET /account 200 in 1789ms
+ POST /signin 303 in 2836ms
+ ✓ Compiled /watch/[type]/[slug] in 404ms (654 modules)
+ GET /watch/movie/the-dark-knight-155 200 in 1777ms
+ ✓ Compiled /api/ad-frame in 355ms (932 modules)
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 568ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 78ms
  ○ Compiling / ...
- ✓ Compiled / in 3s (769 modules)
- GET / 200 in 5446ms
- ○ Compiling /api/ad-frame ...
- ✓ Compiled /api/ad-frame in 867ms (786 modules)
- GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 1071ms
- GET / 200 in 942ms
- ✓ Compiled in 329ms (269 modules)
- ✓ Compiled in 280ms (269 modules)
+ ✓ Compiled / in 761ms (991 modules)
+ GET / 200 in 5643ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 69ms
+ GET / 200 in 2604ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 23ms
+ GET /watch/movie/inception-27205 200 in 885ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 26ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 31ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 24ms
+ GET / 200 in 1671ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 49ms
+ GET /signin 200 in 220ms
+ GET /account 200 in 392ms
+ POST /signin 303 in 983ms
+ GET / 200 in 1627ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 23ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 70ms
+ GET /signin 200 in 174ms
+ POST /signin 303 in 1214ms
+ GET /account 200 in 898ms
+ GET /watch/movie/the-dark-knight-155 200 in 1000ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 35ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 25ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 44ms
+ GET / 200 in 3037ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 72ms
+ GET / 200 in 1377ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 30ms
+ GET /watch/movie/inception-27205 200 in 912ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 27ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 26ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 23ms
+ GET / 200 in 2115ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 55ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 56ms
+ GET /signin 200 in 201ms
+ POST /signin 303 in 1224ms
+ GET /account 200 in 490ms
+ GET / 200 in 1920ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 26ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 45ms
+ GET /signin 200 in 149ms
+ POST /signin 303 in 881ms
+ GET /account 200 in 579ms
+ GET /watch/movie/the-dark-knight-155 200 in 688ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 26ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 29ms
+ POST /watch/movie/the-dark-knight-155 200 in 488ms
+ POST /watch/movie/the-dark-knight-155 200 in 126ms
+ GET / 200 in 2899ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 25ms
+ GET / 200 in 1436ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 22ms
+ GET /watch/movie/inception-27205 200 in 500ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 30ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 31ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 25ms
+ POST /watch/movie/inception-27205 200 in 53ms
+ GET / 200 in 1811ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 27ms
+ GET /signin 200 in 164ms
+ GET /account 200 in 376ms
+ POST /signin 303 in 1057ms
+ GET / 200 in 1580ms
+ GET /api/ad-frame?key=b1eebe8f0c49ff6b548d2ff5a184c45d&w=728&h=90 200 in 48ms
+ ✓ Compiled in 1778ms (1137 modules)
+ ✓ Compiled in 217ms (294 modules)
+ ✓ Compiled in 1161ms (967 modules)
+ ✓ Compiled in 795ms (969 modules)
+ ✓ Compiled in 620ms (969 modules)
+ ✓ Compiled in 732ms (969 modules)
+ ✓ Compiled in 222ms (295 modules)
+ ✓ Compiled in 353ms (295 modules)
+ ✓ Compiled in 323ms (295 modules)
+ ✓ Compiled in 243ms (295 modules)
+ ✓ Compiled in 214ms (295 modules)
+ ✓ Compiled in 670ms (969 modules)
+ ✓ Compiled in 1061ms (970 modules)
+ ✓ Compiled /icon.png in 437ms (692 modules)
+ GET /icon.png 200 in 642ms
+ ○ Compiling /signin ...
+ ✓ Compiled /signin in 895ms (1011 modules)
+ GET /signin 200 in 1341ms
+ GET / 200 in 2792ms

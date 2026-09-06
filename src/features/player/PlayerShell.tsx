@@ -15,6 +15,7 @@ import {
   reportPlaybackHeartbeatAction,
   reportPlaybackStartAction,
 } from '@/features/playback/session-actions';
+import { recordGuestWatch } from '@/features/playback/guest-watch';
 
 /**
  * Player surface (Spec Section 9). Responsive 16:9 external-provider iframe with
@@ -39,7 +40,14 @@ import {
 
 export interface PlayerShellProps {
   /** `id` is the catalog title id used for session/watch-history recording. */
-  title: { id: string; name: string; slug: string; type: 'movie' | 'tv' };
+  title: {
+    id: string;
+    name: string;
+    slug: string;
+    type: 'movie' | 'tv';
+    /** Poster art for the guest (localStorage) continue-watching entry. */
+    posterUrl?: string;
+  };
   source: PlaybackSource | null;
   error?: PlaybackError | null;
   sources?: PlaybackSource[];
@@ -177,9 +185,20 @@ export function PlayerShell({
     let cancelled = false;
     sessionIdRef.current = null;
     void reportPlaybackStartAction(title.id).then((r) => {
-      if (!cancelled && r.ok && r.sessionId) {
+      if (cancelled) return;
+      if (r.ok && r.sessionId) {
         sessionIdRef.current = r.sessionId;
         setSessionReady(true);
+      } else {
+        // Guest (no session): record the watch in THIS browser's local guest
+        // store so their continue-watching row works too — never another
+        // user's data (signed-in rows live server-side under RLS).
+        recordGuestWatch({
+          slug: title.slug,
+          type: title.type,
+          name: title.name,
+          ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
+        });
       }
     });
     return () => {
@@ -189,7 +208,7 @@ export function PlayerShell({
       sessionIdRef.current = null;
       setSessionReady(false);
     };
-  }, [showPlayer, reloadKey, title.id]);
+  }, [showPlayer, reloadKey, title.id, title.slug, title.type, title.name, title.posterUrl]);
 
   useEffect(() => {
     if (!showPlayer || !sessionReady) return;
@@ -298,6 +317,7 @@ export function PlayerShell({
                 key={`${activeSource!.id}-${reloadKey}`}
                 source={{ url: activeSource!.url!, kind: nativeKind! }}
                 titleId={title.id}
+                titleSlug={title.slug}
                 {...(episodeId ? { episodeId } : {})}
                 {...(initialPosition !== undefined ? { initialPosition } : {})}
                 onReady={handleNativeReady}

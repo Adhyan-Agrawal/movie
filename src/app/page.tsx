@@ -4,10 +4,11 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { getHomeData } from '@/features/catalog/data';
 import { Hero } from '@/features/catalog/components/Hero';
 import { ContinueWatchingRow, MediaRow } from '@/features/catalog/components/MediaRow';
+import { GuestContinueWatchingRow } from '@/features/catalog/components/GuestContinueWatchingRow';
 import { AdSlot } from '@/features/ads/AdSlot';
 
 export default async function HomePage() {
-  const { hero, continueWatching, rows, degraded } = await getHomeData();
+  const { hero, continueWatching, rows, degraded, signedIn } = await getHomeData();
 
   // Honest empty states: no mock fallback, no fabricated rows.
   if (!hero) {
@@ -40,7 +41,14 @@ export default async function HomePage() {
       <Hero title={hero} />
 
       <div className="flex flex-col gap-10">
-        <ContinueWatchingRow entries={continueWatching} />
+        {/* Continue watching: server-side row for signed-in viewers; guests get
+            a browser-local row instead (localStorage) — one or the other, never
+            another user's history. */}
+        {signedIn ? (
+          <ContinueWatchingRow entries={continueWatching} />
+        ) : (
+          <GuestContinueWatchingRow />
+        )}
         {/* Ad (Spec Section 11): one leaderboard below the fold — after the first
             content rows, before the rest. Low density by design. */}
         {rows.length > 1 ? <AdSlot slot="homeLeaderboard" /> : null}

@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import { Logo } from '@/components/ui/Logo';
 import { publicEnv } from '@/lib/env';
 
 /** Global footer with legal + discovery links (Section 15/16). */
@@ -28,7 +29,8 @@ export function Footer() {
             <Link href="/legal/cookies" className="hover:text-content">Cookies</Link>
           </nav>
           <div className="flex flex-col gap-2">
-            <h2 className="text-xs font-semibold uppercase tracking-wide text-content-subtle">
+            <h2 className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-content-subtle">
+              <Logo size={16} />
               {publicEnv.NEXT_PUBLIC_APP_NAME}
             </h2>
             <p className="text-xs leading-relaxed text-content-subtle">

@@ -184,9 +184,12 @@ async function collectIds(
 }
 
 async function fetchTitle(kind: 'movie' | 'tv', id: number): Promise<NormalizedTitle | null> {
-  // `credits` is appended for both kinds: movies and TV share the cast shape.
+  // `credits` (cast) and `videos` (official trailer) are appended for both
+  // kinds: movies and TV share the payload shapes.
   const append =
-    kind === 'movie' ? 'release_dates,external_ids,credits' : 'content_ratings,external_ids,credits';
+    kind === 'movie'
+      ? 'release_dates,external_ids,credits,videos'
+      : 'content_ratings,external_ids,credits,videos';
   const detail = (await tmdbFetch(`/${kind}/${id}`, {
     append_to_response: append,
     language: 'en-US',
@@ -242,6 +245,7 @@ async function upsertTitlesWith(
     original_language: t.originalLanguage,
     poster_url: t.posterUrl,
     backdrop_url: t.backdropUrl,
+    trailer_url: t.trailerUrl,
     editorial_score: t.score,
     status: 'published' as const,
     visibility: 'public' as const,
