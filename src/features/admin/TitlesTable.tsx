@@ -1,128 +1,101 @@
 'use client';
 
-import { useState } from 'react';
 import type { Title } from '@/features/catalog/types';
 import { Badge } from '@/components/ui/Badge';
-import { DataTable, type BulkAction, type Column } from './DataTable';
-import { catalogAdminMeta, type CatalogRow, type TitleStatus, type TitleVisibility } from './mock';
+import { Button } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
+import { DataTable, type Column } from './DataTable';
 
 /**
- * Client table wrapper for the catalog (Section 10). The page stays a Server
- * Component that fetches via listTitles(); it passes plain Title[] here, and
- * this client component supplies the column render config (functions can't
- * cross the RSC boundary) plus bulk-action affordances.
+ * Client table wrapper for the catalog (Spec Section 10). The page stays a
+ * Server Component that fetches REAL titles via `listTitles()` (catalog
+ * queries layer, RLS-scoped); this client component supplies the column
+ * render config (functions can't cross the RSC boundary). Only fields that
+ * exist on the live Title DTO are shown — no fabricated status, visibility,
+ * or last-updated columns. Publish/archive/delete are affordances only:
+ * disabled and non-persisting until the catalog-management phase lands.
  */
 
-const statusTone: Record<TitleStatus, 'success' | 'info' | 'warning' | 'neutral'> = {
-  published: 'success',
-  scheduled: 'info',
-  draft: 'warning',
-  archived: 'neutral',
-};
+const ACTIONS_PENDING_LABEL = 'Publish, archive, and delete actions arrive with the catalog-management phase.';
 
-const visibilityTone: Record<TitleVisibility, 'neutral' | 'info' | 'warning'> = {
-  public: 'neutral',
-  unlisted: 'info',
-  private: 'warning',
-};
-
-function formatDate(iso: string): string {
-  return new Date(iso).toISOString().slice(0, 10);
-}
-
-const columns: Column<CatalogRow>[] = [
+const columns: Column<Title>[] = [
   {
     key: 'name',
     header: 'Name',
-    sortAccessor: (r) => r.title.name,
-    render: (r) => (
+    sortAccessor: (t) => t.name,
+    render: (t) => (
       <span className="flex flex-col">
-        <span className="font-medium text-content">{r.title.name}</span>
-        {r.title.originalName ? (
-          <span className="text-xs text-content-subtle">{r.title.originalName}</span>
-        ) : null}
+        <span className="font-medium text-content">{t.name}</span>
+        {t.originalName ? <span className="text-xs text-content-subtle">{t.originalName}</span> : null}
       </span>
     ),
   },
   {
     key: 'type',
     header: 'Type',
-    sortAccessor: (r) => r.title.type,
-    render: (r) => <span className="uppercase">{r.title.type}</span>,
-  },
-  {
-    key: 'status',
-    header: 'Status',
-    sortAccessor: (r) => r.meta.status,
-    render: (r) => <Badge tone={statusTone[r.meta.status]}>{r.meta.status}</Badge>,
-  },
-  {
-    key: 'visibility',
-    header: 'Visibility',
-    sortAccessor: (r) => r.meta.visibility,
-    render: (r) => <Badge tone={visibilityTone[r.meta.visibility]}>{r.meta.visibility}</Badge>,
+    sortAccessor: (t) => t.type,
+    render: (t) => <span className="uppercase">{t.type}</span>,
   },
   {
     key: 'year',
     header: 'Year',
     align: 'right',
-    sortAccessor: (r) => r.title.releaseYear,
-    render: (r) => <span className="tabular-nums">{r.title.releaseYear}</span>,
+    sortAccessor: (t) => t.releaseYear,
+    render: (t) => <span className="tabular-nums">{t.releaseYear || '—'}</span>,
   },
   {
-    key: 'updated',
-    header: 'Updated',
-    align: 'right',
-    sortAccessor: (r) => r.meta.updatedAt,
-    render: (r) => <span className="tabular-nums text-content-subtle">{formatDate(r.meta.updatedAt)}</span>,
-  },
-];
-
-const bulkActions: BulkAction[] = [
-  {
-    id: 'publish',
-    label: 'Publish',
-    confirmTitle: 'Publish selected titles?',
-    confirmDescription:
-      'Selected titles become publicly visible where region and rating policy allow. Reversible via unpublish; an audit event is recorded.',
+    key: 'maturity',
+    header: 'Maturity',
+    sortAccessor: (t) => t.maturity,
+    render: (t) => <span>{t.maturity}</span>,
   },
   {
-    id: 'archive',
-    label: 'Archive',
-    confirmTitle: 'Archive selected titles?',
-    confirmDescription: 'Archived titles are hidden from browse but retained for auditability and can be restored.',
-  },
-  {
-    id: 'delete',
-    label: 'Delete',
-    destructive: true,
-    confirmTitle: 'Delete selected titles?',
-    confirmDescription:
-      'Soft-deletes the selected titles. This is a preview affordance — the real action re-authenticates, checks catalog.delete, and writes an audit event.',
+    key: 'featured',
+    header: 'Featured',
+    sortAccessor: (t) => (t.featured ? 'yes' : 'no'),
+    render: (t) => (t.featured ? <Badge tone="info">Featured</Badge> : <span className="text-content-subtle">—</span>),
   },
 ];
 
 export function TitlesTable({ titles }: { titles: Title[] }) {
-  const [status, setStatus] = useState<string | null>(null);
-  const rows: CatalogRow[] = titles.map((title) => ({ title, meta: catalogAdminMeta(title.id) }));
-
   return (
-    <div className="flex flex-col gap-2">
-      <p aria-live="polite" className="min-h-4 text-xs text-content-muted">
-        {status}
-      </p>
-      <DataTable<CatalogRow>
-        caption="Catalog titles with type, status, visibility, release year and last-updated date"
+    <div className="flex flex-col gap-3">
+      {titles.length > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <Button size="sm" variant="secondary" disabled title={ACTIONS_PENDING_LABEL}>
+            Publish
+          </Button>
+          <Button size="sm" variant="ghost" disabled title={ACTIONS_PENDING_LABEL}>
+            Archive
+          </Button>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled
+            title={ACTIONS_PENDING_LABEL}
+            className="text-danger hover:bg-danger/10 hover:text-danger disabled:text-content-subtle"
+          >
+            Delete
+          </Button>
+        </div>
+      ) : null}
+
+      <DataTable<Title>
+        caption="Catalog titles with type, release year, maturity and featured state"
         columns={columns}
-        rows={rows}
-        getRowId={(r) => r.title.id}
-        getRowLabel={(r) => r.title.name}
-        selectable
-        bulkActions={bulkActions}
-        onBulkAction={(actionId, ids) =>
-          setStatus(`Preview: "${actionId}" would apply to ${ids.length} title${ids.length === 1 ? '' : 's'} (no changes made).`)
+        rows={titles}
+        getRowId={(t) => t.id}
+        getRowLabel={(t) => t.name}
+        emptyState={
+          <EmptyState
+            icon="⛃"
+            title="No titles in the catalog yet"
+            description="Run the TMDB sync (Catalog → Sync) to import titles — they will appear here."
+          />
         }
       />
+
+      {titles.length > 0 ? <p className="text-xs text-content-subtle">{ACTIONS_PENDING_LABEL}</p> : null}
     </div>
   );
 }

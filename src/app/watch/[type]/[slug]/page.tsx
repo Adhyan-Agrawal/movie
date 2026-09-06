@@ -68,8 +68,7 @@ export default async function WatchPage({
   const season = toIndex(seasonParam);
   const episode = toIndex(episodeParam);
 
-  // Prefer the title's own TMDB/IMDb ids (real catalog rows); fall back to the
-  // mock bridge for the local sample catalog (see title-external-ids).
+  // The title's own TMDB/IMDb ids from the catalog row drive playback resolution.
   const external = resolveTitleExternalIds(title);
 
   const request: PlaybackRequest = {

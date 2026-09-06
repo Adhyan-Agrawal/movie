@@ -1,14 +1,15 @@
 import Link from 'next/link';
+import Image from 'next/image';
 import { cn } from '@/lib/cn';
 import { publicEnv } from '@/lib/env';
 import { Badge } from '@/components/ui/Badge';
 import { buttonClasses } from '@/components/ui/Button';
 import { Container } from '@/components/ui/Container';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { MediaRow } from './MediaRow';
 import { WatchlistButton } from './WatchlistButton';
 import { ShareButton } from './ShareButton';
-import { SeasonEpisodeList } from './SeasonEpisodeList';
-import { formatRuntime, synthesizeCredits, synthesizeSeasons } from './title-detail-helpers';
+import { formatRuntime } from './title-detail-helpers';
 import { getSimilarTitles } from '../queries';
 import type { MediaRow as MediaRowType, Title } from '../types';
 
@@ -34,11 +35,16 @@ const AVAILABILITY: Record<
   },
 };
 
+/** True when the artwork is a real remote image (TMDB-style https URL). */
+function isRemoteUrl(url: string | undefined): url is string {
+  return url !== undefined && (url.startsWith('https://') || url.startsWith('http://'));
+}
+
 /**
  * Premium title-detail layout (Spec Section 4): backdrop hero band with
- * legibility scrims, poster, metadata, synopsis, sample credits, TV
- * seasons/episodes, similar titles, and a props-driven availability state.
- * Never presents a broken iframe as the primary experience.
+ * legibility scrims, poster, metadata, synopsis, honest not-yet-available
+ * states for episodes and credits, similar titles, and a props-driven
+ * availability state. Never presents a broken iframe as the primary experience.
  */
 export async function TitleDetail({
   title,
@@ -48,8 +54,6 @@ export async function TitleDetail({
   availability?: TitleAvailability;
 }) {
   const similar = await getSimilarTitles(title);
-  const credits = synthesizeCredits(title);
-  const seasons = title.type === 'tv' ? synthesizeSeasons(title) : [];
   const runtime = formatRuntime(title.runtimeMinutes);
   const state = AVAILABILITY[availability];
   const watchHref = `/watch/${title.type}/${title.slug}`;
@@ -65,17 +69,28 @@ export async function TitleDetail({
     <article aria-labelledby="title-heading" className="flex flex-col gap-10 pb-8">
       {/* Backdrop hero band */}
       <section className="relative overflow-hidden">
-        <div
-          aria-hidden="true"
-          className="absolute inset-0"
-          style={
-            title.backdropUrl?.startsWith('linear-gradient')
-              ? { backgroundImage: title.backdropUrl }
-              : title.backdropUrl
-                ? { backgroundImage: `url(${title.backdropUrl})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+        {isRemoteUrl(title.backdropUrl) ? (
+          /* Decorative backdrop — the adjacent text carries the meaning. */
+          <Image
+            src={title.backdropUrl}
+            alt=""
+            fill
+            priority
+            sizes="100vw"
+            className="object-cover"
+            aria-hidden
+          />
+        ) : (
+          <div
+            aria-hidden="true"
+            className="absolute inset-0"
+            style={
+              title.backdropUrl?.startsWith('linear-gradient')
+                ? { backgroundImage: title.backdropUrl }
                 : undefined
-          }
-        />
+            }
+          />
+        )}
         {/* Legibility scrims over artwork (Section 5) */}
         <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-t from-base via-base/80 to-base/30" />
         <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-base/85 via-base/40 to-transparent" />
@@ -85,11 +100,28 @@ export async function TitleDetail({
             {/* Poster */}
             <div className="shrink-0">
               <div
-                role="img"
-                aria-label={`Poster art for ${title.name}`}
-                className="aspect-[2/3] w-36 overflow-hidden rounded-lg border border-border shadow-raised sm:w-44 md:w-56"
-                style={title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined}
-              />
+                className="relative aspect-[2/3] w-36 overflow-hidden rounded-lg border border-border shadow-raised sm:w-44 md:w-56"
+                style={
+                  title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined
+                }
+              >
+                {isRemoteUrl(title.posterUrl) ? (
+                  <Image
+                    src={title.posterUrl}
+                    alt={`Poster for ${title.name}`}
+                    fill
+                    sizes="(max-width: 640px) 36vw, 224px"
+                    className="object-cover"
+                  />
+                ) : (
+                  <div
+                    role="img"
+                    aria-label={`Poster art for ${title.name}`}
+                    className="absolute inset-0"
+                    style={title.posterUrl ? { backgroundImage: title.posterUrl } : undefined}
+                  />
+                )}
+              </div>
             </div>
 
             {/* Primary info */}
@@ -199,54 +231,30 @@ export async function TitleDetail({
       <Container>
         <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_260px]">
           <div className="flex flex-col gap-10">
-            {title.type === 'tv' && seasons.length ? (
+            {title.type === 'tv' ? (
               <section aria-labelledby="episodes-heading" className="flex flex-col gap-4">
-                <div className="flex items-baseline justify-between gap-4">
-                  <h2 id="episodes-heading" className="text-lg font-semibold tracking-tight">
-                    Episodes
-                  </h2>
-                  <span className="text-xs text-content-subtle">Sample schedule</span>
-                </div>
-                <SeasonEpisodeList
-                  seasons={seasons}
-                  titleType={title.type}
-                  titleSlug={title.slug}
-                  titleName={title.name}
+                <h2 id="episodes-heading" className="text-lg font-semibold tracking-tight">
+                  Episodes
+                </h2>
+                <EmptyState
+                  icon="▦"
+                  title="No episode details yet"
+                  description="Episode details aren’t available for this title yet."
+                  className="py-10"
                 />
               </section>
             ) : null}
 
             <section aria-labelledby="credits-heading" className="flex flex-col gap-4">
-              <div className="flex items-baseline justify-between gap-4">
-                <h2 id="credits-heading" className="text-lg font-semibold tracking-tight">
-                  Cast &amp; crew
-                </h2>
-                <span className="text-xs text-content-subtle">Sample credits</span>
-              </div>
-              <div className="grid grid-cols-1 gap-6 sm:grid-cols-2">
-                <div className="flex flex-col gap-2">
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-content-subtle">Cast</h3>
-                  <ul className="flex flex-col gap-2">
-                    {credits.cast.map((c) => (
-                      <li key={`cast-${c.name}-${c.role}`} className="flex items-center justify-between gap-3 text-sm">
-                        <span className="text-content">{c.name}</span>
-                        <span className="text-content-subtle">{c.role}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <h3 className="text-xs font-semibold uppercase tracking-wide text-content-subtle">Crew</h3>
-                  <ul className="flex flex-col gap-2">
-                    {credits.crew.map((c) => (
-                      <li key={`crew-${c.name}-${c.role}`} className="flex items-center justify-between gap-3 text-sm">
-                        <span className="text-content">{c.name}</span>
-                        <span className="text-content-subtle">{c.role}</span>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
+              <h2 id="credits-heading" className="text-lg font-semibold tracking-tight">
+                Cast &amp; crew
+              </h2>
+              <EmptyState
+                icon="◎"
+                title="No cast information yet"
+                description="Cast information isn’t available for this title yet."
+                className="py-10"
+              />
             </section>
           </div>
 

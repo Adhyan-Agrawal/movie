@@ -3,40 +3,51 @@
 import { useMemo, useState } from 'react';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { AuditTimeline } from './AuditTimeline';
-import { AUDIT_EVENTS, type Outcome } from './mock';
+import type { AdminAuditEvent, AuditOutcome } from './types';
 
 /**
- * Audit explorer (Section 10 "Audit" — filters + export). Filters are wired as
- * UI over the mock event set; the immutable timeline below reflects the query.
+ * Audit explorer (Spec Section 10 "Audit" — filters). Receives real audit_logs
+ * rows from the server page and filters them client-side; the immutable
+ * timeline below reflects the query.
  */
 
-type OutcomeFilter = Outcome | 'all';
+type OutcomeFilter = AuditOutcome | 'all';
 
-export function AuditExplorer() {
+export function AuditExplorer({ events }: { events: AdminAuditEvent[] }) {
   const [query, setQuery] = useState('');
   const [outcome, setOutcome] = useState<OutcomeFilter>('all');
   const [actor, setActor] = useState('all');
 
   const actors = useMemo(() => {
-    const set = new Set(AUDIT_EVENTS.map((e) => e.actor.handle));
+    const set = new Set(events.map((e) => e.actor));
     return [...set].sort();
-  }, []);
+  }, [events]);
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    return AUDIT_EVENTS.filter((e) => {
+    return events.filter((e) => {
       if (outcome !== 'all' && e.outcome !== outcome) return false;
-      if (actor !== 'all' && e.actor.handle !== actor) return false;
+      if (actor !== 'all' && e.actor !== actor) return false;
       if (q) {
         const hay = `${e.action} ${e.target} ${e.reason ?? ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
     });
-  }, [query, outcome, actor]);
+  }, [events, query, outcome, actor]);
 
   const selectClass =
     'h-9 rounded-md border border-border bg-surface px-2 text-sm text-content focus-visible:outline-none';
+
+  if (events.length === 0) {
+    return (
+      <EmptyState
+        icon="☰"
+        title="No audit events recorded yet"
+        description="Actions taken through the admin console will appear here."
+      />
+    );
+  }
 
   return (
     <div className="flex flex-col gap-5">
@@ -54,7 +65,7 @@ export function AuditExplorer() {
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="e.g. publish, role, TMDB"
+            placeholder="e.g. publish, role, provider"
             className="h-9 rounded-md border border-border bg-surface px-3 text-sm text-content placeholder:text-content-subtle focus-visible:outline-none"
           />
         </div>
@@ -71,7 +82,6 @@ export function AuditExplorer() {
             <option value="all">All outcomes</option>
             <option value="success">Success</option>
             <option value="failure">Failed</option>
-            <option value="pending">Pending</option>
           </select>
         </div>
         <div className="flex flex-col gap-1">

@@ -1,7 +1,13 @@
 import Link from 'next/link';
+import Image from 'next/image';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
 import type { Title } from '../types';
+
+/** True when the artwork is a real remote image (TMDB-style https URL). */
+function isRemoteUrl(url: string | undefined): url is string {
+  return url !== undefined && (url.startsWith('https://') || url.startsWith('http://'));
+}
 
 /** Format runtime minutes as "2h 8m" / "52m". */
 function formatRuntime(minutes?: number): string | null {
@@ -44,6 +50,15 @@ export function MediaCard({
         )}
         style={title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined}
       >
+        {isRemoteUrl(title.posterUrl) ? (
+          <Image
+            src={title.posterUrl}
+            alt={`${title.name} poster`}
+            fill
+            sizes="(max-width: 640px) 45vw, 200px"
+            className="object-cover"
+          />
+        ) : null}
         <div className="absolute left-2 top-2 flex gap-1">
           {title.type === 'tv' ? <Badge tone="info">Series</Badge> : null}
         </div>

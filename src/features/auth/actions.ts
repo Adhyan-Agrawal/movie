@@ -2,6 +2,8 @@
 
 import { redirect } from 'next/navigation';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { getSupabaseServiceClient } from '@/lib/supabase/service';
+import type { AuthActionState } from './state';
 
 /**
  * Auth server actions (Spec Section 8). These run on the server with the
@@ -9,17 +11,19 @@ import { getSupabaseServerClient } from '@/lib/supabase/server';
  * the action (server actions CAN set cookies, unlike Server Components) and
  * refreshed by middleware on subsequent navigations.
  *
+ * EMAIL / SMTP-FREE MODE: this project has no SMTP configured. Supabase's
+ * normal email-confirmation flow is therefore unusable twice over — the
+ * confirmation email never arrives, AND the free-tier auth-email quota
+ * (~2/hour) rate-limits `auth.signUp` after a couple of attempts. So sign-ups
+ * are created through the service-role admin API with `email_confirm: true`,
+ * which sends NO email at all, followed by a direct sign-in. The service key
+ * never leaves the server. When SMTP is configured later, switch back to
+ * `supabase.auth.signUp` + the confirmation redirect flow.
+ *
  * Validation is minimal by design for this slice: Supabase enforces the email
  * format and password strength server-side; we surface its errors verbatim
  * (they never contain secrets) through useActionState on the client.
  */
-
-export interface AuthActionState {
-  /** Human-readable error from Supabase (or a generic fallback). null = success. */
-  error: string | null;
-}
-
-export const AUTH_INITIAL_STATE: AuthActionState = { error: null };
 
 /** Sign in with email + password. Redirects to `next` (or /account) on success. */
 export async function signInAction(
@@ -37,7 +41,22 @@ export async function signInAction(
   const supabase = await getSupabaseServerClient();
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
-    return { error: error.message };
+    // SMTP-free mode: accounts created before this flow may be unconfirmed.
+    // Confirm server-side via the service role and retry once (no email sent).
+    if (error.message.toLowerCase().includes('email not confirmed')) {
+      const admin = getSupabaseServiceClient();
+      const { data: list } = await admin.auth.admin.listUsers({ page: 1, perPage: 1000 });
+      const user = (list?.users ?? []).find((u) => u.email === email);
+      if (!user) return { error: 'Invalid login credentials.' };
+      const { error: confirmErr } = await admin.auth.admin.updateUserById(user.id, {
+        email_confirm: true,
+      });
+      if (confirmErr) return { error: confirmErr.message };
+      const { error: retryErr } = await supabase.auth.signInWithPassword({ email, password });
+      if (retryErr) return { error: retryErr.message };
+    } else {
+      return { error: error.message };
+    }
   }
 
   // Only allow internal redirect targets (never an arbitrary absolute URL).
@@ -46,10 +65,10 @@ export async function signInAction(
 }
 
 /**
- * Sign up with email + password. Supabase sends a confirmation email when the
- * project requires it; when email confirmation is off, the session is
- * established immediately. Either way the account/profile rows are created by
- * the `handle_new_user()` trigger on first sign-in.
+ * Sign up with email + password (SMTP-free: the account is created + confirmed
+ * via the service role — no email is sent — and the session established
+ * immediately). The `handle_new_user()` trigger creates the accounts/profiles
+ * rows.
  */
 export async function signUpAction(
   _prev: AuthActionState,
@@ -69,16 +88,25 @@ export async function signUpAction(
     return { error: 'Password must be at least 6 characters.' };
   }
 
-  const supabase = await getSupabaseServerClient();
-  const { data, error } = await supabase.auth.signUp({ email, password });
-  if (error) {
-    return { error: error.message };
+  // Service-role creation with email_confirm — sends no confirmation email
+  // (unlike anon signUp, which is rate-limited by the email quota).
+  const admin = getSupabaseServiceClient();
+  const { error: createErr } = await admin.auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (createErr) {
+    // Surface the admin API's message ("A user with this email address has
+    // already been registered", etc.) — it contains no secrets.
+    return { error: createErr.message };
   }
 
-  // Email-confirmation flow: session absent until the user confirms.
-  if (!data.session) {
-    redirect(`/signin?confirmed=1&email=${encodeURIComponent(email)}`);
-  }
+  // Sign the new user straight in (sets the session cookies).
+  const supabase = await getSupabaseServerClient();
+  const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password });
+  if (signInErr) return { error: signInErr.message };
+
   redirect('/account');
 }
 

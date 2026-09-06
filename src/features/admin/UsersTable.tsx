@@ -1,152 +1,109 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
-import { ConfirmDialog } from './ConfirmDialog';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { DataTable, type Column } from './DataTable';
-import { ADMIN_USERS, maskEmail, type AdminUser } from './mock';
+import type { AdminAccountRow } from './types';
 
 /**
- * Users table (Section 10 "Users" — safe metadata; suspend + revoke sessions).
- * Emails are masked for support-safe display. Each destructive per-row action
- * opens the ConfirmDialog; the dialog state is owned here (client) while the
- * page stays a Server Component.
+ * Users table (Spec Section 10 "Users"). Renders REAL `accounts` rows passed
+ * from the server page (users.read; the accounts table carries no email, so
+ * the display name + account id is the support-safe identity). Suspend and
+ * revoke-sessions are affordances only — they stay disabled and persist
+ * nothing until the user-management phase lands.
  */
 
-const statusTone: Record<AdminUser['status'], 'success' | 'danger' | 'info'> = {
-  active: 'success',
-  suspended: 'danger',
-  invited: 'info',
-};
+const ACTIONS_PENDING_LABEL = 'Suspend and revoke-sessions actions arrive with the user-management phase.';
 
-const roleLabel: Record<AdminUser['role'], string> = {
-  viewer: 'Viewer',
-  editor: 'Editor',
-  ad_manager: 'Ad manager',
-  support: 'Support',
-  admin: 'Administrator',
-  owner: 'Owner',
-};
-
-function formatLastActive(value: string): string {
-  if (value === '—') return '—';
-  return new Date(value).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+function formatDate(iso: string): string {
+  return new Date(iso).toISOString().slice(0, 10);
 }
 
-type PendingAction = { user: AdminUser; kind: 'suspend' | 'revoke' } | null;
+export function UsersTable({ accounts }: { accounts: AdminAccountRow[] }) {
+  const [query, setQuery] = useState('');
 
-export function UsersTable() {
-  const [pending, setPending] = useState<PendingAction>(null);
-  const [status, setStatus] = useState<string | null>(null);
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return accounts;
+    return accounts.filter((a) => `${a.display_name} ${a.id}`.toLowerCase().includes(q));
+  }, [accounts, query]);
 
-  const columns: Column<AdminUser>[] = [
+  const columns: Column<AdminAccountRow>[] = [
     {
-      key: 'user',
-      header: 'User',
-      sortAccessor: (u) => u.displayName,
-      render: (u) => (
+      key: 'account',
+      header: 'Account',
+      sortAccessor: (a) => a.display_name,
+      render: (a) => (
         <span className="flex flex-col">
-          <span className="font-medium text-content">{u.displayName}</span>
-          <span className="font-mono text-xs text-content-subtle">{maskEmail(u.email)}</span>
+          <span className="font-medium text-content">{a.display_name}</span>
+          <span className="font-mono text-xs text-content-subtle">{a.id}</span>
         </span>
       ),
     },
     {
-      key: 'role',
-      header: 'Role',
-      sortAccessor: (u) => u.role,
-      render: (u) => roleLabel[u.role],
-    },
-    {
       key: 'status',
       header: 'Status',
-      sortAccessor: (u) => u.status,
-      render: (u) => <Badge tone={statusTone[u.status]}>{u.status}</Badge>,
+      sortAccessor: (a) => (a.is_suspended ? 'suspended' : 'active'),
+      render: (a) =>
+        a.is_suspended ? <Badge tone="danger">Suspended</Badge> : <Badge tone="success">Active</Badge>,
     },
     {
-      key: 'profiles',
-      header: 'Profiles',
+      key: 'created',
+      header: 'Created',
       align: 'right',
-      sortAccessor: (u) => u.profiles,
-      render: (u) => <span className="tabular-nums">{u.profiles}</span>,
-    },
-    {
-      key: 'lastActive',
-      header: 'Last active',
-      align: 'right',
-      sortAccessor: (u) => u.lastActive,
-      render: (u) => <span className="tabular-nums text-content-subtle">{formatLastActive(u.lastActive)}</span>,
+      sortAccessor: (a) => a.created_at,
+      render: (a) => <span className="tabular-nums text-content-subtle">{formatDate(a.created_at)}</span>,
     },
   ];
 
-  const dialogCopy =
-    pending?.kind === 'suspend'
-      ? {
-          title: `Suspend ${pending.user.displayName}?`,
-          description:
-            'Suspension blocks sign-in and playback immediately. It is reversible and requires re-authentication plus an audit event once RBAC is wired.',
-          confirm: 'Suspend',
-        }
-      : pending
-        ? {
-            title: `Revoke sessions for ${pending.user.displayName}?`,
-            description:
-              'Signs the account out of all devices. The user can sign back in unless also suspended. An audit event is recorded.',
-            confirm: 'Revoke sessions',
-          }
-        : { title: '', description: '', confirm: 'Confirm' };
-
   return (
-    <div className="flex flex-col gap-2">
-      <p aria-live="polite" className="min-h-4 text-xs text-content-muted">
-        {status}
-      </p>
-      <DataTable<AdminUser>
-        caption="Platform users with role, status, profile count and last-active time; email is masked"
+    <div className="flex flex-col gap-3">
+      <div className="flex max-w-sm flex-col gap-1">
+        <label htmlFor="users-q" className="text-xs font-medium text-content-muted">
+          Search accounts
+        </label>
+        <input
+          id="users-q"
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Display name or account id"
+          className="h-9 rounded-md border border-border bg-surface px-3 text-sm text-content placeholder:text-content-subtle focus-visible:outline-none"
+        />
+      </div>
+
+      <DataTable<AdminAccountRow>
+        caption="Platform accounts with status and creation date"
         columns={columns}
-        rows={ADMIN_USERS}
-        getRowId={(u) => u.id}
-        getRowLabel={(u) => u.displayName}
-        rowActions={(u) => (
+        rows={filtered}
+        getRowId={(a) => a.id}
+        getRowLabel={(a) => a.display_name}
+        rowActions={() => (
           <>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={u.status === 'suspended'}
-              onClick={() => setPending({ user: u, kind: 'suspend' })}
-              className="text-danger hover:bg-danger/10 hover:text-danger disabled:text-content-subtle"
-            >
+            <Button size="sm" variant="ghost" disabled title={ACTIONS_PENDING_LABEL}>
               Suspend
             </Button>
-            <Button
-              size="sm"
-              variant="ghost"
-              disabled={u.status === 'invited'}
-              onClick={() => setPending({ user: u, kind: 'revoke' })}
-            >
+            <Button size="sm" variant="ghost" disabled title={ACTIONS_PENDING_LABEL}>
               Revoke
             </Button>
           </>
         )}
+        emptyState={
+          accounts.length === 0 ? (
+            <EmptyState
+              icon="☺"
+              title="No accounts yet"
+              description="Accounts will appear here as users sign up."
+            />
+          ) : (
+            <EmptyState title="No matching accounts" description="Adjust the search to widen the query." />
+          )
+        }
       />
 
-      <ConfirmDialog
-        open={pending !== null}
-        title={dialogCopy.title}
-        description={dialogCopy.description}
-        confirmLabel={dialogCopy.confirm}
-        tone={pending?.kind === 'suspend' ? 'danger' : 'primary'}
-        onCancel={() => setPending(null)}
-        onConfirm={() => {
-          if (pending) {
-            setStatus(
-              `Preview: "${pending.kind}" would apply to ${pending.user.displayName} (no changes made).`,
-            );
-          }
-          setPending(null);
-        }}
-      />
+      <p className="text-xs text-content-subtle">{ACTIONS_PENDING_LABEL}</p>
     </div>
   );
 }

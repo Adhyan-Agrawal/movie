@@ -11,6 +11,7 @@ export interface AdminNavItem {
 export const ADMIN_NAV: AdminNavItem[] = [
   { href: '/admin', label: 'Dashboard', icon: '▦', hint: 'Operations overview and trends' },
   { href: '/admin/catalog/titles', label: 'Catalog', icon: '⛃', hint: 'Titles, episodes, publication' },
+  { href: '/admin/sync', label: 'TMDB sync', icon: '⟳', hint: 'One-click import of movies and series from TMDB' },
   { href: '/admin/providers', label: 'Providers', icon: '⧉', hint: 'Playback sources and adapters' },
   { href: '/admin/ads', label: 'Ads', icon: '◫', hint: 'Placements, campaigns, consent' },
   { href: '/admin/users', label: 'Users', icon: '☺', hint: 'Accounts, roles, sessions' },

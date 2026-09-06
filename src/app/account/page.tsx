@@ -1,18 +1,10 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { buttonClasses } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { cn } from '@/lib/cn';
-import { getTitleById } from '@/features/catalog/queries';
-import {
-  formatDate,
-  formatRelativeTime,
-  greeting,
-  MOCK_ACCOUNT,
-  MOCK_DEVICE_SESSIONS,
-  MOCK_HISTORY,
-  MOCK_PROFILES,
-  MOCK_WATCHLIST_IDS,
-} from '@/features/account/mock';
+import { getSignedInEmail, listAccountProfiles } from '@/features/account/queries';
+import { greeting } from '@/features/account/types';
 
 export const metadata: Metadata = { title: 'Overview' };
 
@@ -32,11 +24,16 @@ function StatCard({ label, value, href, cta }: { label: string; value: number; h
   );
 }
 
+/** Derive a friendly first name from the signed-in email (no stored display name yet). */
+function firstNameFromEmail(email: string | null): string {
+  if (!email) return 'there';
+  const local = email.split('@')[0] ?? email;
+  return local.charAt(0).toUpperCase() + local.slice(1);
+}
+
 export default async function AccountOverviewPage() {
-  const firstName = MOCK_ACCOUNT.displayName.split(' ')[0] ?? MOCK_ACCOUNT.displayName;
-  const recent = await Promise.all(
-    MOCK_HISTORY.slice(0, 3).map(async (entry) => ({ entry, title: await getTitleById(entry.titleId) })),
-  );
+  const [email, profiles] = await Promise.all([getSignedInEmail(), listAccountProfiles()]);
+  const firstName = firstNameFromEmail(email);
 
   return (
     <div className="flex flex-col gap-8">
@@ -45,24 +42,13 @@ export default async function AccountOverviewPage() {
           {greeting()}, {firstName}
         </h2>
         <p className="text-sm text-content-muted">
-          Member since {formatDate(MOCK_ACCOUNT.memberSince)} · {MOCK_ACCOUNT.plan}
+          {email ? `Signed in as ${email}` : 'Manage your profiles and preferences.'}
         </p>
       </div>
 
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-        <StatCard label="Profiles" value={MOCK_PROFILES.length} href="/account/profiles" cta="Manage profiles" />
-        <StatCard
-          label="On your watchlist"
-          value={MOCK_WATCHLIST_IDS.length}
-          href="/account/watchlist"
-          cta="View watchlist"
-        />
-        <StatCard
-          label="Signed-in devices"
-          value={MOCK_DEVICE_SESSIONS.length}
-          href="/account/devices"
-          cta="Manage devices"
-        />
+      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <StatCard label="Profiles" value={profiles.length} href="/account/profiles" cta="View profiles" />
+        <StatCard label="On your watchlist" value={0} href="/account/watchlist" cta="View watchlist" />
       </div>
 
       <section aria-labelledby="recent-heading" className="flex flex-col gap-4">
@@ -74,34 +60,16 @@ export default async function AccountOverviewPage() {
             View all
           </Link>
         </div>
-        <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface/40">
-          {recent.map(({ entry, title }) => (
-            <li key={entry.id} className="flex items-center gap-4 p-4">
-              <div
-                className="aspect-[2/3] w-10 shrink-0 overflow-hidden rounded-md border border-border bg-surface-raised"
-                style={
-                  title?.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined
-                }
-                aria-hidden="true"
-              />
-              <div className="flex min-w-0 flex-1 flex-col">
-                <span className="truncate text-sm font-medium">{title?.name ?? 'Unknown title'}</span>
-                <span className="text-xs text-content-muted">
-                  Watched {formatRelativeTime(entry.watchedAt)}
-                  {entry.progress >= 1 ? ' · Finished' : ` · ${Math.round(entry.progress * 100)}%`}
-                </span>
-              </div>
-              {title ? (
-                <Link
-                  href={`/title/${title.type}/${title.slug}`}
-                  className={buttonClasses({ variant: 'ghost', size: 'sm' })}
-                >
-                  Open
-                </Link>
-              ) : null}
-            </li>
-          ))}
-        </ul>
+        <EmptyState
+          icon="🕑"
+          title="No recent activity"
+          description="Titles you watch will appear here. Start browsing to build your history."
+          action={
+            <Link href="/browse" className={buttonClasses({ variant: 'primary' })}>
+              Browse the catalog
+            </Link>
+          }
+        />
       </section>
     </div>
   );

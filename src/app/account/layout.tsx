@@ -1,5 +1,4 @@
 import type { Metadata } from 'next';
-import { Badge } from '@/components/ui/Badge';
 import { Container } from '@/components/ui/Container';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { AccountNav } from '@/features/account/AccountNav';
@@ -48,10 +47,6 @@ export default async function AccountLayout({ children }: { children: React.Reac
       {user ? (
         <div className="flex flex-col gap-6">
           <AccountNav />
-          <div className="flex items-center gap-2 rounded-md border border-border bg-surface/50 px-3 py-2 text-xs text-content-muted">
-            <Badge tone="info">Sample</Badge>
-            <span>You’re viewing sample account data. Save, revoke, and delete actions are previews only.</span>
-          </div>
           <div>{children}</div>
         </div>
       ) : (

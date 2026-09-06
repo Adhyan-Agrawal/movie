@@ -4,7 +4,7 @@ import { useId, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { cn } from '@/lib/cn';
 import { Switch } from './Switch';
-import { LANGUAGE_OPTIONS, MATURITY_LEVELS, MOCK_SETTINGS, type AccountSettings } from './mock';
+import { DEFAULT_SETTINGS, LANGUAGE_OPTIONS, MATURITY_LEVELS, type AccountSettings } from './types';
 
 const selectClass =
   'h-11 w-full rounded-md border border-border-strong bg-surface-raised px-3 text-sm text-content ' +
@@ -97,9 +97,9 @@ function PinField({ onSaved, onCancel }: { onSaved: () => void; onCancel: () => 
  * persistence lands with the account service + server validation.
  */
 export function SettingsForm() {
-  const [form, setForm] = useState<AccountSettings>(MOCK_SETTINGS);
+  const [form, setForm] = useState<AccountSettings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
-  const [pinEnabled, setPinEnabled] = useState(MOCK_SETTINGS.pinSet);
+  const [pinEnabled, setPinEnabled] = useState(DEFAULT_SETTINGS.pinSet);
   const [showPinEntry, setShowPinEntry] = useState(false);
   const [pinStatus, setPinStatus] = useState('');
   const languageId = useId();

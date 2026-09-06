@@ -1,19 +1,22 @@
 import { PageHeader } from '@/components/ui/PageHeader';
 import { UsersTable } from '@/features/admin/UsersTable';
+import { listAdminAccounts } from '@/features/admin/queries';
 
 export const metadata = {
   title: 'Users',
-  description: 'Accounts, roles, and sessions.',
+  description: 'Accounts registered on the platform.',
 };
 
-export default function AdminUsersPage() {
+export default async function AdminUsersPage() {
+  const accounts = await listAdminAccounts();
+
   return (
     <div className="py-6">
       <PageHeader
         title="Users"
-        description="Support-safe account metadata. Emails are masked; suspend and revoke-sessions are confirmed and audited (Section 10)."
+        description="Accounts from the live database (users.read). Suspend and revoke-sessions actions arrive with the user-management phase."
       />
-      <UsersTable />
+      <UsersTable accounts={accounts} />
     </div>
   );
 }

@@ -1,19 +1,12 @@
 import { describe, expect, it } from 'vitest';
-import {
-  formatEpisodeCode,
-  formatRuntime,
-  synthesizeCredits,
-  synthesizeSeasons,
-  truncate,
-} from '@/features/catalog/components/title-detail-helpers';
-import { MOCK_TITLES } from '@/features/catalog/mock-data';
-import type { Title } from '@/features/catalog/types';
+import { formatRuntime, truncate } from '@/features/catalog/components/title-detail-helpers';
 
-function firstTvTitle(): Title {
-  const tv = MOCK_TITLES.find((t) => t.type === 'tv');
-  if (!tv) throw new Error('expected at least one tv title in mock data');
-  return tv;
-}
+/**
+ * The title-detail helpers are pure formatters — seasons/episodes and credits
+ * are never fabricated. When real `seasons`/`episodes`/`title_people` reads
+ * land, their mapping gets its own tests; nothing here may assert invented
+ * catalog data.
+ */
 
 describe('formatRuntime', () => {
   it('formats hours and minutes', () => {
@@ -34,13 +27,6 @@ describe('formatRuntime', () => {
   });
 });
 
-describe('formatEpisodeCode', () => {
-  it('builds SxEy codes', () => {
-    expect(formatEpisodeCode(1, 1)).toBe('S1E1');
-    expect(formatEpisodeCode(2, 10)).toBe('S2E10');
-  });
-});
-
 describe('truncate', () => {
   it('leaves short strings unchanged', () => {
     expect(truncate('a short synopsis', 160)).toBe('a short synopsis');
@@ -56,46 +42,5 @@ describe('truncate', () => {
     const out = truncate('x'.repeat(200), 50);
     expect(out.length).toBeLessThanOrEqual(50);
     expect(out.endsWith('…')).toBe(true);
-  });
-});
-
-describe('synthesizeSeasons', () => {
-  it('produces 1–2 seasons with sequential, contiguous episode numbers', () => {
-    const seasons = synthesizeSeasons(firstTvTitle());
-    expect(seasons.length).toBeGreaterThanOrEqual(1);
-    expect(seasons.length).toBeLessThanOrEqual(2);
-
-    seasons.forEach((season, index) => {
-      expect(season.seasonNumber).toBe(index + 1);
-      expect(season.episodes.length).toBeGreaterThan(0);
-      season.episodes.forEach((ep, epIndex) => {
-        expect(ep.episodeNumber).toBe(epIndex + 1);
-        expect(ep.seasonNumber).toBe(season.seasonNumber);
-        expect(ep.runtimeMinutes).toBeGreaterThan(0);
-        expect(ep.name.trim().length).toBeGreaterThan(0);
-        expect(ep.synopsis.trim().length).toBeGreaterThan(0);
-      });
-    });
-  });
-
-  it('is deterministic for the same title', () => {
-    const tv = firstTvTitle();
-    expect(synthesizeSeasons(tv)).toEqual(synthesizeSeasons(tv));
-  });
-});
-
-describe('synthesizeCredits', () => {
-  it('returns non-empty, deterministic cast and crew', () => {
-    const tv = firstTvTitle();
-    const credits = synthesizeCredits(tv);
-
-    expect(credits.cast.length).toBeGreaterThan(0);
-    expect(credits.crew.length).toBeGreaterThan(0);
-    for (const entry of [...credits.cast, ...credits.crew]) {
-      expect(entry.name.trim().length).toBeGreaterThan(0);
-      expect(entry.role.trim().length).toBeGreaterThan(0);
-    }
-
-    expect(synthesizeCredits(tv)).toEqual(synthesizeCredits(tv));
   });
 });

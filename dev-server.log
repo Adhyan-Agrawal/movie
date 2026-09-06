@@ -4,32 +4,105 @@
    - Environments: .env
 
  ✓ Starting...
- ✓ Ready in 3s
- ○ Compiling /middleware ...
- ✓ Compiled /middleware in 1011ms (170 modules)
+ ✓ Ready in 3.7s
+ ✓ Compiled /middleware in 408ms (170 modules)
+ ○ Compiling /signin ...
+ ✓ Compiled /signin in 3.6s (779 modules)
+ POST /signin 500 in 4901ms
+ ○ Compiling / ...
+ ✓ Compiled / in 4.4s (1186 modules)
+ GET / 200 in 6797ms
+ GET /signin 200 in 253ms
+ POST /signin 303 in 891ms
  ○ Compiling /account ...
- ✓ Compiled /account in 6.4s (858 modules)
- GET /account 200 in 7095ms
- ○ Compiling /_not-found ...
- ✓ Compiled /_not-found in 986ms (850 modules)
- GET /admin 404 in 1295ms
- GET /account 200 in 198ms
- GET /account 200 in 313ms
- ○ Compiling /admin ...
- ✓ Compiled /admin in 633ms (863 modules)
- GET /admin 200 in 2110ms
- ✓ Compiled /api/health in 486ms (880 modules)
- GET /api/health 200 in 1215ms
- GET /account 200 in 301ms
- GET /admin 404 in 113ms
- GET /account 200 in 252ms
- GET /admin 404 in 108ms
- ✓ Compiled in 576ms (431 modules)
- ✓ Compiled in 487ms (431 modules)
- GET /account 200 in 293ms
- GET /admin 200 in 1104ms
- GET /api/health 200 in 444ms
- GET /account 200 in 157ms
- GET /admin 404 in 95ms
- GET /account 200 in 283ms
- GET /admin 404 in 101ms
+ ✓ Compiled /account in 818ms (1214 modules)
+ POST /signin 303 in 300ms
+ GET /account 200 in 323ms
+ GET /account 200 in 365ms
+ ✓ Compiled /admin in 486ms (1233 modules)
+ GET /admin 200 in 1598ms
+ ○ Compiling /admin/catalog/titles ...
+ ✓ Compiled /admin/catalog/titles in 873ms (1251 modules)
+ GET /admin/catalog/titles 200 in 1746ms
+ ○ Compiling /admin/imports ...
+ ✓ Compiled /admin/imports in 693ms (1259 modules)
+ GET /admin/imports 200 in 1554ms
+ ○ Compiling /admin/settings ...
+ ✓ Compiled /admin/settings in 650ms (1171 modules)
+ GET /admin/settings 200 in 1669ms
+ ○ Compiling /admin/ads ...
+ ✓ Compiled /admin/ads in 638ms (1166 modules)
+ GET /admin/ads 200 in 1557ms
+ GET /admin 200 in 788ms
+ ✓ Compiled in 707ms (427 modules)
+ ✓ Compiled in 246ms (427 modules)
+ ✓ Compiled in 296ms (427 modules)
+ ✓ Compiled in 231ms (427 modules)
+ ✓ Compiled in 215ms (427 modules)
+ ✓ Compiled in 239ms (427 modules)
+ ✓ Compiled in 285ms (427 modules)
+ ✓ Compiled in 529ms (705 modules)
+ ✓ Compiled in 260ms (427 modules)
+ ✓ Compiled in 241ms (427 modules)
+ ✓ Compiled /admin in 372ms (579 modules)
+ GET /admin 200 in 1864ms
+ ○ Compiling /admin/sync ...
+ ✓ Compiled /admin/sync in 944ms (1113 modules)
+ GET /admin/sync 200 in 2470ms
+ ✓ Compiled in 252ms (431 modules)
+ ✓ Compiled in 229ms (431 modules)
+ ✓ Compiled in 265ms (431 modules)
+ ✓ Compiled in 278ms (431 modules)
+ ✓ Compiled in 204ms (431 modules)
+ ✓ Compiled in 923ms (431 modules)
+ ✓ Compiled in 930ms (431 modules)
+ ✓ Compiled in 285ms (431 modules)
+ ✓ Compiled in 237ms (431 modules)
+ ✓ Compiled in 258ms (431 modules)
+ ✓ Compiled in 358ms (539 modules)
+ ✓ Compiled in 247ms (431 modules)
+ ✓ Compiled in 271ms (431 modules)
+ ✓ Compiled in 229ms (431 modules)
+ ✓ Compiled in 260ms (431 modules)
+ ✓ Compiled in 259ms (431 modules)
+ ✓ Compiled in 261ms (431 modules)
+ ✓ Compiled in 251ms (431 modules)
+ ✓ Compiled in 221ms (431 modules)
+ ✓ Compiled in 254ms (431 modules)
+ ✓ Compiled in 245ms (431 modules)
+ ✓ Compiled in 256ms (431 modules)
+ ✓ Compiled in 226ms (431 modules)
+ ✓ Compiled in 245ms (431 modules)
+ ✓ Compiled in 235ms (431 modules)
+ ✓ Compiled in 244ms (431 modules)
+ ✓ Compiled in 253ms (431 modules)
+ ✓ Compiled in 218ms (431 modules)
+ ✓ Compiled in 211ms (431 modules)
+ ✓ Compiled in 221ms (431 modules)
+ ✓ Compiled in 321ms (431 modules)
+ ✓ Compiled in 210ms (431 modules)
+ ✓ Compiled in 245ms (431 modules)
+ POST /admin/sync 200 in 215290ms
+ ✓ Compiled in 257ms (431 modules)
+ ✓ Compiled in 199ms (431 modules)
+ ✓ Compiled in 217ms (431 modules)
+ ✓ Compiled in 236ms (431 modules)
+ ✓ Compiled in 255ms (431 modules)
+ ✓ Compiled in 228ms (431 modules)
+ ✓ Compiled in 240ms (431 modules)
+ ✓ Compiled in 260ms (431 modules)
+ ✓ Compiled in 201ms (431 modules)
+ ✓ Compiled in 207ms (431 modules)
+ ✓ Compiled in 200ms (431 modules)
+ ✓ Compiled in 229ms (431 modules)
+ ✓ Compiled in 214ms (431 modules)
+ ✓ Compiled in 227ms (431 modules)
+ ✓ Compiled in 345ms (431 modules)
+ ✓ Compiled in 387ms (430 modules)
+ ✓ Compiled in 278ms (430 modules)
+ ✓ Compiled in 228ms (430 modules)
+ ✓ Compiled in 219ms (430 modules)
+ ✓ Compiled in 219ms (430 modules)
+ ✓ Compiled in 227ms (430 modules)
+ ○ Compiling / ...
+ GET / 500 in 6731ms

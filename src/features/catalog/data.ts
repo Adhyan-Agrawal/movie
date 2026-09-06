@@ -1,32 +1,25 @@
 import { features } from '@/lib/env';
 import type { ContinueWatchingEntry, MediaRow, Title } from './types';
-import { MOCK_CONTINUE_WATCHING, MOCK_HERO, MOCK_ROWS } from './mock-data';
 import { listTitles } from './queries';
 
 /**
  * Catalog read service (Section 6: route handlers -> services -> repositories).
  *
- * When Supabase is configured the home page is built from REAL catalog rows
- * (via `listTitles`, which reads Postgres under RLS). If Supabase is not
- * configured, or the live catalog is empty / errors, we fall back to the local
- * mock catalog so the app is always runnable. `usingMockData` drives the
- * "showing sample catalog" banner so the UI is honest about which it is.
+ * The home page is built ONLY from live catalog rows (via `listTitles`, which
+ * reads Postgres under RLS). If Supabase is not configured, the read fails, or
+ * the catalog is empty, `hero` is null and `rows`/`continueWatching` are empty
+ * so the home page renders an honest empty state — never fabricated content.
+ * `degraded` is true when the live source could not be read at all.
  */
 
 export interface HomeData {
-  hero: Title;
+  /** Null when the catalog is empty or could not be read. */
+  hero: Title | null;
   continueWatching: ContinueWatchingEntry[];
   rows: MediaRow[];
-  /** True when data is mock/degraded rather than from a live source. */
-  usingMockData: boolean;
+  /** True when the live catalog could not be read (unconfigured or DB error). */
+  degraded: boolean;
 }
-
-const MOCK_HOME: HomeData = {
-  hero: MOCK_HERO,
-  continueWatching: MOCK_CONTINUE_WATCHING,
-  rows: MOCK_ROWS,
-  usingMockData: true,
-};
 
 /** Build home rows (featured hero + genre/newest rows) from a live title set. */
 function buildRows(titles: Title[]): MediaRow[] {
@@ -67,14 +60,14 @@ function buildRows(titles: Title[]): MediaRow[] {
 
 export async function getHomeData(): Promise<HomeData> {
   if (!features.supabaseConfigured) {
-    return MOCK_HOME;
+    return { hero: null, continueWatching: [], rows: [], degraded: true };
   }
 
   try {
     const titles = await listTitles({ sort: 'trending' });
     if (!titles.length) {
-      // DB reachable but empty catalog — show mock so the page isn't barren.
-      return MOCK_HOME;
+      // DB reachable but empty catalog — honest empty state, not mock data.
+      return { hero: null, continueWatching: [], rows: [], degraded: false };
     }
 
     const hero = titles.find((t) => t.featured) ?? titles[0]!;
@@ -86,12 +79,12 @@ export async function getHomeData(): Promise<HomeData> {
       // empty until then rather than showing fabricated progress.
       continueWatching: [],
       rows,
-      usingMockData: false,
+      degraded: false,
     };
   } catch (err) {
-    console.warn('catalog.getHomeData: repository failed, using mock fallback', {
+    console.warn('catalog.getHomeData: repository failed, returning empty catalog', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return MOCK_HOME;
+    return { hero: null, continueWatching: [], rows: [], degraded: true };
   }
 }

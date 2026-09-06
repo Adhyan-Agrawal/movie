@@ -1,19 +1,42 @@
+import Link from 'next/link';
+import { buttonClasses } from '@/components/ui/Button';
+import { EmptyState } from '@/components/ui/EmptyState';
 import { getHomeData } from '@/features/catalog/data';
 import { Hero } from '@/features/catalog/components/Hero';
 import { ContinueWatchingRow, MediaRow } from '@/features/catalog/components/MediaRow';
 
 export default async function HomePage() {
-  const { hero, continueWatching, rows, usingMockData } = await getHomeData();
+  const { hero, continueWatching, rows, degraded } = await getHomeData();
+
+  // Honest empty states: no mock fallback, no fabricated rows.
+  if (!hero) {
+    return (
+      <div className="px-4 py-16 md:px-8">
+        {degraded ? (
+          <EmptyState
+            icon="⚠"
+            tone="warning"
+            title="The catalog is unavailable right now"
+            description="We couldn’t load titles from the catalog. Please try again shortly."
+          />
+        ) : (
+          <EmptyState
+            title="The catalog is empty"
+            description="Sync titles from the admin console to start populating Lumora."
+            action={
+              <Link href="/browse" className={buttonClasses({ variant: 'secondary' })}>
+                Browse anyway
+              </Link>
+            }
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col gap-10 pb-8">
       <Hero title={hero} />
-
-      {usingMockData ? (
-        <div className="mx-4 -mt-4 rounded-md border border-warning/30 bg-warning/10 px-4 py-2 text-xs text-warning md:mx-8">
-          Showing sample catalog. Configure Supabase and TMDB to load live content.
-        </div>
-      ) : null}
 
       <div className="flex flex-col gap-10">
         <ContinueWatchingRow entries={continueWatching} />

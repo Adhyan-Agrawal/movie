@@ -1,19 +1,22 @@
 import { PageHeader } from '@/components/ui/PageHeader';
 import { ProvidersExplorer } from '@/features/admin/ProvidersExplorer';
+import { listProviderRows } from '@/features/admin/queries';
 
 export const metadata = {
   title: 'Providers',
   description: 'Playback provider adapters and configuration.',
 };
 
-export default function AdminProvidersPage() {
+export default async function AdminProvidersPage() {
+  const rows = await listProviderRows();
+
   return (
     <div className="py-6">
       <PageHeader
         title="Providers"
-        description="Playback adapters and their configuration. The Vidsrc/VSEmbed fields are shown read-only; changes are audited settings (Section 9)."
+        description="Playback providers from the database (provider.manage), plus the built-in adapter configured in code — shown read-only."
       />
-      <ProvidersExplorer />
+      <ProvidersExplorer rows={rows} />
     </div>
   );
 }

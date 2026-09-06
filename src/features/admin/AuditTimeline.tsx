@@ -1,19 +1,19 @@
 import { Badge } from '@/components/ui/Badge';
 import { cn } from '@/lib/cn';
-import type { AuditEvent, Outcome } from './mock';
+import type { AdminAuditEvent, AuditOutcome } from './types';
 
 /**
- * Vertical audit timeline (Section 10 "Audit" — immutable events with
+ * Vertical audit timeline (Spec Section 10 "Audit" — immutable events with
  * before/after diffs, actor, target, reason, outcome). Rendered as an ordered
  * list for correct reading order; the before/after summary is a compact diff.
  *
  * Hook-free and presentational so it works in Server and Client Components.
+ * Events are real `audit_logs` rows (see `./queries`).
  */
 
-const outcomeMeta: Record<Outcome, { tone: 'success' | 'danger' | 'warning'; label: string; ring: string }> = {
+const outcomeMeta: Record<AuditOutcome, { tone: 'success' | 'danger'; label: string; ring: string }> = {
   success: { tone: 'success', label: 'Success', ring: 'bg-success' },
   failure: { tone: 'danger', label: 'Failed', ring: 'bg-danger' },
-  pending: { tone: 'warning', label: 'Pending', ring: 'bg-warning' },
 };
 
 function formatTimestamp(iso: string): string {
@@ -21,7 +21,7 @@ function formatTimestamp(iso: string): string {
   return `${date.toISOString().slice(0, 10)} ${date.toISOString().slice(11, 16)} UTC`;
 }
 
-export function AuditTimeline({ events, className }: { events: AuditEvent[]; className?: string }) {
+export function AuditTimeline({ events, className }: { events: AdminAuditEvent[]; className?: string }) {
   return (
     <ol className={cn('flex flex-col', className)}>
       {events.map((event, index) => {
@@ -48,8 +48,8 @@ export function AuditTimeline({ events, className }: { events: AuditEvent[]; cla
               </div>
 
               <p className="mt-1 text-xs text-content-subtle">
-                <span className="text-content-muted">{event.actor.name}</span>
-                {` · ${event.actor.role} · `}
+                <span className="font-mono text-content-muted">{event.actor}</span>
+                {' · '}
                 <time dateTime={event.timestamp}>{formatTimestamp(event.timestamp)}</time>
               </p>
 

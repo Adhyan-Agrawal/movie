@@ -3,7 +3,8 @@
 import { useActionState } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
-import { AUTH_INITIAL_STATE, signInAction, type AuthActionState } from '@/features/auth/actions';
+import { AUTH_INITIAL_STATE, type AuthActionState } from '@/features/auth/state';
+import { signInAction } from '@/features/auth/actions';
 
 /**
  * Sign-in form (Spec Section 8). Client component using useActionState so the
