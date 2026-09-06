@@ -10,6 +10,7 @@ import type {
   AdminCounts,
   AdminFeatureFlagRow,
   AdminImportRow,
+  AdminMediaSourceRow,
   AdminProviderRow,
   AdminSiteSettingRow,
 } from './types';
@@ -101,6 +102,42 @@ export async function listAdminTitles({
   type?: TitleType;
 } = {}): Promise<AdminTitlesPage> {
   return repoListTitlesPaged({ query, page, pageSize, type });
+}
+
+// ---------------------------------------------------------------------------
+// Media sources (uploads + remote streams)
+// ---------------------------------------------------------------------------
+
+/**
+ * All media sources attached to a title (every episode slot included), ordered
+ * by priority descending — the same order playback resolution considers them
+ * in. Read through the RLS-scoped server client: the `media_sources_manage`
+ * policy already allows provider.manage holders, so no service key is needed
+ * for reads.
+ */
+export async function listMediaSourcesForTitle(titleId: string): Promise<AdminMediaSourceRow[]> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db
+    .from('media_sources')
+    .select(
+      'id, episode_id, kind, url, reference, label, language, quality, priority, is_default, enabled, consent_required',
+    )
+    .eq('title_id', titleId)
+    .order('priority', { ascending: false })
+    .order('created_at', { ascending: true });
+  if (error) throw new Error(`listMediaSourcesForTitle failed: ${error.message}`);
+  return data ?? [];
+}
+
+/**
+ * A single title by id for the admin console (RLS-scoped, so drafts show for
+ * catalog holders too). Returns undefined when the id matches nothing.
+ */
+export async function getAdminTitleById(titleId: string): Promise<Title | undefined> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db.from('titles').select('*').eq('id', titleId).maybeSingle();
+  if (error) throw new Error(`getAdminTitleById failed: ${error.message}`);
+  return (data as Title | null) ?? undefined;
 }
 
 // ---------------------------------------------------------------------------

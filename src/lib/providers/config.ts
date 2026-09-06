@@ -58,6 +58,12 @@ export interface ProviderConfig {
   consentRequired: boolean;
   /** Id used to resolve: 'imdb' (default) or 'tmdb'. */
   preferredId?: 'imdb' | 'tmdb';
+  /**
+   * Query parameter the provider's embed accepts for resuming at a position
+   * (seconds), e.g. `?startAt=120`. Undefined = the provider documents no
+   * start parameter, so no resume value is ever appended to its URL.
+   */
+  startParam?: string;
   /** Id used by the admin "test playback" / preview action. */
   testTitleId: string;
 }
@@ -100,6 +106,9 @@ export const VIDUP_PROVIDER_CONFIG: ProviderConfig = {
   timeoutMs: 8000,
   enabledRegions: ['*'],
   consentRequired: true,
+  // Documented resume parameter (vidup docs): appended when the viewer has a
+  // saved watch-progress position for the title/episode.
+  startParam: 'startAt',
   testTitleId: 'tt1375666',
 };
 

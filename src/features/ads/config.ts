@@ -75,11 +75,24 @@ export const AD_SLOT_DEFS = {
 export type AdSlotName = keyof typeof AD_SLOT_DEFS;
 
 function readAdsterraKeys(): Record<string, string> {
-  return {
+  const raw = {
     leaderboard: process.env.ADSTERRA_KEY_LEADERBOARD ?? '',
     rectangle: process.env.ADSTERRA_KEY_RECTANGLE ?? '',
     preroll: process.env.ADSTERRA_KEY_PREROLL ?? '',
   };
+  // Adsterra banner zone keys are hex tokens. Anything else (e.g. a pasted
+  // Social Bar / Popunder script URL) is not a banner key — treat it as unset
+  // rather than injecting it into the embed template.
+  const isZoneKey = (v: string) => /^[a-f0-9]{16,64}$/i.test(v.trim());
+  const leaderboard = isZoneKey(raw.leaderboard) ? raw.leaderboard.trim() : '';
+  const rectangle = isZoneKey(raw.rectangle) ? raw.rectangle.trim() : '';
+  // The pre-roll slot wants its own 728x90 banner zone; if only a script URL
+  // was configured (common mistake — that's a different Adsterra product),
+  // fall back to the leaderboard banner zone so the slot still serves.
+  const preroll = isZoneKey(raw.preroll)
+    ? raw.preroll.trim()
+    : leaderboard;
+  return { leaderboard, rectangle, preroll };
 }
 
 /** Resolve a slot's live config (env read at request time, not import time). */

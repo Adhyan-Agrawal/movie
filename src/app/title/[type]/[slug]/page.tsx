@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
-import { publicEnv } from '@/lib/env';
+import { publicEnv, features } from '@/lib/env';
 import { getTitleBySlug } from '@/features/catalog/queries';
 import type { Title, TitleType } from '@/features/catalog/types';
 import { TitleDetail, type TitleAvailability } from '@/features/catalog/components/TitleDetail';
@@ -101,10 +101,11 @@ function buildJsonLd(title: Title, url: string): Record<string, unknown> {
 /**
  * Resolve real playback availability SERVER-SIDE (Spec Section 0: never claim a
  * source works without verifying it). We run the same provider resolution the
- * watch route uses, and map the result to the badge state the detail page
- * shows — so titles with no authorized source are honestly labeled
- * "unavailable" (Play disabled) instead of showing a green "Streaming now" dot
- * that leads to a dead player.
+ * watch route uses, and also check for native media_sources (Lumora-hosted
+ * mp4/hls/dash) — either one makes the title playable — then map the result to
+ * the badge state the detail page shows, so titles with no authorized source
+ * are honestly labeled "unavailable" (Play disabled) instead of showing a green
+ * "Streaming now" dot that leads to a dead player.
  *
  * When a source DOES resolve we return 'available' and keep Play enabled even
  * if the provider is consent-gated: the consent step lives on the /watch route
@@ -120,7 +121,20 @@ async function resolveAvailability(title: Title): Promise<TitleAvailability> {
     ...(external.imdbId ? { imdbId: external.imdbId } : {}),
   };
   const resolved = await resolvePlayback(request);
-  return resolved.source ? 'available' : 'unavailable';
+  if (resolved.source) return 'available';
+
+  // No embed resolved — a native upload still makes the title playable.
+  if (features.supabaseConfigured) {
+    try {
+      const { resolveNativeSources } = await import('@/features/playback/native-sources');
+      if ((await resolveNativeSources(title.id)).length > 0) return 'available';
+    } catch (err) {
+      console.warn('title.resolveAvailability: native source check failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return 'unavailable';
 }
 
 export default async function TitlePage({ params }: TitleParams) {

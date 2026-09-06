@@ -4,10 +4,11 @@ import { notFound } from 'next/navigation';
 import { Badge } from '@/components/ui/Badge';
 import { buttonClasses } from '@/components/ui/Button';
 import { Container } from '@/components/ui/Container';
+import { features } from '@/lib/env';
 import { getTitleBySlug } from '@/features/catalog/queries';
 import type { TitleType } from '@/features/catalog/types';
-import { getProviderConfig } from '@/lib/providers/config';
-import type { PlaybackRequest } from '@/lib/providers/types';
+import { getProviderConfig, listProviderConfigs } from '@/lib/providers/config';
+import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { resolvePlayback } from '@/lib/providers/registry';
 import { PlayerShell } from '@/features/player/PlayerShell';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
@@ -70,12 +71,27 @@ export default async function WatchPage({
   const season = toIndex(seasonParam);
   const episode = toIndex(episodeParam);
 
+  // TV: resolve the exact episode row so native sources and watch progress can
+  // target it (provider embeds build URLs from season/episode numbers instead).
+  let episodeId: string | undefined;
+  if (title.type === 'tv' && season !== undefined && episode !== undefined && features.supabaseConfigured) {
+    try {
+      const { findEpisodeId } = await import('@/features/playback/native-sources');
+      episodeId = (await findEpisodeId(title.id, season, episode)) ?? undefined;
+    } catch (err) {
+      console.warn('playback.episodeLookup failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   // The title's own TMDB/IMDb ids from the catalog row drive playback resolution.
   const external = resolveTitleExternalIds(title);
 
   const request: PlaybackRequest = {
     titleId: title.id,
     type: title.type,
+    ...(episodeId ? { episodeId } : {}),
     ...(external.tmdbId ? { tmdbId: external.tmdbId } : {}),
     ...(external.imdbId ? { imdbId: external.imdbId } : {}),
     ...(title.type === 'tv' && season !== undefined ? { season } : {}),
@@ -84,6 +100,49 @@ export default async function WatchPage({
 
   const resolved = await resolvePlayback(request);
   const providerConfig = getProviderConfig('vidsrc');
+
+  // Native media sources (Spec Section 9): Lumora-hosted mp4/hls/dash rows.
+  // `media_sources` is provider-managed (not public under RLS), so resolution
+  // runs server-side with the service client and returns sanitized sources —
+  // storage rows become 4h signed URLs. A failure degrades to embeds only.
+  let nativeSources: PlaybackSource[] = [];
+  if (features.supabaseConfigured) {
+    try {
+      const { resolveNativeSources } = await import('@/features/playback/native-sources');
+      nativeSources = await resolveNativeSources(title.id, episodeId);
+    } catch (err) {
+      console.warn('playback.nativeSources failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Watch-resume: the signed-in viewer's saved position for this title/episode
+  // (anonymous viewers and finished/barely-started titles resume nothing).
+  let resumePos: { positionSeconds: number; progress: number } | null = null;
+  if (features.supabaseConfigured) {
+    try {
+      const { getResumePosition } = await import('@/features/playback/progress-queries');
+      resumePos = await getResumePosition(title.id, episodeId);
+    } catch (err) {
+      console.warn('playback.resumeLookup failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  // Embed resume: providers that document a start parameter (only vidup today,
+  // via ProviderConfig.startParam) get the saved position appended to their
+  // URL — but only once it is meaningfully past the start (> 30s).
+  const resumeSeconds = resumePos?.positionSeconds ?? 0;
+  const providerConfigs = new Map(listProviderConfigs().map((c) => [c.id, c] as const));
+  const embedSources = resolved.sources.map((s) => {
+    if (!s.url || resumeSeconds <= 30 || !s.providerId) return s;
+    const config = providerConfigs.get(s.providerId);
+    if (!config?.startParam) return s;
+    const joiner = s.url.includes('?') ? '&' : '?';
+    return { ...s, url: `${s.url}${joiner}${config.startParam}=${Math.round(resumeSeconds)}` };
+  });
 
   // Pre-roll ad zone (Spec Section 11): resolved server-side so the key never
   // ships to the client except inside Adsterra's public embed pattern.
@@ -103,13 +162,15 @@ export default async function WatchPage({
   });
 
   // PUBLIC SOURCE LABELING: the public player never names the upstream
-  // provider — not in labels, ids, or serialized props. Sources are branded
-  // "Server 1", "Server 2", … in resolution order; every identifying field is
-  // overwritten so nothing upstream reaches the client payload. The real
+  // provider — not in labels, ids, or serialized props. Native sources merge
+  // FIRST (Lumora's own media outranks third-party embeds, so a native upload
+  // is "Server 1" and the provider embeds shift down), then every source is
+  // branded "Server 1", "Server 2", … in merge order; every identifying field
+  // is overwritten so nothing upstream reaches the client payload. The real
   // provider identity stays in the admin console and server logs. The consent
-  // copy in PlayerShell still discloses that playback runs via an EXTERNAL
-  // service (cookies/terms apply) — just unbranded.
-  const publicSources = resolved.sources.map((s, i) => ({
+  // copy in PlayerShell still discloses that embed playback runs via an
+  // EXTERNAL service (cookies/terms apply) — just unbranded.
+  const publicSources: PlaybackSource[] = [...nativeSources, ...embedSources].map((s, i) => ({
     ...s,
     id: `server-${i + 1}`,
     label: `Server ${i + 1}`,
@@ -129,6 +190,8 @@ export default async function WatchPage({
           sources={publicSources}
           providerLabel={providerLabel}
           consentRequired={consentRequired}
+          {...(episodeId ? { episodeId } : {})}
+          {...(resumePos ? { initialPosition: resumePos.positionSeconds } : {})}
           preroll={preroll}
         />
 

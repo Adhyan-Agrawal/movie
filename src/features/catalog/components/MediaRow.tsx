@@ -41,7 +41,25 @@ export function ContinueWatchingRow({ entries }: { entries: ContinueWatchingEntr
       <ul className="flex gap-3 overflow-x-auto px-4 pb-2 md:px-8 [scrollbar-width:thin]">
         {entries.map((entry) => (
           <li key={entry.title.id} style={{ scrollSnapAlign: 'start' }}>
-            <MediaCard title={entry.title} progress={entry.progress.progress} />
+            {entry.progress ? (
+              /* Native playback recorded a real position — show the bar. */
+              <div className="relative">
+                <MediaCard title={entry.title} progress={entry.progress.progress} />
+                <span className="sr-only">
+                  {Math.round(entry.progress.progress * 100)}% watched — resume {entry.title.name}
+                </span>
+              </div>
+            ) : (
+              /* Watched via an external server, which shares no position: an
+                 honest "Continue" badge instead of a fabricated progress bar. */
+              <div className="relative">
+                <MediaCard title={entry.title} />
+                <span className="absolute left-2 top-9 rounded bg-surface/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-content shadow-soft">
+                  Continue
+                </span>
+                <span className="sr-only">Continue {entry.title.name} — position unknown</span>
+              </div>
+            )}
           </li>
         ))}
       </ul>

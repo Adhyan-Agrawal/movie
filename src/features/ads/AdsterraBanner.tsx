@@ -5,11 +5,10 @@ import { cn } from '@/lib/cn';
 /**
  * Adsterra banner unit (Spec Section 11).
  *
- * Adsterra's embed sets a global `atOptions` then loads an invoke.js that
- * document.writes an iframe. Two units on one page would therefore clobber
- * each other's options — so each unit is isolated in its own about:srcdoc
- * iframe containing the full stock snippet. The srcdoc inherits the page CSP,
- * so the invoke host must be allowlisted in next.config.mjs (it is).
+ * The snippet is served as a real document from /api/ad-frame (Adsterra's
+ * invoke.js refuses `about:srcdoc` frames — it requires an http(s) location)
+ * and embedded with a normal iframe src. Multiple units per page work because
+ * each carries its own key+size in the URL.
  *
  * If the zone key is missing the parent renders a labeled placeholder instead
  * (see AdSlot); this component is only used with a real key.
@@ -25,23 +24,7 @@ export function AdsterraBanner({
   height: number;
   className?: string;
 }) {
-  // Adsterra's stock banner snippet, verbatim, parameterized by the zone key.
-  const srcDoc = `<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><style>html,body{margin:0;padding:0;overflow:hidden;background:transparent}</style></head>
-<body>
-<script type="text/javascript">
-  atOptions = {
-    'key': '${adsterraKey}',
-    'format': 'iframe',
-    'height': ${height},
-    'width': ${width},
-    'params': {}
-  };
-</script>
-<script type="text/javascript" src="//www.highperformanceformat.com/${adsterraKey}/invoke.js"></script>
-</body>
-</html>`;
+  const src = `/api/ad-frame?key=${encodeURIComponent(adsterraKey)}&w=${width}&h=${height}`;
 
   return (
     <div
@@ -50,13 +33,11 @@ export function AdsterraBanner({
     >
       <iframe
         title={`Advertisement (${width}×${height})`}
-        srcDoc={srcDoc}
+        src={src}
         width={width}
         height={height}
         scrolling="no"
         frameBorder={0}
-        // Never let the ad frame script Lumora or submit forms.
-        sandbox="allow-scripts allow-popups allow-popups-to-escape-sandbox"
         className="border-0 bg-transparent"
       />
     </div>

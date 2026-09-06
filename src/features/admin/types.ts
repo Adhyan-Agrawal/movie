@@ -17,6 +17,15 @@ export type AdminAccountRow = Pick<
 /** A `providers` row (provider.manage). */
 export type AdminProviderRow = Tables<'providers'>;
 
+/**
+ * A `media_sources` row, restricted to the columns the admin sources UI needs
+ * (provider.manage). Raw URLs/references never leave the admin surface.
+ */
+export type AdminMediaSourceRow = Pick<
+  Tables<'media_sources'>,
+  'id' | 'episode_id' | 'kind' | 'url' | 'reference' | 'label' | 'language' | 'quality' | 'priority' | 'is_default' | 'enabled' | 'consent_required'
+>;
+
 /** An `imports` row (catalog.create). */
 export type AdminImportRow = Tables<'imports'>;
 

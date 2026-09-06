@@ -58,6 +58,25 @@ function buildRows(titles: Title[]): MediaRow[] {
   return rows;
 }
 
+/**
+ * Continue-watching row for the signed-in viewer. Dynamically imported (like
+ * the repository in ./queries) so the server-only progress module never lands
+ * in a client bundle. Anonymous viewers and read failures get [] — the row
+ * simply does not render.
+ */
+async function loadContinueWatching(): Promise<ContinueWatchingEntry[]> {
+  if (!features.supabaseConfigured) return [];
+  try {
+    const { getContinueWatching } = await import('@/features/playback/progress-queries');
+    return await getContinueWatching();
+  } catch (err) {
+    console.warn('catalog.getHomeData: continue-watching read failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
 export async function getHomeData(): Promise<HomeData> {
   if (!features.supabaseConfigured) {
     return { hero: null, continueWatching: [], rows: [], degraded: true };
@@ -65,9 +84,10 @@ export async function getHomeData(): Promise<HomeData> {
 
   try {
     const titles = await listTitles({ sort: 'trending' });
+    const continueWatching = await loadContinueWatching();
     if (!titles.length) {
       // DB reachable but empty catalog — honest empty state, not mock data.
-      return { hero: null, continueWatching: [], rows: [], degraded: false };
+      return { hero: null, continueWatching, rows: [], degraded: false };
     }
 
     const hero = titles.find((t) => t.featured) ?? titles[0]!;
@@ -75,9 +95,7 @@ export async function getHomeData(): Promise<HomeData> {
 
     return {
       hero,
-      // Continue-watching is per-user and wired with auth/watch_progress later;
-      // empty until then rather than showing fabricated progress.
-      continueWatching: [],
+      continueWatching,
       rows,
       degraded: false,
     };

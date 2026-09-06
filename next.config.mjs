@@ -37,8 +37,8 @@ const PROVIDER_FRAME_HOSTS = [
  */
 const isDev = process.env.NODE_ENV !== 'production';
 const SCRIPT_SRC = isDev
-  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval'"
-  : "script-src 'self' 'unsafe-inline'";
+  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.highperformanceformat.com"
+  : "script-src 'self' 'unsafe-inline' https://www.highperformanceformat.com";
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
@@ -46,13 +46,20 @@ const CONTENT_SECURITY_POLICY = [
   "object-src 'none'",
   "frame-ancestors 'none'",
   "form-action 'self'",
-  `frame-src ${PROVIDER_FRAME_HOSTS.join(' ')}`,
-  "img-src 'self' https://image.tmdb.org data: blob:",
+  // 'self' covers the /api/ad-frame banner documents (Spec Section 11); the
+  // rest are the provider embeds, Adsterra's creative host, and YouTube for
+  // trailers.
+  `frame-src 'self' ${PROVIDER_FRAME_HOSTS.join(' ')} https://www.highperformanceformat.com https://www.youtube.com https://www.youtube-nocookie.com`,
+  "img-src 'self' https://image.tmdb.org https://i.ytimg.com data: blob:",
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
   SCRIPT_SRC,
-  "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.themoviedb.org",
-  "media-src 'self' blob:",
+  // Native player (Spec Sections 7, 9): signed Supabase-storage URLs and
+  // admin-configured remote streams. https: is required because remote
+  // licensed CDN hosts are not known ahead of time; hls.js fetches segments
+  // over XHR, so connect-src must allow them too.
+  "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.themoviedb.org https:",
+  "media-src 'self' blob: https:",
 ].join('; ');
 
 /** @type {import('next').NextConfig} */
@@ -67,7 +74,9 @@ const nextConfig = {
   async headers() {
     return [
       {
-        source: '/:path*',
+        // Everything EXCEPT the ad-frame document, which must be framable by
+        // our own pages (it carries its own permissive CSP below).
+        source: '/((?!api/ad-frame).*)',
         headers: [
           { key: 'Content-Security-Policy', value: CONTENT_SECURITY_POLICY },
           { key: 'X-Content-Type-Options', value: 'nosniff' },

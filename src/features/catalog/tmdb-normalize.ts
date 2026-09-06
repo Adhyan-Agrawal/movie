@@ -58,6 +58,42 @@ export interface TmdbCastEntry {
   order: number | null;
 }
 
+/** A `videos` append_to_response payload (trimmed to the trailers we keep). */
+export interface TmdbVideos {
+  results?: TmdbVideoEntry[];
+}
+
+export interface TmdbVideoEntry {
+  key: string | null;
+  name: string | null;
+  site: string | null;
+  type: string | null;
+  official: boolean | null;
+}
+
+/**
+ * Pick the best official YouTube trailer URL from a `videos` payload, or null.
+ * Preference: official Trailer > any Trailer > official Teaser > any Teaser.
+ */
+export function normalizeTrailer(videos: TmdbVideos | undefined): string | null {
+  const results = (videos?.results ?? []).filter(
+    (v) => v.site === 'YouTube' && typeof v.key === 'string' && v.key.length > 0,
+  );
+  const byType = (type: string) => {
+    const official = results.find((v) => v.type === type && v.official);
+    return official ?? results.find((v) => v.type === type);
+  };
+  const pick = byType('Trailer') ?? byType('Teaser');
+  return pick?.key ? `https://www.youtube.com/watch?v=${pick.key}` : null;
+}
+
+/** Extract the YouTube video key (for embeds) from a watch URL, or null. */
+export function youtubeKey(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const m = /[?&]v=([A-Za-z0-9_-]{6,20})/.exec(url);
+  return m?.[1] ?? null;
+}
+
 export interface TmdbMovieDetail {
   id: number;
   imdb_id: string | null;

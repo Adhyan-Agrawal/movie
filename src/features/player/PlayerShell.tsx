@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import type { PlaybackError, PlaybackSource } from '@/lib/providers/types';
 import { type PlayerState, playerStateForError } from './player-states';
 import { PlayerControlsBar } from './PlayerControlsBar';
+import { NativePlayer } from './NativePlayer';
 import { PreRollAd } from '@/features/ads/PreRollAd';
 import {
   reportPlaybackEndAction,
@@ -30,6 +31,10 @@ import {
  * cannot, and must not try. Because embed providers expose no reliable
  * telemetry (capabilities.telemetry === false), Lumora keeps its own progress
  * via {@link recordHeartbeat} (a no-op stub for this slice).
+ *
+ * Native sources (mp4/hls/dash) bypass the iframe entirely and render
+ * {@link NativePlayer} in the same surface — consent/pre-roll gates still apply,
+ * and native telemetry (real positions) flows to watch_progress separately.
  */
 
 export interface PlayerShellProps {
@@ -40,6 +45,10 @@ export interface PlayerShellProps {
   sources?: PlaybackSource[];
   providerLabel?: string;
   consentRequired?: boolean;
+  /** TV episode id, so native-player progress targets the exact episode. */
+  episodeId?: string;
+  /** Saved resume position (seconds) forwarded to the native player. */
+  initialPosition?: number;
   /**
    * Pre-roll ad zone (Spec Section 11). Resolved server-side from env and
    * passed here — env vars are stripped from client bundles. Null = no pre-roll.
@@ -102,22 +111,25 @@ export function PlayerShell({
   sources = [],
   providerLabel,
   consentRequired,
+  episodeId,
+  initialPosition,
   preroll = null,
 }: PlayerShellProps) {
   const router = useRouter();
 
   const hasSource = Boolean(source?.url);
-  const gate = consentRequired ?? source?.consentRequired ?? false;
-  // Public label only — the upstream provider's real name never renders in the
-  // public player (see the watch route's PUBLIC SOURCE LABELING note).
-  const providerName = providerLabel ?? source?.label ?? 'Server 1';
-
   // Active server: defaults to the highest-priority source; the selector
   // switches it. Falls back to the default when the selection disappears
   // (e.g. after a server-side re-resolution).
   const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
   const activeSource = sources.find((s) => s.id === activeSourceId) ?? source;
   const activeHasUrl = Boolean(activeSource?.url);
+  // Gate on the ACTIVE source (switching servers re-evaluates consent), with
+  // the route-level prop as fallback.
+  const gate = activeSource?.consentRequired ?? consentRequired ?? false;
+  // Public label only — the upstream provider's real name never renders in the
+  // public player (see the watch route's PUBLIC SOURCE LABELING note).
+  const providerName = providerLabel ?? source?.label ?? 'Server 1';
 
   const [consented, setConsented] = useState(false);
   const [state, setState] = useState<PlayerState>('loading');
@@ -142,15 +154,25 @@ export function PlayerShell({
   // player renders the unavailable panel for that server.
   const showConsent = activeHasUrl && gate && !consented;
   const showAd = activeHasUrl && !showConsent && preroll !== null && !adDone;
-  const showIframe = activeHasUrl && (!gate || consented) && adDone;
-  const iframeFailed = showIframe && state === 'provider-error';
+  // The player surface (native or iframe) mounts only after the gates clear.
+  const showPlayer = activeHasUrl && (!gate || consented) && adDone;
+  // Native sources (Lumora-hosted mp4/hls/dash) render <video> instead of an
+  // embed iframe — same surface, same gates, real telemetry.
+  const nativeKind =
+    activeSource && activeSource.url
+      ? activeSource.kind === 'mp4' || activeSource.kind === 'hls' || activeSource.kind === 'dash'
+        ? activeSource.kind
+        : null
+      : null;
+  const showNative = showPlayer && nativeKind !== null;
+  const playerFailed = showPlayer && state === 'provider-error';
 
   // Lumora-owned session recording — provider telemetry is unavailable.
   const sessionIdRef = useRef<string | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
 
   useEffect(() => {
-    if (!showIframe) return;
+    if (!showPlayer) return;
     // One session row per player mount (reloadKey re-mounts count as replays).
     let cancelled = false;
     sessionIdRef.current = null;
@@ -167,16 +189,16 @@ export function PlayerShell({
       sessionIdRef.current = null;
       setSessionReady(false);
     };
-  }, [showIframe, reloadKey, title.id]);
+  }, [showPlayer, reloadKey, title.id]);
 
   useEffect(() => {
-    if (!showIframe || !sessionReady) return;
+    if (!showPlayer || !sessionReady) return;
     const id = sessionIdRef.current;
     if (!id) return;
     recordHeartbeat(id); // first beat at mount
     const interval = window.setInterval(() => recordHeartbeat(id), 30_000);
     return () => window.clearInterval(interval);
-  }, [showIframe, sessionReady]);
+  }, [showPlayer, sessionReady]);
 
   function handleConsent() {
     setConsented(true);
@@ -206,13 +228,19 @@ export function PlayerShell({
   }
 
   function handleSelectSource(id: string) {
-    // Switching servers: the active source changes and the iframe re-mounts
+    // Switching servers: the active source changes and the player re-mounts
     // (fresh load) with the newly selected source's URL.
     if (!id) return;
     setActiveSourceId(id);
     setState('loading');
     setReloadKey((key) => key + 1);
   }
+
+  // Stable callbacks: NativePlayer's media effect depends on these, so they
+  // must not change identity across renders (a new function would reload the
+  // video from scratch on every parent render).
+  const handleNativeReady = useCallback(() => setState('ready'), []);
+  const handleNativeError = useCallback(() => setState('provider-error'), []);
 
   return (
     <section aria-label={`Player for ${title.name}`} className="flex flex-col gap-3">
@@ -241,7 +269,7 @@ export function PlayerShell({
               setState('loading');
             }}
           />
-        ) : iframeFailed ? (
+        ) : playerFailed ? (
           <UnavailablePanel
             message={unavailableMessage({ code: 'provider-error', message: '', recoverable: true })}
             onRetry={handleRetry}
@@ -263,48 +291,61 @@ export function PlayerShell({
               </div>
             ) : null}
 
-            {/*
-              SECURITY / CSP — this external embed requires a CSP `frame-src`
-              directive that allowlists the provider origin (from
-              ProviderConfig.allowedDomains, e.g. `frame-src https://vsembed.su`).
-              The global response headers (next.config.mjs) are owned elsewhere
-              and are NOT edited here; they must add that directive for this
-              iframe to load under a strict CSP.
+            {showNative ? (
+              /* Lumora-hosted media: a real <video> element with native
+                 controls, resume support, and honest position telemetry. */
+              <NativePlayer
+                key={`${activeSource!.id}-${reloadKey}`}
+                source={{ url: activeSource!.url!, kind: nativeKind! }}
+                titleId={title.id}
+                {...(episodeId ? { episodeId } : {})}
+                {...(initialPosition !== undefined ? { initialPosition } : {})}
+                onReady={handleNativeReady}
+                onError={handleNativeError}
+              />
+            ) : (
+              /*
+                SECURITY / CSP — this external embed requires a CSP `frame-src`
+                directive that allowlists the provider origin (from
+                ProviderConfig.allowedDomains, e.g. `frame-src https://vsembed.su`).
+                The global response headers (next.config.mjs) are owned elsewhere
+                and are NOT edited here; they must add that directive for this
+                iframe to load under a strict CSP.
 
-              sandbox: intentionally ABSENT. The provider's player refuses to
-                run inside a sandboxed frame (it detects the attribute and
-                blocks playback with "This content can't be embedded in a
-                sandboxed frame"), and for a cross-origin embed the
-                `allow-scripts allow-same-origin` combination grants the embed
-                its own origin's full privileges anyway — it isolates nothing.
-                What actually constrains this iframe: the CSP `frame-src`
-                allowlist (only the provider's domain may be framed),
-                `frame-ancestors 'none'` on our pages, the server-side
-                `assertSafeUrl` host allowlist, and cross-origin isolation (its
-                scripts cannot touch our DOM or cookies regardless of sandbox).
-              referrerPolicy: send only our origin cross-origin (supports the
-                provider's origin allowlisting without leaking the watch path).
-              loading="eager": arriving at /watch IS the intentional play action,
-                so we do not lazy-load and delay playback.
-            */}
-            <iframe
-              key={`${activeSource!.id}-${reloadKey}`}
-              src={activeSource!.url}
-              title={`${title.name} — external video player (${providerName})`}
-              className="absolute inset-0 h-full w-full border-0"
-              referrerPolicy="strict-origin-when-cross-origin"
-              allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
-              allowFullScreen
-              loading="eager"
-              onLoad={() => setState('ready')}
-              onError={() => setState('provider-error')}
-            />
+                sandbox: intentionally ABSENT. The provider's player refuses to
+                  run inside a sandboxed frame (it detects the attribute and
+                  blocks playback with "This content can't be embedded in a
+                  sandboxed frame"), and for a cross-origin embed the
+                  `allow-scripts allow-same-origin` combination grants the embed
+                  its own origin's full privileges anyway — it isolates nothing.
+                  What actually constrains this iframe: the CSP `frame-src`
+                  allowlist (only the provider's domain may be framed),
+                  `frame-ancestors 'none'` on our pages, the server-side
+                  `assertSafeUrl` host allowlist, and cross-origin isolation (its
+                  scripts cannot touch our DOM or cookies regardless of sandbox).
+                referrerPolicy: send only our origin cross-origin (supports the
+                  provider's origin allowlisting without leaking the watch path).
+                loading="eager": arriving at /watch IS the intentional play action,
+                  so we do not lazy-load and delay playback.
+              */
+              <iframe
+                key={`${activeSource!.id}-${reloadKey}`}
+                src={activeSource!.url}
+                title={`${title.name} — external video player (${providerName})`}
+                className="absolute inset-0 h-full w-full border-0"
+                referrerPolicy="strict-origin-when-cross-origin"
+                allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
+                allowFullScreen
+                loading="eager"
+                onLoad={() => setState('ready')}
+                onError={() => setState('provider-error')}
+              />
+            )}
           </>
         )}
       </div>
 
-      <PlayerControlsBar
-        backHref={`/title/${title.type}/${title.slug}`}
+      <PlayerControlsBar        backHref={`/title/${title.type}/${title.slug}`}
         backLabel={`Back to ${title.name} details`}
         sources={sources}
         selectedSourceId={activeSource?.id ?? null}
@@ -313,10 +354,18 @@ export function PlayerShell({
         reported={reported}
       />
 
-      {/* Explicit external-provider labeling (Spec Section 9). */}
-      <p className="text-xs text-content-subtle">
-        Played via {providerName}. Lumora does not host this video and cannot guarantee its availability.
-      </p>
+      {nativeKind ? (
+        /* Native playback (Spec Section 9): Lumora-hosted media streamed from
+           signed URLs — real telemetry, no third-party cookies or terms. */
+        <p className="text-xs text-content-subtle">
+          Playing on Lumora’s native player. Your progress is saved automatically while you watch.
+        </p>
+      ) : (
+        /* Explicit external-provider labeling (Spec Section 9). */
+        <p className="text-xs text-content-subtle">
+          Played via {providerName}. Lumora does not host this video and cannot guarantee its availability.
+        </p>
+      )}
     </section>
   );
 }

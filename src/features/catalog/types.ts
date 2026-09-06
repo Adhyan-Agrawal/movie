@@ -44,7 +44,12 @@ export interface WatchProgress {
 
 export interface ContinueWatchingEntry {
   title: Title;
-  progress: WatchProgress;
+  /**
+   * Real watch progress when the native player recorded it. Absent for titles
+   * watched via an external embed server — those share no position, so the UI
+   * shows an honest "Continue" badge instead of a fabricated progress bar.
+   */
+  progress?: WatchProgress;
 }
 
 export interface MediaRow {
