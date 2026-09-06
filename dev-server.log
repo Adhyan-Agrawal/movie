@@ -1,0 +1,39 @@
+   ▲ Next.js 15.5.25
+   - Local:        http://localhost:3100
+   - Network:      http://10.111.168.89:3100
+   - Environments: .env
+
+ ✓ Starting...
+ ✓ Ready in 3.1s
+ ✓ Compiled /middleware in 333ms (170 modules)
+ ○ Compiling / ...
+ ✓ Compiled / in 4.7s (729 modules)
+ GET / 200 in 6823ms
+ ○ Compiling /movies ...
+ ✓ Compiled /movies in 1604ms (735 modules)
+ GET /movies 200 in 2500ms
+ ✓ Compiled /tv in 437ms (724 modules)
+ GET /tv 200 in 1165ms
+ ✓ Compiled /browse in 386ms (727 modules)
+ GET /browse 200 in 1206ms
+ ○ Compiling /search ...
+ ✓ Compiled /search in 846ms (855 modules)
+ GET /search 200 in 1339ms
+ ○ Compiling /title/[type]/[slug] ...
+ ✓ Compiled /title/[type]/[slug] in 840ms (894 modules)
+ GET /title/tv/breaking-bad-1396 200 in 3794ms
+ ○ Compiling /watch/[type]/[slug] ...
+ ✓ Compiled /watch/[type]/[slug] in 1000ms (915 modules)
+ GET /watch/tv/breaking-bad-1396?season=1&episode=1 200 in 2661ms
+ ○ Compiling /admin ...
+ ✓ Compiled /admin in 681ms (935 modules)
+ GET /admin 200 in 1246ms
+ ○ Compiling /account ...
+ ✓ Compiled /account in 582ms (947 modules)
+ GET /account 200 in 925ms
+ ○ Compiling /api/health ...
+ ✓ Compiled /api/health in 629ms (964 modules)
+ GET /api/health 200 in 852ms
+ ○ Compiling /sitemap.xml ...
+ ✓ Compiled /sitemap.xml in 774ms (968 modules)
+ GET /sitemap.xml 200 in 1250ms

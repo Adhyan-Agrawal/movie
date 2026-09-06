@@ -1,0 +1,7 @@
+playback.resolve {
+  titleId: '257934d3-184e-4ffa-ba4f-d6fdffdfdf24',
+  type: 'tv',
+  providerId: 'vidsrc',
+  sourceKind: 'embed',
+  ok: true
+}
