@@ -26,3 +26,10 @@
  GET /admin 404 in 108ms
  ✓ Compiled in 576ms (431 modules)
  ✓ Compiled in 487ms (431 modules)
+ GET /account 200 in 293ms
+ GET /admin 200 in 1104ms
+ GET /api/health 200 in 444ms
+ GET /account 200 in 157ms
+ GET /admin 404 in 95ms
+ GET /account 200 in 283ms
+ GET /admin 404 in 101ms
