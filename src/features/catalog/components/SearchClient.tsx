@@ -47,7 +47,7 @@ function writeRecents(list: string[]): void {
 const chipClass =
   'inline-flex h-11 items-center rounded-md border border-border bg-surface-raised px-3 text-xs text-content transition-colors hover:border-border-strong hover:bg-surface-overlay focus-visible:outline-none';
 
-export function SearchClient({ initialQuery }: { initialQuery: string }) {
+export function SearchClient({ initialQuery, genres = [] }: { initialQuery: string; genres?: string[] }) {
   const router = useRouter();
   const pathname = usePathname();
 
@@ -235,6 +235,26 @@ export function SearchClient({ initialQuery }: { initialQuery: string }) {
               ))}
             </ul>
           </section>
+
+          {genres.length > 0 ? (
+            <section aria-labelledby="genres-heading" className="flex flex-col gap-3">
+              <h2 id="genres-heading" className="text-sm font-semibold text-content">
+                Browse by genre
+              </h2>
+              <ul className="flex flex-wrap gap-2">
+                {genres.map((genre) => (
+                  <li key={genre}>
+                    <Link
+                      href={`/browse?genre=${encodeURIComponent(genre)}`}
+                      className={chipClass}
+                    >
+                      {genre}
+                    </Link>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
         </div>
       ) : (
         <div className="flex flex-col gap-10">
@@ -271,9 +291,14 @@ export function SearchClient({ initialQuery }: { initialQuery: string }) {
                 title={`No results for “${activeQuery}”`}
                 description="Check the spelling, try fewer words, or browse by genre instead."
                 action={
-                  <Link href="/browse" className={buttonClasses({ variant: 'secondary', size: 'sm' })}>
-                    Browse the catalog
-                  </Link>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    <Link href="/browse" className={buttonClasses({ variant: 'secondary', size: 'sm' })}>
+                      Browse the catalog
+                    </Link>
+                    <Link href="/request" className={buttonClasses({ variant: 'primary', size: 'sm' })}>
+                      Request this title
+                    </Link>
+                  </div>
                 }
               />
             ) : null}

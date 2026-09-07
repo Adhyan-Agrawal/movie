@@ -42,6 +42,15 @@ export interface WatchProgress {
   updatedAt: string;
 }
 
+/** Which episode of a series a continue-watching entry points at. */
+export interface WatchEpisodeContext {
+  episodeId: string;
+  seasonNumber: number;
+  episodeNumber: number;
+  /** Episode title, for the row's "S2 E5 · Name" label. */
+  name: string;
+}
+
 export interface ContinueWatchingEntry {
   title: Title;
   /**
@@ -50,6 +59,11 @@ export interface ContinueWatchingEntry {
    * shows an honest "Continue" badge instead of a fabricated progress bar.
    */
   progress?: WatchProgress;
+  /**
+   * For TV: the episode to resume, so the row links to
+   * `/watch/tv/{slug}?season=N&episode=M` and labels itself "S2 E5".
+   */
+  episode?: WatchEpisodeContext;
 }
 
 export interface MediaRow {

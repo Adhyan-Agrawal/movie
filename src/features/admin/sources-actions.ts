@@ -6,6 +6,7 @@ import type { MediaSourceKindEnum } from '@/lib/supabase/types';
 import { requirePermission } from '@/lib/permissions/check';
 import { PERMISSIONS } from '@/lib/permissions/permissions';
 import { MEDIA_SOURCE_KINDS, isPrivateOrLoopbackHost } from '@/lib/validation/source';
+import { findEpisodeId } from '@/features/playback/native-sources';
 import { inferRemoteSourceKind, inferSourceKind, sanitizeUploadFilename } from './source-utils';
 
 /**
@@ -165,10 +166,17 @@ export async function confirmUploadedSourceAction(input: {
  * localhost/private/link-local hosts (reusing the host checks from
  * `@/lib/validation/source`). The kind is taken from the form when given,
  * otherwise inferred from the URL's path extension, defaulting to 'hls'.
+ *
+ * The target episode can be given directly as `episodeId`, or as a
+ * season+episode pair (used by the remote form) which is resolved to an
+ * episode row id SERVER-SIDE via `findEpisodeId` — the client never guesses
+ * ids. A season without an episode (or vice versa) is rejected.
  */
 export async function addRemoteSourceAction(input: {
   titleId: string;
   episodeId?: string;
+  season?: number;
+  episode?: number;
   url: string;
   kind?: string;
   label?: string;
@@ -182,6 +190,24 @@ export async function addRemoteSourceAction(input: {
   if (!UUID_RE.test(titleId)) return { ok: false, error: 'A valid title is required.' };
   if (input.episodeId !== undefined && input.episodeId !== '' && !UUID_RE.test(input.episodeId)) {
     return { ok: false, error: 'Invalid episode selected.' };
+  }
+
+  // Resolve the target episode: an explicit episodeId, or a season+episode pair
+  // looked up in the seasons/episodes tables. Blank season+episode => whole title.
+  let episodeId: string | null = null;
+  if (input.episodeId) {
+    episodeId = input.episodeId;
+  } else if (input.season !== undefined || input.episode !== undefined) {
+    if (input.season === undefined || input.episode === undefined) {
+      return { ok: false, error: 'Provide both a season and an episode, or leave both blank for the whole title.' };
+    }
+    if (!Number.isInteger(input.season) || input.season < 1 || !Number.isInteger(input.episode) || input.episode < 1) {
+      return { ok: false, error: 'Season and episode must be positive whole numbers.' };
+    }
+    episodeId = await findEpisodeId(titleId, input.season, input.episode);
+    if (!episodeId) {
+      return { ok: false, error: `No episode found for season ${input.season}, episode ${input.episode} — has it been imported?` };
+    }
   }
 
   const rawUrl = (input.url ?? '').trim();
@@ -211,7 +237,7 @@ export async function addRemoteSourceAction(input: {
   const service = getSupabaseServiceClient();
   const { error } = await service.from('media_sources').insert({
     title_id: titleId,
-    episode_id: input.episodeId?.trim() || null,
+    episode_id: episodeId,
     kind,
     url: url.toString(),
     label: (input.label ?? '').trim().slice(0, 120),

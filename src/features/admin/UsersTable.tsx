@@ -1,24 +1,91 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useMemo, useState, useTransition } from 'react';
+import { useRouter } from 'next/navigation';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { DataTable, type Column } from './DataTable';
+import { ConfirmDialog } from './ConfirmDialog';
 import type { AdminAccountRow } from './types';
+import { suspendUserAction, unsuspendUserAction } from './user-actions';
 
 /**
  * Users table (Spec Section 10 "Users"). Renders REAL `accounts` rows passed
  * from the server page (users.read; the accounts table carries no email, so
- * the display name + account id is the support-safe identity). Suspend and
- * revoke-sessions are affordances only — they stay disabled and persist
- * nothing until the user-management phase lands.
+ * the display name + account id is the support-safe identity).
+ *
+ * Each row offers Suspend / Unsuspend wired to the permission-gated server
+ * actions in `./user-actions` (users.suspend), confirmed through the
+ * ConfirmDialog before it runs. Session revocation isn't wired: auth sessions
+ * live in Supabase Auth, outside the public schema these actions reach.
  */
-
-const ACTIONS_PENDING_LABEL = 'Suspend and revoke-sessions actions arrive with the user-management phase.';
 
 function formatDate(iso: string): string {
   return new Date(iso).toISOString().slice(0, 10);
+}
+
+// ---------------------------------------------------------------------------
+// Per-account action cell (suspend / unsuspend)
+// ---------------------------------------------------------------------------
+
+function UserActions({ account }: { account: AdminAccountRow }) {
+  const router = useRouter();
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+
+  const suspending = !account.is_suspended;
+
+  function toggleSuspend() {
+    setError(null);
+    startTransition(async () => {
+      const result = suspending
+        ? await suspendUserAction(account.id)
+        : await unsuspendUserAction(account.id);
+      if (!result.ok) {
+        setError(result.error ?? 'Could not update the account.');
+        setConfirmOpen(false);
+        return;
+      }
+      setConfirmOpen(false);
+      router.refresh();
+    });
+  }
+
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <div className="flex flex-wrap items-center justify-end gap-1">
+        <Button
+          size="sm"
+          variant={suspending ? 'secondary' : 'ghost'}
+          disabled={pending}
+          onClick={() => setConfirmOpen(true)}
+        >
+          {suspending ? 'Suspend' : 'Unsuspend'}
+        </Button>
+      </div>
+      {error ? (
+        <p role="alert" className="text-xs text-danger">
+          {error}
+        </p>
+      ) : null}
+      <ConfirmDialog
+        open={confirmOpen}
+        title={suspending ? 'Suspend this account?' : 'Unsuspend this account?'}
+        description={
+          suspending
+            ? `${account.display_name} will be marked suspended and lose access until an admin unsuspends them.`
+            : `${account.display_name} will be marked active again and regain access.`
+        }
+        confirmLabel={suspending ? 'Suspend' : 'Unsuspend'}
+        tone={suspending ? 'danger' : 'primary'}
+        busy={pending}
+        onCancel={() => setConfirmOpen(false)}
+        onConfirm={toggleSuspend}
+      />
+    </div>
+  );
 }
 
 export function UsersTable({ accounts }: { accounts: AdminAccountRow[] }) {
@@ -80,16 +147,7 @@ export function UsersTable({ accounts }: { accounts: AdminAccountRow[] }) {
         rows={filtered}
         getRowId={(a) => a.id}
         getRowLabel={(a) => a.display_name}
-        rowActions={() => (
-          <>
-            <Button size="sm" variant="ghost" disabled title={ACTIONS_PENDING_LABEL}>
-              Suspend
-            </Button>
-            <Button size="sm" variant="ghost" disabled title={ACTIONS_PENDING_LABEL}>
-              Revoke
-            </Button>
-          </>
-        )}
+        rowActions={(a) => <UserActions account={a} />}
         emptyState={
           accounts.length === 0 ? (
             <EmptyState
@@ -102,8 +160,6 @@ export function UsersTable({ accounts }: { accounts: AdminAccountRow[] }) {
           )
         }
       />
-
-      <p className="text-xs text-content-subtle">{ACTIONS_PENDING_LABEL}</p>
     </div>
   );
 }

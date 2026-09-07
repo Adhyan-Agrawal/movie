@@ -1,0 +1,9 @@
+########## EMBEDDED-IFRAME PROBE (mimics app) ##########
+PLAYER_UI | S1_vidsrc_tmdb       | vidsrc.mov/embed/tv/1416/1/1             | player UI present (needs click?); hasSrc=false; frames=15; text="embed test | Grey's Anatomy 2005 · S01 E01 |   window.onload = fu
+PLAYER_UI | S1_vidsrc_imdb       | vidsrc.mov/embed/tv/tt0413573/1/1        | player UI present (needs click?); hasSrc=false; frames=13; text="embed test | Grey's Anatomy 2005 · S01 E01 |   window.onload = fu
+PLAYER_UI | S2_2embed_tmdb       | www.2embed.cc/embedtv/1416?s=1&e=1       | player UI present (needs click?); hasSrc=false; frames=3; text="embed test | Grey's Anatomy (2005) (S01E01)"
+PLAYER_UI | S2_2embed_imdb       | www.2embed.cc/embedtv/tt0413573?s=1&e=1  | player UI present (needs click?); hasSrc=false; frames=3; text="embed test | Grey's Anatomy (2005) (S01E01)"
+PLAYS     | S3_vsembed_tmdb      | vsembed.su/embed/tv/1416/1/1             | video src=yes rs=0 paused=true t=0.0s frame="https://cloudorchestranova.com/embed/player/tv/1416/1/1?vs=6g6_Cn1u1Crc09O1I1Y-r"
+PLAYS     | S3_vsembed_imdb      | vsembed.su/embed/tv/tt0413573/1/1        | video src=yes rs=0 paused=false t=0.0s frame="https://cloudorchestranova.com/embed/player/tv/tt0413573/1/1?vs=PoUG8mw-buALXyc8"
+PLAYER_UI | S4_vidup_tmdb        | vidup.to/tv/1416/1/1                     | player UI present (needs click?); hasSrc=false; frames=2; text="embed test | GETTING THINGS READY..."
+PLAYER_UI | S4_vidup_imdb        | vidup.to/tv/tt0413573/1/1                | player UI present (needs click?); hasSrc=false; frames=2; text="embed test | GETTING THINGS READY..."

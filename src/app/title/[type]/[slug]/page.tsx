@@ -9,6 +9,7 @@ import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { resolvePlayback } from '@/lib/providers/registry';
 import type { PlaybackRequest } from '@/lib/providers/types';
 import { AdSlot } from '@/features/ads/AdSlot';
+import { ConsentGate } from '@/features/ads/ConsentGate';
 import { isInWatchlist } from '@/features/watchlist/queries';
 
 const TITLE_TYPES: readonly TitleType[] = ['movie', 'tv'];
@@ -148,6 +149,21 @@ export default async function TitlePage({ params }: TitleParams) {
     notFound();
   }
 
+  // On-demand enrichment (Spec Section 4): series imported by the bulk sync
+  // with seasons but no episode rows are backfilled from TMDB on first view, so
+  // a viewer never hits an empty episode list. Best-effort — never blocks or
+  // breaks the page.
+  if (title.type === 'tv' && features.supabaseConfigured) {
+    try {
+      const { ensureTitleComplete } = await import('@/features/catalog/title-enrichment');
+      await ensureTitleComplete(title.id);
+    } catch (err) {
+      console.warn('title.enrichment failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   const availability = await resolveAvailability(title);
   const inWatchlist = await isInWatchlist(title.id);
   const jsonLd = buildJsonLd(title, canonicalUrl(type, slug));
@@ -159,7 +175,7 @@ export default async function TitlePage({ params }: TitleParams) {
       <TitleDetail title={title} availability={availability} initialInWatchlist={inWatchlist} />
       {/* Ad (Spec Section 11): one rectangle below the title details — below the
           fold, after the content, never between the user and the Play action. */}
-      <AdSlot slot="titleRectangle" className="pb-8" />
+      <ConsentGate><AdSlot slot="titleRectangle" className="pb-8" /></ConsentGate>
     </>
   );
 }

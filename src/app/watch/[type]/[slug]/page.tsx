@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { notFound } from 'next/navigation';
+import { notFound, redirect } from 'next/navigation';
 import { Badge } from '@/components/ui/Badge';
 import { buttonClasses } from '@/components/ui/Button';
 import { Container } from '@/components/ui/Container';
@@ -11,9 +11,11 @@ import { getProviderConfig, listProviderConfigs } from '@/lib/providers/config';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { resolvePlayback } from '@/lib/providers/registry';
 import { PlayerShell } from '@/features/player/PlayerShell';
+import { EpisodeNavLinks, type EpisodeNavTarget } from '@/features/player/EpisodeNavLinks';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { getAdSlot } from '@/features/ads/config';
 import { AdSlot } from '@/features/ads/AdSlot';
+import { ConsentGate } from '@/features/ads/ConsentGate';
 
 /**
  * Watch route (Spec Section 3 & 9). Server component: loads the title, resolves
@@ -71,6 +73,33 @@ export default async function WatchPage({
   const season = toIndex(seasonParam);
   const episode = toIndex(episodeParam);
 
+  // TV without a specific episode: deep-link to the first available one instead
+  // of sending the provider a whole-series URL. vidup (Server 4) and 2embed
+  // (Server 2) only document episode-shaped routes — `/tv/{id}` / `/embedtvfull`
+  // fail, so a series Play button used to dead-end. Resolving S1E1 (or the real
+  // first episode when imported) means every provider builds its concrete
+  // episode URL and playback starts.
+  if (title.type === 'tv' && (season === undefined || episode === undefined)) {
+    let firstSeason = 1;
+    let firstEpisode = 1;
+    if (features.supabaseConfigured) {
+      try {
+        const { listSeasonsForTitle } = await import('@/features/catalog/queries');
+        const seasons = await listSeasonsForTitle(title.id);
+        const first = seasons.find((s) => s.episodes.length > 0);
+        if (first && first.episodes[0]) {
+          firstSeason = first.seasonNumber;
+          firstEpisode = first.episodes[0].episodeNumber;
+        }
+      } catch (err) {
+        console.warn('playback.firstEpisodeLookup failed', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    redirect(`/watch/tv/${title.slug}?season=${firstSeason}&episode=${firstEpisode}`);
+  }
+
   // TV: resolve the exact episode row so native sources and watch progress can
   // target it (provider embeds build URLs from season/episode numbers instead).
   let episodeId: string | undefined;
@@ -80,6 +109,62 @@ export default async function WatchPage({
       episodeId = (await findEpisodeId(title.id, season, episode)) ?? undefined;
     } catch (err) {
       console.warn('playback.episodeLookup failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+
+    // On-demand enrichment (Spec Section 4): a series whose episodes weren't
+    // fully imported is backfilled from TMDB on first view, so a deep link to
+    // an episode resolves. Best-effort — if it still fails, the player mounts
+    // from the season/episode numbers alone.
+    if (!episodeId) {
+      try {
+        const { ensureTitleComplete } = await import('@/features/catalog/title-enrichment');
+        await ensureTitleComplete(title.id);
+      } catch (err) {
+        console.warn('playback.enrichment failed', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+      try {
+        const { findEpisodeId } = await import('@/features/playback/native-sources');
+        episodeId = (await findEpisodeId(title.id, season, episode)) ?? undefined;
+      } catch (err) {
+        console.warn('playback.episodeLookup (retry) failed', {
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  // Episode index + previous/next (TV only). Flattened in season order so
+  // "previous" crosses back into the last episode of the prior season and
+  // "next" rolls forward into the next season's first episode.
+  let episodeNav:
+    | { current: EpisodeNavTarget; previous?: EpisodeNavTarget; next?: EpisodeNavTarget }
+    | undefined;
+  if (title.type === 'tv' && season !== undefined && episode !== undefined && features.supabaseConfigured) {
+    try {
+      const { listSeasonsForTitle } = await import('@/features/catalog/queries');
+      const seasons = await listSeasonsForTitle(title.id);
+      const flat = seasons.flatMap((s) =>
+        s.episodes.map((e) => ({ season: s.seasonNumber, episode: e.episodeNumber })),
+      );
+      const idx = flat.findIndex((e) => e.season === season && e.episode === episode);
+      if (idx >= 0) {
+        const target = (i: number): EpisodeNavTarget => ({
+          season: flat[i]!.season,
+          episode: flat[i]!.episode,
+          label: `S${flat[i]!.season} E${flat[i]!.episode}`,
+        });
+        episodeNav = {
+          current: target(idx),
+          ...(idx > 0 ? { previous: target(idx - 1) } : {}),
+          ...(idx < flat.length - 1 ? { next: target(idx + 1) } : {}),
+        };
+      }
+    } catch (err) {
+      console.warn('playback.episodeNav failed', {
         message: err instanceof Error ? err.message : String(err),
       });
     }
@@ -197,13 +282,26 @@ export default async function WatchPage({
           providerLabel={providerLabel}
           consentRequired={consentRequired}
           {...(episodeId ? { episodeId } : {})}
+          {...(title.type === 'tv' && season !== undefined ? { seasonNumber: season } : {})}
+          {...(title.type === 'tv' && episode !== undefined ? { episodeNumber: episode } : {})}
           {...(resumePos ? { initialPosition: resumePos.positionSeconds } : {})}
           preroll={preroll}
         />
 
+        {/* Episode navigation (TV only): next/previous across season
+            boundaries, computed server-side from the real episode index. */}
+        {episodeNav ? (
+          <EpisodeNavLinks
+            baseHref={`/watch/tv/${title.slug}`}
+            current={episodeNav.current}
+            previous={episodeNav.previous}
+            next={episodeNav.next}
+          />
+        ) : null}
+
         {/* Ad (Spec Section 11): one banner below the player header — never
             above the fold of the player itself. */}
-        <AdSlot slot="watchBanner" />
+        <ConsentGate><AdSlot slot="watchBanner" /></ConsentGate>
 
         <header className="flex flex-col gap-2">
           <div className="flex flex-wrap items-center gap-2">

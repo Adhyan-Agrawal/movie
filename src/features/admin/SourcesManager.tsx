@@ -160,6 +160,8 @@ export function SourcesManager({
   const [remoteUrl, setRemoteUrl] = useState('');
   const [remoteKind, setRemoteKind] = useState<(typeof REMOTE_KIND_OPTIONS)[number]>('auto');
   const [remoteLabel, setRemoteLabel] = useState('');
+  const [remoteSeason, setRemoteSeason] = useState('');
+  const [remoteEpisode, setRemoteEpisode] = useState('');
   const [remoteError, setRemoteError] = useState<string | null>(null);
   const [remotePending, startRemoteTransition] = useTransition();
 
@@ -250,6 +252,10 @@ export function SourcesManager({
         url: remoteUrl,
         kind: remoteKind === 'auto' ? undefined : remoteKind,
         label: remoteLabel,
+        // Optional season+episode pair, resolved to an episode id server-side
+        // (the action calls findEpisodeId). Blank = whole title.
+        season: remoteSeason ? Number(remoteSeason) : undefined,
+        episode: remoteEpisode ? Number(remoteEpisode) : undefined,
       });
       if (!result.ok) {
         setRemoteError(result.error ?? 'Could not add the source.');
@@ -257,6 +263,8 @@ export function SourcesManager({
         setRemoteUrl('');
         setRemoteLabel('');
         setRemoteKind('auto');
+        setRemoteSeason('');
+        setRemoteEpisode('');
         router.refresh();
       }
     });
@@ -518,10 +526,48 @@ export function SourcesManager({
                 className={inputClasses}
               />
             </label>
+
+            {episodes.length > 0 ? (
+              <>
+                <label htmlFor="remote-season" className={cn(labelClasses, 'w-24')}>
+                  <span>Season</span>
+                  <input
+                    id="remote-season"
+                    type="number"
+                    min={1}
+                    value={remoteSeason}
+                    onChange={(e) => setRemoteSeason(e.target.value)}
+                    disabled={remotePending}
+                    placeholder="S"
+                    className={inputClasses}
+                  />
+                </label>
+                <label htmlFor="remote-episode" className={cn(labelClasses, 'w-24')}>
+                  <span>Episode</span>
+                  <input
+                    id="remote-episode"
+                    type="number"
+                    min={1}
+                    value={remoteEpisode}
+                    onChange={(e) => setRemoteEpisode(e.target.value)}
+                    disabled={remotePending}
+                    placeholder="E"
+                    className={inputClasses}
+                  />
+                </label>
+              </>
+            ) : null}
+
             <Button type="submit" disabled={remotePending || !remoteUrl.trim()}>
               {remotePending ? 'Adding…' : 'Add source'}
             </Button>
           </div>
+
+          {episodes.length > 0 ? (
+            <p className="text-xs text-content-subtle">
+              Leave season and episode blank to attach the stream to the whole title.
+            </p>
+          ) : null}
 
           {remoteError ? (
             <p role="alert" className="text-xs text-danger">

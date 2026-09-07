@@ -3,12 +3,14 @@ import { buttonClasses } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { getHomeData } from '@/features/catalog/data';
 import { Hero } from '@/features/catalog/components/Hero';
+import { HeroCarousel } from '@/features/catalog/components/HeroCarousel';
 import { ContinueWatchingRow, MediaRow } from '@/features/catalog/components/MediaRow';
 import { GuestContinueWatchingRow } from '@/features/catalog/components/GuestContinueWatchingRow';
 import { AdSlot } from '@/features/ads/AdSlot';
+import { ConsentGate } from '@/features/ads/ConsentGate';
 
 export default async function HomePage() {
-  const { hero, continueWatching, rows, degraded, signedIn } = await getHomeData();
+  const { hero, heroTitles, continueWatching, rows, degraded, signedIn } = await getHomeData();
 
   // Honest empty states: no mock fallback, no fabricated rows.
   if (!hero) {
@@ -38,7 +40,13 @@ export default async function HomePage() {
 
   return (
     <div className="flex flex-col gap-10 pb-8">
-      <Hero title={hero} />
+      {/* Rotating hero: auto-advances through the top trending titles so the
+          banner shows fresh movies/series on every visit. */}
+      {heroTitles.length > 1 ? (
+        <HeroCarousel>{heroTitles.map((t) => <Hero key={t.id} title={t} />)}</HeroCarousel>
+      ) : (
+        <Hero title={hero} />
+      )}
 
       <div className="flex flex-col gap-10">
         {/* Continue watching: server-side row for signed-in viewers; guests get
@@ -51,7 +59,7 @@ export default async function HomePage() {
         )}
         {/* Ad (Spec Section 11): one leaderboard below the fold — after the first
             content rows, before the rest. Low density by design. */}
-        {rows.length > 1 ? <AdSlot slot="homeLeaderboard" /> : null}
+        {rows.length > 1 ? <ConsentGate><AdSlot slot="homeLeaderboard" /></ConsentGate> : null}
         {rows.map((row) => (
           <MediaRow key={row.id} row={row} />
         ))}

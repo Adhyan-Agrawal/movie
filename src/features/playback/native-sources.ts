@@ -82,19 +82,27 @@ export async function resolveNativeSources(
   for (const row of rows ?? []) {
     if (!isNativeKind(row.kind)) continue;
 
-    // Storage-backed media never goes public: mint a 4h signed URL instead.
+    // Storage-backed media never goes public. For HLS we must serve via the
+    // /api/media proxy: a signed URL works for the master playlist but not for
+    // the relative child playlists/segments hls.js resolves (the signature is
+    // dropped), so they'd 401. The proxy streams the whole tree from the
+    // private bucket server-side. Single-file mp4/dash keep a 4h signed URL.
     let url = row.url;
     if (!url && row.reference) {
-      const { data, error: signError } = await service.storage
-        .from('media')
-        .createSignedUrl(row.reference, SIGNED_URL_TTL_SECONDS);
-      if (signError || !data?.signedUrl) {
-        console.warn('playback.resolveNativeSources: signed URL failed, skipping source', {
-          message: signError?.message ?? 'no signed URL returned',
-        });
-        continue;
+      if (row.kind === 'hls') {
+        url = `/api/media/${row.reference}`;
+      } else {
+        const { data, error: signError } = await service.storage
+          .from('media')
+          .createSignedUrl(row.reference, SIGNED_URL_TTL_SECONDS);
+        if (signError || !data?.signedUrl) {
+          console.warn('playback.resolveNativeSources: signed URL failed, skipping source', {
+            message: signError?.message ?? 'no signed URL returned',
+          });
+          continue;
+        }
+        url = data.signedUrl;
       }
-      url = data.signedUrl;
     }
     if (!url) continue;
 

@@ -67,8 +67,15 @@ const nextConfig = {
   reactStrictMode: true,
   poweredByHeader: false,
   images: {
+    // Serve artwork DIRECTLY from its origin (image.tmdb.org / i.ytimg.com)
+    // instead of Vercel's image optimizer. TMDB posters are already optimized
+    // at the source and re-encoding them on Vercel is a billable operation the
+    // operator explicitly wants to avoid — a plain <img> with the original URL
+    // is what the browser gets.
+    unoptimized: true,
     remotePatterns: [
       { protocol: 'https', hostname: 'image.tmdb.org' },
+      { protocol: 'https', hostname: 'i.ytimg.com' },
     ],
   },
   async headers() {

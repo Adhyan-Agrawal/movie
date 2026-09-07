@@ -24,17 +24,26 @@ export interface AdSlotConfig {
   /** Banner dimensions Adsterra's invoke.js expects for this zone. */
   width: number;
   height: number;
+  /** Mobile (max-width 767px) dimensions; fall back to width/height. */
+  mobileWidth: number;
+  mobileHeight: number;
   /** Human label for the placeholder and admin UI. */
   label: string;
 }
 
-/** All slot definitions (placement rendering, admin UI, seeding). */
+/** BANNER-ONLY policy (Spec Section 11): every slot is a standard display
+ *  banner (leaderboard / rectangle). No popunders, push, social bars, or
+ *  interstitial formats. The ADULT content category is set on Adsterra's side
+ *  (zone settings / advertiser targeting) — the operator should mark zones
+ *  non-adult there; this code never requests anything but plain banner units. */
 export const AD_SLOT_DEFS = {
   homeLeaderboard: {
     key: 'home-leaderboard',
     envKey: 'leaderboard',
     width: 728,
     height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
     label: 'Home leaderboard',
     format: 'banner',
   },
@@ -43,7 +52,29 @@ export const AD_SLOT_DEFS = {
     envKey: 'leaderboard',
     width: 728,
     height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
     label: 'Browse/Movies/TV leaderboard',
+    format: 'banner',
+  },
+  searchLeaderboard: {
+    key: 'search-leaderboard',
+    envKey: 'leaderboard',
+    width: 728,
+    height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
+    label: 'Search leaderboard',
+    format: 'banner',
+  },
+  genreLeaderboard: {
+    key: 'genre-leaderboard',
+    envKey: 'leaderboard',
+    width: 728,
+    height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
+    label: 'Genre leaderboard',
     format: 'banner',
   },
   titleRectangle: {
@@ -51,7 +82,29 @@ export const AD_SLOT_DEFS = {
     envKey: 'rectangle',
     width: 300,
     height: 250,
+    mobileWidth: 300,
+    mobileHeight: 250,
     label: 'Title detail rectangle',
+    format: 'banner',
+  },
+  accountRectangle: {
+    key: 'account-rectangle',
+    envKey: 'rectangle',
+    width: 300,
+    height: 250,
+    mobileWidth: 300,
+    mobileHeight: 250,
+    label: 'Account rectangle',
+    format: 'banner',
+  },
+  footerLeaderboard: {
+    key: 'footer-leaderboard',
+    envKey: 'leaderboard',
+    width: 728,
+    height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
+    label: 'Footer leaderboard',
     format: 'banner',
   },
   watchPreroll: {
@@ -59,6 +112,8 @@ export const AD_SLOT_DEFS = {
     envKey: 'preroll',
     width: 728,
     height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
     label: 'Player pre-roll',
     format: 'preroll',
   },
@@ -67,6 +122,8 @@ export const AD_SLOT_DEFS = {
     envKey: 'leaderboard',
     width: 728,
     height: 90,
+    mobileWidth: 320,
+    mobileHeight: 50,
     label: 'Watch page banner',
     format: 'banner',
   },

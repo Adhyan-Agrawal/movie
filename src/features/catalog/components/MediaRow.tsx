@@ -39,29 +39,47 @@ export function ContinueWatchingRow({ entries }: { entries: ContinueWatchingEntr
         </h2>
       </div>
       <ul className="flex gap-3 overflow-x-auto px-4 pb-2 md:px-8 [scrollbar-width:thin]">
-        {entries.map((entry) => (
-          <li key={entry.title.id} style={{ scrollSnapAlign: 'start' }}>
-            {entry.progress ? (
-              /* Native playback recorded a real position — show the bar. */
-              <div className="relative">
-                <MediaCard title={entry.title} progress={entry.progress.progress} />
-                <span className="sr-only">
-                  {Math.round(entry.progress.progress * 100)}% watched — resume {entry.title.name}
-                </span>
-              </div>
-            ) : (
-              /* Watched via an external server, which shares no position: an
-                 honest "Continue" badge instead of a fabricated progress bar. */
-              <div className="relative">
-                <MediaCard title={entry.title} />
-                <span className="absolute left-2 top-9 rounded bg-surface/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-content shadow-soft">
-                  Continue
-                </span>
-                <span className="sr-only">Continue {entry.title.name} — position unknown</span>
-              </div>
-            )}
-          </li>
-        ))}
+        {entries.map((entry) => {
+          // TV entries carry the exact episode to resume, so the card links
+          // straight to /watch/tv/{slug}?season=N&episode=M and labels itself.
+          const episodeHref = entry.episode
+            ? `/watch/tv/${entry.title.slug}?season=${entry.episode.seasonNumber}&episode=${entry.episode.episodeNumber}`
+            : undefined;
+          return (
+            <li key={entry.title.id} style={{ scrollSnapAlign: 'start' }}>
+              {entry.progress ? (
+                /* Native playback recorded a real position — show the bar. */
+                <div className="relative">
+                  <MediaCard
+                    title={entry.title}
+                    progress={entry.progress.progress}
+                    href={episodeHref}
+                  />
+                  <span className="sr-only">
+                    {Math.round(entry.progress.progress * 100)}% watched — resume {entry.title.name}
+                    {episodeHref ? ` at episode ${entry.episode!.episodeNumber}` : ''}
+                  </span>
+                </div>
+              ) : (
+                /* Watched via an external server, which shares no position: an
+                   honest "Continue" badge instead of a fabricated progress bar. */
+                <div className="relative">
+                  <MediaCard title={entry.title} href={episodeHref} />
+                  <span className="absolute left-2 top-9 rounded bg-surface/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-content shadow-soft">
+                    Continue
+                  </span>
+                  <span className="sr-only">Continue {entry.title.name} — position unknown</span>
+                </div>
+              )}
+              {entry.episode ? (
+                <p className="mt-1 truncate px-0.5 text-xs font-medium text-content-muted" title={entry.episode.name}>
+                  S{entry.episode.seasonNumber} E{entry.episode.episodeNumber}
+                  {entry.episode.name ? ` · ${entry.episode.name}` : ''}
+                </p>
+              ) : null}
+            </li>
+          );
+        })}
       </ul>
     </section>
   );

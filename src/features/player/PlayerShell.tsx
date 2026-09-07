@@ -10,6 +10,7 @@ import { type PlayerState, playerStateForError } from './player-states';
 import { PlayerControlsBar } from './PlayerControlsBar';
 import { NativePlayer } from './NativePlayer';
 import { PreRollAd } from '@/features/ads/PreRollAd';
+import { readConsent } from '@/components/consent/ConsentBanner';
 import {
   reportPlaybackEndAction,
   reportPlaybackHeartbeatAction,
@@ -55,6 +56,9 @@ export interface PlayerShellProps {
   consentRequired?: boolean;
   /** TV episode id, so native-player progress targets the exact episode. */
   episodeId?: string;
+  /** TV only: season/episode numbers (guest store resume + native player). */
+  seasonNumber?: number;
+  episodeNumber?: number;
   /** Saved resume position (seconds) forwarded to the native player. */
   initialPosition?: number;
   /**
@@ -120,6 +124,8 @@ export function PlayerShell({
   providerLabel,
   consentRequired,
   episodeId,
+  seasonNumber,
+  episodeNumber,
   initialPosition,
   preroll = null,
 }: PlayerShellProps) {
@@ -147,6 +153,17 @@ export function PlayerShell({
   // runs after mount (sessionStorage is not available during SSR) so the
   // initial render matches the server and hydration never mismatches.
   const [adDone, setAdDone] = useState(!preroll);
+  // Advertising consent (Spec Section 15): the pre-roll only plays for viewers
+  // who accepted ads in the consent banner; otherwise the video starts direct.
+  const [adsConsent, setAdsConsent] = useState(false);
+
+  useEffect(() => {
+    try {
+      setAdsConsent(Boolean(readConsent()?.ads));
+    } catch {
+      // Private mode — best effort only.
+    }
+  }, []);
 
   useEffect(() => {
     if (!preroll) return;
@@ -157,11 +174,30 @@ export function PlayerShell({
     }
   }, [preroll]);
 
+  // Safety net: if the pre-roll creative never calls onDone (blocked zone,
+  // ad network failure), auto-continue to the video after 8s. Otherwise a
+  // broken ad would strand the player behind the gate forever — and with it
+  // the guest continue-watching recording that only happens once the player
+  // mounts.
+  useEffect(() => {
+    if (!showAd) return;
+    const timer = window.setTimeout(() => {
+      try {
+        sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
+      } catch {
+        // Private mode — best effort only.
+      }
+      setAdDone(true);
+      setState('loading');
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [showAd]);
+
   // Gate on the ACTIVE source: if the viewer switched to a server that has no
   // URL (shouldn't happen — the registry only lists resolvable sources), the
   // player renders the unavailable panel for that server.
   const showConsent = activeHasUrl && gate && !consented;
-  const showAd = activeHasUrl && !showConsent && preroll !== null && !adDone;
+  const showAd = activeHasUrl && !showConsent && preroll !== null && !adDone && adsConsent;
   // The player surface (native or iframe) mounts only after the gates clear.
   const showPlayer = activeHasUrl && (!gate || consented) && adDone;
   // Native sources (Lumora-hosted mp4/hls/dash) render <video> instead of an
@@ -179,12 +215,25 @@ export function PlayerShell({
   const sessionIdRef = useRef<string | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
 
+  // Overlay safety net: the "Loading player…" overlay only clears on the
+  // iframe's onLoad. Providers that render a blank/slow document never fire
+  // it, leaving a stuck spinner over a working (or blank) player. Clear the
+  // overlay after 12s no matter what — the iframe is present either way and
+  // the server switcher recovers a bad provider.
+  useEffect(() => {
+    if (!showPlayer) return;
+    const timer = window.setTimeout(() => {
+      setState((s) => (s === 'loading' ? 'ready' : s));
+    }, 12_000);
+    return () => window.clearTimeout(timer);
+  }, [showPlayer, reloadKey, activeSourceId]);
+
   useEffect(() => {
     if (!showPlayer) return;
     // One session row per player mount (reloadKey re-mounts count as replays).
     let cancelled = false;
     sessionIdRef.current = null;
-    void reportPlaybackStartAction(title.id).then((r) => {
+    void reportPlaybackStartAction(title.id, episodeId).then((r) => {
       if (cancelled) return;
       if (r.ok && r.sessionId) {
         sessionIdRef.current = r.sessionId;
@@ -198,6 +247,9 @@ export function PlayerShell({
           type: title.type,
           name: title.name,
           ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
+          ...(episodeId ? { episodeId } : {}),
+          ...(seasonNumber !== undefined ? { seasonNumber } : {}),
+          ...(episodeNumber !== undefined ? { episodeNumber } : {}),
         });
       }
     });
@@ -208,7 +260,7 @@ export function PlayerShell({
       sessionIdRef.current = null;
       setSessionReady(false);
     };
-  }, [showPlayer, reloadKey, title.id, title.slug, title.type, title.name, title.posterUrl]);
+  }, [showPlayer, reloadKey, title.id, title.slug, title.type, title.name, title.posterUrl, episodeId]);
 
   useEffect(() => {
     if (!showPlayer || !sessionReady) return;
@@ -319,6 +371,8 @@ export function PlayerShell({
                 titleId={title.id}
                 titleSlug={title.slug}
                 {...(episodeId ? { episodeId } : {})}
+                {...(seasonNumber !== undefined ? { seasonNumber } : {})}
+                {...(episodeNumber !== undefined ? { episodeNumber } : {})}
                 {...(initialPosition !== undefined ? { initialPosition } : {})}
                 onReady={handleNativeReady}
                 onError={handleNativeError}

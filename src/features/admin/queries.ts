@@ -8,12 +8,16 @@ import type {
   AdminAccountRow,
   AdminAuditEvent,
   AdminCounts,
+  AdminEmailSettings,
   AdminFeatureFlagRow,
   AdminImportRow,
   AdminMediaSourceRow,
   AdminProviderRow,
   AdminSiteSettingRow,
+  AdminTitleRequestRow,
+  TranscodeCandidate,
 } from './types';
+import { SMTP_SETTING_KEYS } from './email/mailer';
 
 /**
  * Real admin-console reads (Spec Section 10).
@@ -130,6 +134,50 @@ export async function listMediaSourcesForTitle(titleId: string): Promise<AdminMe
 }
 
 /**
+ * Storage-backed media sources across the catalog, for the HLS transcode
+ * console (provider.manage). Remote URL rows have nothing on disk to transcode,
+ * so only rows with a non-null `reference` are returned, joined to their title
+ * for display. Same RLS-scoped read as the rest of this module.
+ */
+export async function listTranscodeCandidates(limit = 500): Promise<TranscodeCandidate[]> {
+  const db = await getSupabaseServerClient();
+  const { data: sources, error } = await db
+    .from('media_sources')
+    .select('id, title_id, episode_id, kind, reference, label')
+    .not('reference', 'is', null)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`listTranscodeCandidates failed: ${error.message}`);
+
+  const storageSources = (sources ?? []).filter(
+    (s): s is typeof s & { reference: string } => s.reference !== null,
+  );
+  const titleIds = [...new Set(storageSources.map((s) => s.title_id))];
+  if (titleIds.length === 0) return [];
+
+  const { data: titles, error: titleError } = await db.from('titles').select('id, name, type').in('id', titleIds);
+  if (titleError) throw new Error(`listTranscodeCandidates (titles) failed: ${titleError.message}`);
+
+  const titleById = new Map((titles ?? []).map((t) => [t.id, t]));
+  return storageSources.flatMap((s) => {
+    const title = titleById.get(s.title_id);
+    if (!title) return [];
+    return [
+      {
+        sourceId: s.id,
+        titleId: s.title_id,
+        titleName: title.name,
+        titleType: title.type,
+        episodeId: s.episode_id,
+        kind: s.kind,
+        reference: s.reference,
+        label: s.label,
+      },
+    ];
+  });
+}
+
+/**
  * A single title by id for the admin console (RLS-scoped, so drafts show for
  * catalog holders too). Returns undefined when the id matches nothing.
  */
@@ -197,6 +245,32 @@ export async function listImportJobs(limit = 50): Promise<AdminImportRow[]> {
 }
 
 // ---------------------------------------------------------------------------
+// Title requests
+// ---------------------------------------------------------------------------
+
+/**
+ * Viewer-submitted title requests (Spec Section 4), newest first.
+ *
+ * Read through the RLS-scoped server client: the `title_requests_admin_read`
+ * policy lets anyone holding `catalog.read` see the whole queue, and the admin
+ * console gate already restricts who reaches this route. Viewers only ever see
+ * their own rows, but this query is for editors, so it returns the full queue.
+ *
+ * `title_requests` exists in the DB (migration 0007) but is not yet in the
+ * generated Supabase types — cast pragmatically.
+ */
+export async function listTitleRequests(limit = 200): Promise<AdminTitleRequestRow[]> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await (db as any)
+    .from('title_requests')
+    .select('id, account_id, title_name, media_type, year, note, status, created_at, updated_at')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`listTitleRequests failed: ${error.message}`);
+  return (data ?? []) as AdminTitleRequestRow[];
+}
+
+// ---------------------------------------------------------------------------
 // Providers
 // ---------------------------------------------------------------------------
 
@@ -216,6 +290,39 @@ export async function listSiteSettings(): Promise<AdminSiteSettingRow[]> {
   const { data, error } = await db.from('site_settings').select('*').order('key');
   if (error) throw new Error(`listSiteSettings failed: ${error.message}`);
   return data ?? [];
+}
+
+/**
+ * SMTP values for the admin email panel, decoded from the `smtp.*` rows in
+ * `site_settings` (settings.manage / RLS-scoped read). Port is normalised to a
+ * string for the form; the stored password is reduced to a `hasPassword`
+ * boolean so the secret never crosses into the client bundle.
+ */
+export async function getEmailSettings(): Promise<AdminEmailSettings> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db
+    .from('site_settings')
+    .select('key, value')
+    .in('key', Object.values(SMTP_SETTING_KEYS));
+  if (error) throw new Error(`getEmailSettings failed: ${error.message}`);
+
+  const values = new Map((data ?? []).map((row) => [row.key, row.value]));
+  const str = (key: string): string => {
+    const value = values.get(key);
+    return typeof value === 'string' ? value : '';
+  };
+
+  const portRaw = values.get(SMTP_SETTING_KEYS.port);
+  const port = typeof portRaw === 'number' ? String(portRaw) : typeof portRaw === 'string' ? portRaw : '';
+  const pass = values.get(SMTP_SETTING_KEYS.pass);
+
+  return {
+    host: str(SMTP_SETTING_KEYS.host),
+    port,
+    user: str(SMTP_SETTING_KEYS.user),
+    from: str(SMTP_SETTING_KEYS.from),
+    hasPassword: typeof pass === 'string' && pass.length > 0,
+  };
 }
 
 export async function listFeatureFlags(): Promise<AdminFeatureFlagRow[]> {

@@ -147,15 +147,29 @@ export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[
       break;
   }
 
-  const { data, error } = await query;
-  if (error) throw new Error(`repoListTitles: ${error.message}`);
-  let out = (data ?? []).map((r) => toTitle(r as unknown as TitleRow));
+  // Deterministic pagination: append a stable tiebreaker so `.range()` pages
+  // don't reorder between requests.
+  query = query.order('id', { ascending: true });
+
+  // Page through EVERY match — a bare select silently truncates at Supabase's
+  // 1,000-row default, which dropped titles past the first thousand from
+  // browse/home/sitemap (3,600+ titles in the catalog).
+  const out: Title[] = [];
+  const PAGE = 1000;
+  for (let i = 0; ; i += PAGE) {
+    const { data, error } = await query.range(i, i + PAGE - 1);
+    if (error) throw new Error(`repoListTitles: ${error.message}`);
+    const pageRows = (data ?? []).map((r) => toTitle(r as unknown as TitleRow));
+    out.push(...pageRows);
+    if (pageRows.length < PAGE) break;
+    if (out.length >= 10_000) break; // hard safety cap for a runaway catalog
+  }
 
   // Genre filter is applied in-memory because it filters on the joined table;
   // doing it here keeps the DTO mapping in one place and the row count is small.
   if (filters.genre) {
     const g = filters.genre.toLowerCase();
-    out = out.filter((t) => t.genres.some((name) => name.toLowerCase() === g));
+    return out.filter((t) => t.genres.some((name) => name.toLowerCase() === g));
   }
   return out;
 }

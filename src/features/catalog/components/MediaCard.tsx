@@ -22,18 +22,21 @@ export function MediaCard({
   title,
   progress,
   className,
+  href,
 }: {
   title: Title;
   /** 0..1 resume progress, renders a bottom bar when present. */
   progress?: number;
   className?: string;
+  /** Override the default title link (e.g. resume a specific episode). */
+  href?: string;
 }) {
   const runtime = formatRuntime(title.runtimeMinutes);
-  const href = `/title/${title.type}/${title.slug}`;
+  const cardHref = href ?? `/title/${title.type}/${title.slug}`;
 
   return (
     <Link
-      href={href}
+      href={cardHref}
       className={cn(
         'group relative flex w-40 shrink-0 flex-col gap-2 rounded-md sm:w-44 md:w-48',
         'focus-visible:outline-none',

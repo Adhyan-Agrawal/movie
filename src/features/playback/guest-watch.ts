@@ -27,6 +27,10 @@ export interface GuestWatchEntry {
   /** 0..1 when the native player reported a position; undefined for embeds. */
   progress?: number;
   positionSeconds?: number;
+  /** TV only: which episode the guest was on, so the row links and labels it. */
+  episodeId?: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
   updatedAt: number;
 }
 
@@ -62,11 +66,16 @@ export function recordGuestWatch(entry: Omit<GuestWatchEntry, 'updatedAt'>): voi
   write([{ ...entry, updatedAt: Date.now() }, ...rest]);
 }
 
-/** Update a guest entry's position (native player telemetry while signed out). */
+/**
+ * Update a guest entry's position (native player telemetry while signed out).
+ * For TV, the caller also passes the current episode so the entry points back
+ * at the exact spot the guest left off.
+ */
 export function updateGuestPosition(
   slug: string,
   positionSeconds: number,
   durationSeconds: number | undefined,
+  episode?: { episodeId?: string; seasonNumber?: number; episodeNumber?: number },
 ): void {
   const entries = readRaw();
   const idx = entries.findIndex((e) => e.slug === slug);
@@ -74,7 +83,13 @@ export function updateGuestPosition(
   if (!entry) return;
   const progress =
     durationSeconds && durationSeconds > 0 ? Math.min(1, Math.max(0, positionSeconds / durationSeconds)) : undefined;
-  entries[idx] = { ...entry, positionSeconds, progress, updatedAt: Date.now() };
+  entries[idx] = {
+    ...entry,
+    positionSeconds,
+    progress,
+    ...(episode ? { ...episode } : {}),
+    updatedAt: Date.now(),
+  };
   write(entries.sort((a, b) => b.updatedAt - a.updatedAt));
 }
 

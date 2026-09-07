@@ -18,8 +18,8 @@ export const metadata = {
  * shows the TRUE catalog total instead of silently stopping at Supabase's
  * default 1,000-row cap. Search and the type filter are plain URL params —
  * the search form is a GET form and the filters are `Link`s, so the whole
- * surface works without client JS. Publish/archive/delete remain affordances
- * only until the catalog-management phase lands.
+ * surface works without client JS. Publish/archive/delete run through
+ * permission-gated server actions (`./catalog-actions`).
  */
 
 /** Titles per page. */
@@ -112,7 +112,7 @@ export default async function AdminCatalogTitlesPage({
     <div className="flex flex-col gap-6 py-6">
       <PageHeader
         title="Catalog · Titles"
-        description="Titles from the live catalog (catalog.read), paged straight from the database — the count below is the true total, drafts included. Publish, archive, and delete actions arrive with the catalog-management phase."
+        description="Titles from the live catalog (catalog.read), paged straight from the database — the count below is the true total, drafts included. Publish, archive, and delete run through permission-gated server actions (catalog.publish / catalog.create / catalog.delete)."
       />
 
       {/* Search + type filter. The URL is the source of truth: a GET form and

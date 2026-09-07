@@ -1,4 +1,5 @@
 import type { Tables } from '@/lib/supabase/types';
+import type { TitleType } from '@/features/catalog/types';
 
 /**
  * Client-safe DTO types for the admin console (Spec Section 10).
@@ -29,8 +30,60 @@ export type AdminMediaSourceRow = Pick<
 /** An `imports` row (catalog.create). */
 export type AdminImportRow = Tables<'imports'>;
 
+/**
+ * A `title_requests` row (viewer-submitted). Manual shape — the table exists in
+ * the DB (migration 0007) but the generated Supabase types haven't caught up
+ * yet, so reads/updates cast `as any` and this DTO carries the columns the
+ * admin queue needs.
+ */
+export type TitleRequestStatus = 'pending' | 'imported' | 'rejected';
+
+export interface AdminTitleRequestRow {
+  id: string;
+  /** The requesting account (RLS scopes viewer rows to it; editors read all). */
+  account_id: string;
+  title_name: string;
+  media_type: 'movie' | 'tv';
+  /** Release year hint (optional). */
+  year: number | null;
+  /** Free-text note from the viewer (optional). */
+  note: string | null;
+  status: TitleRequestStatus;
+  created_at: string;
+  updated_at: string;
+}
+
+/**
+ * A storage-backed media source eligible for HLS transcoding (provider.manage).
+ * Only rows whose `reference` points at an object in the private `media` bucket
+ * qualify — remote URL rows have nothing on disk to transcode.
+ */
+export interface TranscodeCandidate {
+  sourceId: string;
+  titleId: string;
+  titleName: string;
+  titleType: TitleType;
+  episodeId: string | null;
+  kind: Tables<'media_sources'>['kind'];
+  reference: string;
+  label: string;
+}
+
 /** A `site_settings` row (settings.manage / is_public). */
 export type AdminSiteSettingRow = Tables<'site_settings'>;
+
+/**
+ * SMTP values for the admin email panel (settings.manage). The stored password
+ * is write-only and NEVER crosses to the client — the panel only learns
+ * whether one exists so it can hint "leave blank to keep existing".
+ */
+export interface AdminEmailSettings {
+  host: string;
+  port: string;
+  user: string;
+  from: string;
+  hasPassword: boolean;
+}
 
 /** A `feature_flags` row (settings.manage / is_public). */
 export type AdminFeatureFlagRow = Tables<'feature_flags'>;

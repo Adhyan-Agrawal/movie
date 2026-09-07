@@ -25,6 +25,10 @@ export async function listWatchHistory(limit = 50): Promise<HistoryEntry[]> {
   const { data, error } = await db
     .from('playback_sessions')
     .select('id, title_id, started_at, state')
+    // Scoped to THIS account even though playback_sessions_admin_read lets
+    // analytics.read holders see every row — the account pages must never show
+    // another user's sessions (security audit finding).
+    .eq('account_id', user.user.id)
     .order('started_at', { ascending: false })
     .limit(limit);
   if (error) {

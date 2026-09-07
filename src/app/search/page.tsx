@@ -2,6 +2,9 @@ import type { Metadata } from 'next';
 import { Container } from '@/components/ui/Container';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { SearchClient } from '@/features/catalog/components/SearchClient';
+import { listAllGenres } from '@/features/catalog/queries';
+import { AdSlot } from '@/features/ads/AdSlot';
+import { ConsentGate } from '@/features/ads/ConsentGate';
 
 export const metadata: Metadata = {
   title: 'Search',
@@ -18,11 +21,16 @@ export default async function SearchPage({
   const sp = await searchParams;
   const raw = sp.q;
   const initialQuery = (Array.isArray(raw) ? raw[0] : raw) ?? '';
+  const genres = await listAllGenres();
 
   return (
     <Container>
       <PageHeader title="Search" description="Find movies and shows across Lumora." />
-      <SearchClient initialQuery={initialQuery} />
+      {/* Ad (Spec Section 11): one banner above the search results, consent-gated. */}
+      <ConsentGate>
+        <AdSlot slot="searchLeaderboard" />
+      </ConsentGate>
+      <SearchClient initialQuery={initialQuery} genres={genres} />
     </Container>
   );
 }

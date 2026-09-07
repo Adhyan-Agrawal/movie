@@ -106,6 +106,9 @@ export const VIDUP_PROVIDER_CONFIG: ProviderConfig = {
   timeoutMs: 8000,
   enabledRegions: ['*'],
   consentRequired: true,
+  // Both IMDb and TMDB ids verified working (headed probe, S1E1 of a real
+  // series); TMDB is the zero-risk default (vidup normalizes to TMDB internally).
+  preferredId: 'tmdb',
   // Documented resume parameter (vidup docs): appended when the viewer has a
   // saved watch-progress position for the title/episode.
   startParam: 'startAt',
@@ -149,6 +152,9 @@ export const VIDSRC_PROVIDER_CONFIG: ProviderConfig = {
   timeoutMs: 8000,
   enabledRegions: ['*'],
   consentRequired: true,
+  // Both IMDb and TMDB ids verified working in a headed probe; TMDB is the
+  // zero-risk default.
+  preferredId: 'tmdb',
   // Documented example IMDb id (Inception) for the admin preview/test action.
   testTitleId: 'tt1375666',
 };

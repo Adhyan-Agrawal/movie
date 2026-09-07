@@ -10,7 +10,7 @@ import { Logo } from '@/components/ui/Logo';
  * scroll for legibility over content. The search field routes to /search;
  * the full command palette is a later slice.
  */
-export function TopBar() {
+export function TopBar({ signedIn = false }: { signedIn?: boolean }) {
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -44,12 +44,14 @@ export function TopBar() {
           <span aria-hidden="true">⌕</span>
           <span className="hidden sm:inline">Search titles, people…</span>
         </Link>
-        <Link
-          href="/signin"
-          className="hidden h-10 items-center rounded-md border border-border bg-surface/60 px-4 text-sm font-medium text-content transition-colors hover:border-border-strong sm:flex"
-        >
-          Sign in
-        </Link>
+        {!signedIn ? (
+          <Link
+            href="/signin"
+            className="hidden h-10 items-center rounded-md border border-border bg-surface/60 px-4 text-sm font-medium text-content transition-colors hover:border-border-strong sm:flex"
+          >
+            Sign in
+          </Link>
+        ) : null}
         <Link
           href="/account"
           aria-label="Account"

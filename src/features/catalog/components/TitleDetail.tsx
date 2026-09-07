@@ -13,6 +13,8 @@ import { TrailerButton } from './TrailerButton';
 import { ShareButton } from './ShareButton';
 import { formatRuntime } from './title-detail-helpers';
 import { getSimilarTitles, listCastForTitle, listSeasonsForTitle } from '../queries';
+import { getRatingSummary, getMyRating } from '../ratings-queries';
+import { RatingControl } from './RatingControl';
 import type { MediaRow as MediaRowType, Title } from '../types';
 
 /** Playback availability, driven by provider/consent policy (Spec Sections 4, 9). */
@@ -59,10 +61,12 @@ export async function TitleDetail({
   /** Resolved server-side from the signed-in viewer's watchlist. */
   initialInWatchlist?: boolean;
 }) {
-  const [similar, seasons, cast] = await Promise.all([
+  const [similar, seasons, cast, ratingSummary, myRating] = await Promise.all([
     getSimilarTitles(title),
     title.type === 'tv' ? listSeasonsForTitle(title.id) : Promise.resolve([]),
     listCastForTitle(title.id),
+    getRatingSummary(title.id),
+    getMyRating(title.id),
   ]);
   const runtime = formatRuntime(title.runtimeMinutes);
   const state = AVAILABILITY[availability];
@@ -222,6 +226,16 @@ export async function TitleDetail({
                   {state.note}
                 </div>
               ) : null}
+
+              {/* Community rating + per-viewer rating control (Spec Section 4). */}
+              <div className="mt-1">
+                <RatingControl
+                  titleId={title.id}
+                  initialMyRating={myRating}
+                  average={ratingSummary.average}
+                  count={ratingSummary.count}
+                />
+              </div>
 
               <p className="max-w-xl text-sm leading-relaxed text-content-muted md:text-base">{title.synopsis}</p>
             </div>

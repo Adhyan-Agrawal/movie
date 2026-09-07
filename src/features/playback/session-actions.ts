@@ -20,7 +20,10 @@ export interface PlaybackSessionResult {
 }
 
 /** Record that playback started for a title (one row per play). */
-export async function reportPlaybackStartAction(titleId: string): Promise<PlaybackSessionResult> {
+export async function reportPlaybackStartAction(
+  titleId: string,
+  episodeId?: string,
+): Promise<PlaybackSessionResult> {
   const db = await getSupabaseServerClient();
   const { data: user } = await db.auth.getUser();
   if (!user.user) return { ok: false };
@@ -32,6 +35,10 @@ export async function reportPlaybackStartAction(titleId: string): Promise<Playba
       account_id: user.user.id,
       ...(profileId ? { profile_id: profileId } : {}),
       title_id: titleId,
+      // TV: the exact episode watched (0003 playback_sessions.episode_id), so
+      // embed-watched sessions carry the episode label into history/continue
+      // watching instead of a bare title row.
+      ...(episodeId ? { episode_id: episodeId } : {}),
       state: 'playing',
     })
     .select('id')

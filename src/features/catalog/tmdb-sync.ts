@@ -97,7 +97,7 @@ function chunk<T>(items: T[], size: number): T[][] {
   return out;
 }
 
-async function tmdbFetch(path: string, params: Record<string, string>): Promise<unknown> {
+async function tmdbFetch(path: string, params: Record<string, string>, attempt = 1): Promise<unknown> {
   const { TMDB_API_BASE_URL, TMDB_API_KEY } = serverEnv();
   if (!TMDB_API_KEY) {
     throw new Error('TMDB_API_KEY is not configured — set it in the environment to sync.');
@@ -111,7 +111,16 @@ async function tmdbFetch(path: string, params: Record<string, string>): Promise<
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     cache: 'no-store',
   });
-  if (!res.ok) throw new Error(`TMDB ${path} responded ${res.status}`);
+  if (!res.ok) {
+    // Transient rate-limit / 5xx (common under bursty per-title enrichment):
+    // retry briefly with backoff before giving up, so one 429 doesn't silently
+    // empty a series' episode list.
+    if ((res.status === 429 || res.status >= 500) && attempt < 3) {
+      await new Promise((r) => setTimeout(r, 400 * attempt));
+      return tmdbFetch(path, params, attempt + 1);
+    }
+    throw new Error(`TMDB ${path} responded ${res.status}`);
+  }
   return res.json();
 }
 
@@ -130,15 +139,24 @@ async function fetchTmdbGenres(kind: 'movie' | 'tv'): Promise<TmdbGenre[]> {
   return data.genres ?? [];
 }
 
-/** Resolve a UI genre name (case-insensitive) to the TMDB genre id. */
-async function resolveGenreId(genre: string, kinds: ('movie' | 'tv')[]): Promise<number | null> {
+/**
+ * Resolve a UI genre name (case-insensitive) to the TMDB genre id FOR ONE KIND.
+ *
+ * Movie and TV genre ids are different vocabularies ("Action" is 28 for movies;
+ * TV has "Action & Adventure" 10759 and no plain "Action"), so a single id can
+ * never be shared across both — resolve per kind and skip the kind that has no
+ * match. Falls back to a substring match so UI names like "Action" still find
+ * TV's "Action & Adventure".
+ */
+async function resolveGenreIdForKind(genre: string, kind: 'movie' | 'tv'): Promise<number | null> {
   const wanted = genre.trim().toLowerCase();
-  for (const kind of kinds) {
-    const genres = await fetchTmdbGenres(kind).catch(() => [] as TmdbGenre[]);
-    const hit = genres.find((g) => g.name.toLowerCase() === wanted);
-    if (hit) return hit.id;
-  }
-  return null;
+  const genres = await fetchTmdbGenres(kind).catch(() => [] as TmdbGenre[]);
+  const exact = genres.find((g) => g.name.toLowerCase() === wanted);
+  if (exact) return exact.id;
+  const partial = genres.find(
+    (g) => g.name.toLowerCase().includes(wanted) || wanted.includes(g.name.toLowerCase()),
+  );
+  return partial?.id ?? null;
 }
 
 /** Collect unique TMDB ids for one media type according to the filters. */
@@ -159,10 +177,16 @@ async function collectIds(
     }
 
     for (const list of lists) {
+      // TMDB route shapes differ: charts are `/{kind}/{list}` (e.g.
+      // `/movie/popular`) but discover is `/discover/{kind}` — NOT
+      // `/{kind}/discover`, which 404s ("Invalid id"). Getting this backwards
+      // is why genre/year sync previously imported nothing while charts worked.
+      const path = list === 'discover' ? `/discover/${kind}` : `/${kind}/${list}`;
       const params: Record<string, string> =
         list === 'discover'
           ? {
               page: String(page),
+              language: 'en-US',
               sort_by: 'popularity.desc',
               include_adult: 'false',
               ...(genreId ? { with_genres: String(genreId) } : {}),
@@ -171,10 +195,10 @@ async function collectIds(
             }
           : { page: String(page), language: 'en-US' };
       try {
-        const data = (await tmdbFetch(`/${kind}/${list}`, params)) as TmdbListResult;
+        const data = (await tmdbFetch(path, params)) as TmdbListResult;
         for (const r of data.results ?? []) ids.add(r.id);
       } catch (err) {
-        console.warn(`catalog.sync: ${kind}/${list} page ${page} failed`, {
+        console.warn(`catalog.sync: ${path} page ${page} failed`, {
           message: err instanceof Error ? err.message : String(err),
         });
       }
@@ -253,9 +277,19 @@ async function upsertTitlesWith(
   }));
   const { error: titleErr } = await db.from('titles').upsert(titleRows, { onConflict: 'slug' });
   if (titleErr) throw new Error(`titles upsert failed: ${titleErr.message}`);
-  const { data: dbTitles, error: titleSelErr } = await db.from('titles').select('id, slug');
-  if (titleSelErr) throw new Error(`titles read failed: ${titleSelErr.message}`);
-  const titleId = new Map((dbTitles ?? []).map((t) => [t.slug, t.id]));
+  const slugs = titleRows.map((r) => r.slug);
+  // Re-read ONLY the titles we just upserted, in chunks. An unbounded select
+  // silently truncates at Supabase's 1,000-row default, so titles outside the
+  // first thousand (e.g. low-popularity imports) would lose their slug→id
+  // mapping — and therefore their seasons/cast/episodes — while appearing to
+  // import fine. This was the root cause of "series with seasons but no
+  // episodes" across the catalog.
+  const titleId = new Map<string, string>();
+  for (const part of chunk(slugs, 100)) {
+    const { data: partTitles, error: partErr } = await db.from('titles').select('id, slug').in('slug', part);
+    if (partErr) throw new Error(`titles read failed: ${partErr.message}`);
+    for (const t of partTitles ?? []) titleId.set(t.slug, t.id);
+  }
 
   // Genre links.
   const joinRows = titles.flatMap((t) => {
@@ -392,10 +426,20 @@ async function upsertTitlesWith(
         return null;
       }
       budget.remaining--;
-      const detail = await fetchSeasonEpisodes(s.tmdbId, s.seasonNumber).catch(() => null);
+      const detail = await fetchSeasonEpisodes(s.tmdbId, s.seasonNumber).catch((e: unknown) => {
+        console.warn('enrich.seasonFetchFailed', {
+          tmdbId: s.tmdbId,
+          season: s.seasonNumber,
+          message: e instanceof Error ? e.message : String(e),
+        });
+        return null;
+      });
       if (!detail) return null;
       const seasonId = seasonIdByTitleSeason.get(`${s.titleId}:${s.seasonNumber}`);
-      if (!seasonId) return null;
+      if (!seasonId) {
+        console.warn('enrich.seasonIdMissing', { titleId: s.titleId, season: s.seasonNumber });
+        return null;
+      }
       return normalizeEpisodes(detail).map((e) => ({ ...e, titleId: s.titleId, seasonId }));
     })
   ).flat().filter((e): e is NormalizedEpisode & { titleId: string; seasonId: string } => e !== null);
@@ -431,19 +475,89 @@ async function upsertTitlesWith(
 }
 
 /**
+ * On-demand single-title enrichment (Spec Section 4: titles stay complete).
+ *
+ * The bulk sync caps season-episode fetches per run, so a series can land with
+ * seasons but no episode rows. When a viewer opens such a series, the title /
+ * watch pages call this (through {@link ensureTitleComplete}) and it imports
+ * the FULL episode set for that one title — no run budget, no page cap — plus
+ * cast/trailer if missing. Runs via the service client so any viewer triggers
+ * it (not just editors), exactly like the search-to-import path.
+ */
+export interface TitleEnrichmentResult {
+  ok: boolean;
+  /** Episodes imported this run. */
+  episodes: number;
+  reason?: string;
+}
+
+export async function enrichTitleFromTmdb(
+  titleId: string,
+  opts: { maxSeasonFetches?: number } = {},
+): Promise<TitleEnrichmentResult> {
+  const { getSupabaseServiceClient } = await import('@/lib/supabase/service');
+  const db = getSupabaseServiceClient();
+
+  const { data: row, error: rowErr } = await db
+    .from('titles')
+    .select('id, type, tmdb_id')
+    .eq('id', titleId)
+    .maybeSingle();
+  if (rowErr || !row) return { ok: false, episodes: 0, reason: 'title not found' };
+  if (row.type !== 'tv') return { ok: false, episodes: 0, reason: 'not a series' };
+  if (row.tmdb_id == null) return { ok: false, episodes: 0, reason: 'no TMDB id to enrich' };
+
+  const detail = await fetchTitle('tv', row.tmdb_id);
+  if (!detail) return { ok: false, episodes: 0, reason: 'TMDB detail fetch failed' };
+
+  // Per-title budget is intentionally generous: one series' seasons must all
+  // land so its episode list is complete after a single visit.
+  const counts = await upsertTitlesWith(db, [detail], {
+    maxSeasonFetches: opts.maxSeasonFetches ?? 250,
+  });
+
+  // A series that HAS seasons but imported ZERO episodes means every season
+  // fetch failed (transient TMDB hiccup / rate limit). Report it as a failure
+  // so the enrichment cooldown stays short and the next visit retries —
+  // otherwise the run would be marked "success" and block re-fetching for an
+  // hour, leaving the viewer stuck with an empty episode list.
+  if (detail.seasons.length > 0 && counts.episodes === 0) {
+    return { ok: false, episodes: 0, reason: 'TMDB episode import returned no episodes (will retry)' };
+  }
+  return { ok: true, episodes: counts.episodes };
+}
+
+/**
  * Sync the catalog from TMDB. Throws on total TMDB unreachability so the action
  * can surface an honest error (e.g. networks/ISPs that block TMDB).
  */
 export async function syncCatalogFromTmdb(filters: SyncFilters): Promise<SyncResult> {
   const kinds: ('movie' | 'tv')[] =
     filters.type === 'both' ? ['movie', 'tv'] : [filters.type];
-  const genreId = filters.genre && filters.source === 'discover' ? await resolveGenreId(filters.genre, kinds) : null;
-  if (filters.genre && filters.source === 'discover' && genreId === null) {
-    throw new Error(`Genre "${filters.genre}" was not found on TMDB.`);
+  const filtering = Boolean(filters.genre) && filters.source === 'discover';
+
+  // Genre ids are per-kind vocabularies (see resolveGenreIdForKind), so resolve
+  // one id per kind. A kind with no match for the chosen genre is dropped from
+  // the run rather than silently importing that genre's movies as series.
+  const genreIds = new Map<'movie' | 'tv', number | null>();
+  if (filtering) {
+    for (const kind of kinds) {
+      genreIds.set(kind, await resolveGenreIdForKind(filters.genre!, kind));
+    }
+    if ([...genreIds.values()].every((id) => id === null)) {
+      throw new Error(
+        `Genre "${filters.genre}" was not found on TMDB for ${
+          filters.type === 'both' ? 'movies or series' : filters.type === 'movie' ? 'movies' : 'series'
+        }.`,
+      );
+    }
   }
 
-  const idLists = await Promise.all(kinds.map((kind) => collectIds(kind, filters, genreId)));
-  const pairs = idLists.flatMap((ids, i) => ids.map((id) => ({ kind: kinds[i]!, id })));
+  const activeKinds = filtering ? kinds.filter((k) => genreIds.get(k) != null) : kinds;
+  const idLists = await Promise.all(
+    activeKinds.map((kind) => collectIds(kind, filters, genreIds.get(kind) ?? null)),
+  );
+  const pairs = idLists.flatMap((ids, i) => ids.map((id) => ({ kind: activeKinds[i]!, id })));
   if (pairs.length === 0) {
     throw new Error(
       'TMDB returned no titles for these filters — check the server network connection to api.themoviedb.org.',

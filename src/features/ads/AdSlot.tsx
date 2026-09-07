@@ -40,7 +40,13 @@ export function AdSlot({
 
   return (
     <div className={cn('flex w-full flex-col items-center gap-1 py-4', className)}>
-      <AdsterraBanner adsterraKey={config.adsterraKey} width={config.width} height={config.height} />
+      <AdsterraBanner
+        adsterraKey={config.adsterraKey}
+        width={config.width}
+        height={config.height}
+        mobileWidth={config.mobileWidth}
+        mobileHeight={config.mobileHeight}
+      />
       <span className="text-[10px] uppercase tracking-widest text-content-subtle">Advertisement</span>
     </div>
   );

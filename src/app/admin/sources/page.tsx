@@ -5,6 +5,8 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { listSeasonsForTitle } from '@/features/catalog/queries';
 import { SourcesManager, type SourcesEpisodeOption } from '@/features/admin/SourcesManager';
 import { getAdminTitleById, listAdminTitles, listMediaSourcesForTitle } from '@/features/admin/queries';
+import { PermissionDeniedError, requirePermission } from '@/lib/permissions/check';
+import { PERMISSIONS } from '@/lib/permissions/permissions';
 
 export const metadata = {
   title: 'Media',
@@ -38,6 +40,30 @@ export default async function AdminSourcesPage({ searchParams }: { searchParams:
   const q = firstParam(sp.q)?.trim() ?? '';
   const titleId = firstParam(sp.titleId)?.trim() ?? '';
 
+  // Page-level gate (the layout gate admits any admin; this page's upload and
+  // remote forms are provider.manage-only). catalog.read-only admins get an
+  // honest "not authorized" panel instead of forms that would fail server-side.
+  try {
+    await requirePermission(PERMISSIONS.PROVIDER_MANAGE);
+  } catch (err) {
+    if (err instanceof PermissionDeniedError) {
+      return (
+        <div className="flex flex-col gap-6 py-6">
+          <PageHeader
+            title="Media"
+            description="Uploads, storage, and stream sources."
+          />
+          <EmptyState
+            icon="⇈"
+            title="Provider.manage required"
+            description="You need the provider.manage permission to manage media sources. Contact an administrator to request access."
+          />
+        </div>
+      );
+    }
+    throw err;
+  }
+
   // -------------------------------------------------------------------------
   // Title picker (no titleId yet)
   // -------------------------------------------------------------------------
@@ -49,6 +75,11 @@ export default async function AdminSourcesPage({ searchParams }: { searchParams:
         <PageHeader
           title="Media"
           description="Upload videos to Lumora's private storage and manage playback sources. Pick a title first — uploads and remote streams always belong to a movie or an episode of a series."
+          actions={
+            <Link href="/admin/sources/bulk" className={buttonClasses({ variant: 'secondary', size: 'sm' })}>
+              Bulk sources
+            </Link>
+          }
         />
 
         <section

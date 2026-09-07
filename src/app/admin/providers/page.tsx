@@ -14,7 +14,7 @@ export default async function AdminProvidersPage() {
     <div className="py-6">
       <PageHeader
         title="Providers"
-        description="Playback providers from the database (provider.manage), plus the built-in adapter configured in code — shown read-only."
+        description="Playback providers from the database (provider.manage), plus the built-in adapters configured in code. The database row drives enablement and stored health."
       />
       <ProvidersExplorer rows={rows} />
     </div>

@@ -15,6 +15,12 @@ import { listTitles } from './queries';
 export interface HomeData {
   /** Null when the catalog is empty or could not be read. */
   hero: Title | null;
+  /**
+   * The rotating hero carousel pool: top ~14 trending titles (movies + series)
+   * that the home hero auto-cycles through, so the banner surfaces different
+   * content across visits instead of pinning one title.
+   */
+  heroTitles: Title[];
   continueWatching: ContinueWatchingEntry[];
   rows: MediaRow[];
   /** True when the live catalog could not be read (unconfigured or DB error). */
@@ -96,7 +102,7 @@ async function loadSignedIn(): Promise<boolean> {
 
 export async function getHomeData(): Promise<HomeData> {
   if (!features.supabaseConfigured) {
-    return { hero: null, continueWatching: [], rows: [], degraded: true, signedIn: false };
+    return { hero: null, heroTitles: [], continueWatching: [], rows: [], degraded: true, signedIn: false };
   }
 
   try {
@@ -107,14 +113,29 @@ export async function getHomeData(): Promise<HomeData> {
     ]);
     if (!titles.length) {
       // DB reachable but empty catalog — honest empty state, not mock data.
-      return { hero: null, continueWatching, rows: [], degraded: false, signedIn };
+      return {
+        hero: null,
+        heroTitles: [],
+        continueWatching,
+        rows: [],
+        degraded: false,
+        signedIn,
+      };
     }
 
-    const hero = titles.find((t) => t.featured) ?? titles[0]!;
+    // Rotating hero pool (Spec Section 4): the top trending titles drive the
+    // auto-advancing hero carousel, so the banner surfaces a variety of movies
+    // and series across visits instead of pinning one "featured" title forever.
+    const heroTitles = titles.slice(0, 14);
+    // 6-hour bucket advances deterministically so each window is stable for
+    // cached renders, then the carousel start position changes.
+    const heroBucket = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
+    const hero = heroTitles[heroBucket % heroTitles.length] ?? titles[0]!;
     const rows = buildRows(titles);
 
     return {
       hero,
+      heroTitles,
       continueWatching,
       rows,
       degraded: false,
@@ -124,6 +145,13 @@ export async function getHomeData(): Promise<HomeData> {
     console.warn('catalog.getHomeData: repository failed, returning empty catalog', {
       message: err instanceof Error ? err.message : String(err),
     });
-    return { hero: null, continueWatching: [], rows: [], degraded: true, signedIn: false };
+    return {
+      hero: null,
+      heroTitles: [],
+      continueWatching: [],
+      rows: [],
+      degraded: true,
+      signedIn: false,
+    };
   }
 }

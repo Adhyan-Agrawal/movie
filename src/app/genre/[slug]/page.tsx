@@ -5,6 +5,8 @@ import { PageHeader } from '@/components/ui/PageHeader';
 import { listAllGenres } from '@/features/catalog/queries';
 import type { TitleFilters } from '@/features/catalog/queries';
 import { BrowseResults, parseTitleFilters, type SearchParamsRecord } from '@/features/catalog/components/BrowseResults';
+import { AdSlot } from '@/features/ads/AdSlot';
+import { ConsentGate } from '@/features/ads/ConsentGate';
 
 /** Slugify a genre name the same way inbound slugs are expected (e.g. "Sci-Fi" -> "sci-fi"). */
 function slugify(value: string): string {
@@ -48,6 +50,10 @@ export default async function GenrePage({
   return (
     <Container>
       <PageHeader title={genre} description={`${genre} movies and shows across the catalog.`} />
+      {/* Ad (Spec Section 11): one banner below the genre header, consent-gated. */}
+      <ConsentGate>
+        <AdSlot slot="genreLeaderboard" />
+      </ConsentGate>
       <BrowseResults filters={filters} sp={sp} basePath={`/genre/${slug}`} genres={genres} lockGenre={genre} />
     </Container>
   );

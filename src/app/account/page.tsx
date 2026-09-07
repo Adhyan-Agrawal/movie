@@ -4,7 +4,11 @@ import { buttonClasses } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { cn } from '@/lib/cn';
 import { getSignedInEmail, listAccountProfiles } from '@/features/account/queries';
+import { listWatchlistTitles } from '@/features/watchlist/queries';
+import { listWatchHistoryWithTitles } from '@/features/playback/history-queries';
 import { greeting } from '@/features/account/types';
+import { AdSlot } from '@/features/ads/AdSlot';
+import { ConsentGate } from '@/features/ads/ConsentGate';
 
 export const metadata: Metadata = { title: 'Overview' };
 
@@ -32,7 +36,12 @@ function firstNameFromEmail(email: string | null): string {
 }
 
 export default async function AccountOverviewPage() {
-  const [email, profiles] = await Promise.all([getSignedInEmail(), listAccountProfiles()]);
+  const [email, profiles, watchlist, history] = await Promise.all([
+    getSignedInEmail(),
+    listAccountProfiles(),
+    listWatchlistTitles(),
+    listWatchHistoryWithTitles(5),
+  ]);
   const firstName = firstNameFromEmail(email);
 
   return (
@@ -48,7 +57,7 @@ export default async function AccountOverviewPage() {
 
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
         <StatCard label="Profiles" value={profiles.length} href="/account/profiles" cta="View profiles" />
-        <StatCard label="On your watchlist" value={0} href="/account/watchlist" cta="View watchlist" />
+        <StatCard label="On your watchlist" value={watchlist.length} href="/account/watchlist" cta="View watchlist" />
       </div>
 
       <section aria-labelledby="recent-heading" className="flex flex-col gap-4">
@@ -60,17 +69,45 @@ export default async function AccountOverviewPage() {
             View all
           </Link>
         </div>
-        <EmptyState
-          icon="🕑"
-          title="No recent activity"
-          description="Titles you watch will appear here. Start browsing to build your history."
-          action={
-            <Link href="/browse" className={buttonClasses({ variant: 'primary' })}>
-              Browse the catalog
-            </Link>
-          }
-        />
+        {history.length > 0 ? (
+          <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface/40">
+            {history.map(({ entry, title }) =>
+              title ? (
+                <li key={entry.sessionId}>
+                  <Link
+                    href={`/title/${title.type}/${title.slug}`}
+                    className="flex items-center justify-between gap-4 px-4 py-3 text-sm transition-colors hover:bg-surface-raised/60"
+                  >
+                    <span className="font-medium text-content">{title.name}</span>
+                    <span className="shrink-0 text-xs text-content-muted">
+                      {new Date(entry.watchedAt).toLocaleDateString(undefined, {
+                        month: 'short',
+                        day: 'numeric',
+                      })}
+                    </span>
+                  </Link>
+                </li>
+              ) : null,
+            )}
+          </ul>
+        ) : (
+          <EmptyState
+            icon="🕑"
+            title="No recent activity"
+            description="Titles you watch will appear here. Start browsing to build your history."
+            action={
+              <Link href="/browse" className={buttonClasses({ variant: 'primary' })}>
+                Browse the catalog
+              </Link>
+            }
+          />
+        )}
       </section>
+
+      {/* Ad (Spec Section 11): one rectangle below the overview, consent-gated. */}
+      <ConsentGate>
+        <AdSlot slot="accountRectangle" />
+      </ConsentGate>
     </div>
   );
 }

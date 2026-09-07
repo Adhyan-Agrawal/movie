@@ -84,7 +84,7 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
   if (profileId) {
     const { data: rows, error } = await db
       .from('watch_progress')
-      .select('title_id, progress, position_seconds, updated_at')
+      .select('title_id, progress, position_seconds, updated_at, episode_id')
       .eq('profile_id', profileId)
       .eq('completed', false)
       .gte('progress', 0.02)
@@ -95,7 +95,38 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
         message: error.message,
       });
     }
-    for (const row of rows ?? []) {
+    const rowsList = rows ?? [];
+    // Resolve episode context (season/episode numbers + name) for TV rows so
+    // the row links to the exact episode the viewer left off on.
+    const episodeIds = [
+      ...new Set(rowsList.map((r) => r.episode_id).filter((e): e is string => Boolean(e))),
+    ];
+    const episodes = new Map<
+      string,
+      { episodeId: string; seasonNumber: number; episodeNumber: number; name: string }
+    >();
+    for (let i = 0; i < episodeIds.length; i += 100) {
+      const part = episodeIds.slice(i, i + 100);
+      const { data: epRows, error: epErr } = await db
+        .from('episodes')
+        .select('id, season_number, episode_number, name')
+        .in('id', part);
+      if (epErr) {
+        console.warn('playback.getContinueWatching: episodes read failed', { message: epErr.message });
+        continue;
+      }
+      for (const e of epRows ?? []) {
+        if (e.season_number == null || e.episode_number == null) continue;
+        episodes.set(e.id, {
+          episodeId: e.id,
+          seasonNumber: e.season_number,
+          episodeNumber: e.episode_number,
+          name: e.name,
+        });
+      }
+    }
+
+    for (const row of rowsList) {
       if (entries.length >= limit) break;
       if (seen.has(row.title_id)) continue;
       const title = await getTitleById(row.title_id);
@@ -107,7 +138,8 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
         positionSeconds: row.position_seconds,
         updatedAt: row.updated_at,
       };
-      entries.push({ title, progress });
+      const episode = row.episode_id ? episodes.get(row.episode_id) : undefined;
+      entries.push(episode ? { title, progress, episode } : { title, progress });
     }
   }
 
@@ -116,6 +148,10 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
     const { data: sessions, error } = await db
       .from('playback_sessions')
       .select('title_id')
+      // Scoped to THIS account (playback_sessions_admin_read would otherwise
+      // expose every row to analytics.read holders — the account home must
+      // never surface another user's sessions).
+      .eq('account_id', user.user.id)
       .gte('started_at', since)
       .order('started_at', { ascending: false })
       .limit(SESSION_SCAN_LIMIT);
