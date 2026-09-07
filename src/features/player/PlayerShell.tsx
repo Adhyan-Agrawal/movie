@@ -174,25 +174,6 @@ export function PlayerShell({
     }
   }, [preroll]);
 
-  // Safety net: if the pre-roll creative never calls onDone (blocked zone,
-  // ad network failure), auto-continue to the video after 8s. Otherwise a
-  // broken ad would strand the player behind the gate forever — and with it
-  // the guest continue-watching recording that only happens once the player
-  // mounts.
-  useEffect(() => {
-    if (!showAd) return;
-    const timer = window.setTimeout(() => {
-      try {
-        sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
-      } catch {
-        // Private mode — best effort only.
-      }
-      setAdDone(true);
-      setState('loading');
-    }, 8000);
-    return () => window.clearTimeout(timer);
-  }, [showAd]);
-
   // Gate on the ACTIVE source: if the viewer switched to a server that has no
   // URL (shouldn't happen — the registry only lists resolvable sources), the
   // player renders the unavailable panel for that server.
@@ -210,6 +191,24 @@ export function PlayerShell({
       : null;
   const showNative = showPlayer && nativeKind !== null;
   const playerFailed = showPlayer && state === 'provider-error';
+
+  // Pre-roll safety net: if the creative never calls onDone (blocked zone, ad
+  // network failure), auto-continue to the video after 8s. Otherwise a broken
+  // ad would strand the player behind the gate forever — and with it the guest
+  // continue-watching recording that only happens once the player mounts.
+  useEffect(() => {
+    if (!showAd) return;
+    const timer = window.setTimeout(() => {
+      try {
+        sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
+      } catch {
+        // Private mode — best effort only.
+      }
+      setAdDone(true);
+      setState('loading');
+    }, 8000);
+    return () => window.clearTimeout(timer);
+  }, [showAd]);
 
   // Lumora-owned session recording — provider telemetry is unavailable.
   const sessionIdRef = useRef<string | null>(null);
