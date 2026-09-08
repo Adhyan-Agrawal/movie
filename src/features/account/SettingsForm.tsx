@@ -163,7 +163,7 @@ export function SettingsForm({ accountId }: { accountId: string }) {
           />
         </div>
         <p className="mt-2 text-xs text-content-subtle">
-          These playback controls are saved as preferences but aren't applied to the player yet.
+          These playback controls are saved as preferences but aren&apos;t applied to the player yet.
         </p>
       </fieldset>
 

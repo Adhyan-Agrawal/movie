@@ -269,7 +269,7 @@ export function PlayerShell({
       sessionIdRef.current = null;
       setSessionReady(false);
     };
-  }, [showPlayer, reloadKey, title.id, title.slug, title.type, title.name, title.posterUrl, episodeId]);
+  }, [showPlayer, reloadKey, title.id, title.slug, title.type, title.name, title.posterUrl, episodeId, seasonNumber, episodeNumber]);
 
   useEffect(() => {
     if (!showPlayer || !sessionReady) return;
