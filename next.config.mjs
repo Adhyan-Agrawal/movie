@@ -17,6 +17,8 @@ const PROVIDER_FRAME_HOSTS = [
   'https://*.vsembed.su',
   'https://vidsrc.mov',
   'https://*.vidsrc.mov',
+  'https://vidcore.org',
+  'https://*.vidcore.org',
 ];
 
 /**

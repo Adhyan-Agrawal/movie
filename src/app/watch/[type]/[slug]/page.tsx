@@ -7,9 +7,9 @@ import { Container } from '@/components/ui/Container';
 import { features } from '@/lib/env';
 import { getTitleBySlug } from '@/features/catalog/queries';
 import type { TitleType } from '@/features/catalog/types';
-import { getProviderConfig, listProviderConfigs } from '@/lib/providers/config';
+import { getProviderConfig } from '@/lib/providers/config';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
-import { resolvePlayback } from '@/lib/providers/registry';
+import { getActiveProviderConfigs, resolvePlayback } from '@/lib/providers/registry';
 import { PlayerShell } from '@/features/player/PlayerShell';
 import { EpisodeNavLinks, type EpisodeNavTarget } from '@/features/player/EpisodeNavLinks';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
@@ -148,7 +148,11 @@ export default async function WatchPage({
       const { listSeasonsForTitle } = await import('@/features/catalog/queries');
       const seasons = await listSeasonsForTitle(title.id);
       const flat = seasons.flatMap((s) =>
-        s.episodes.map((e) => ({ season: s.seasonNumber, episode: e.episodeNumber })),
+        s.episodes.map((e) => ({
+          season: s.seasonNumber,
+          episode: e.episodeNumber,
+          name: e.name,
+        })),
       );
       const idx = flat.findIndex((e) => e.season === season && e.episode === episode);
       if (idx >= 0) {
@@ -156,6 +160,7 @@ export default async function WatchPage({
           season: flat[i]!.season,
           episode: flat[i]!.episode,
           label: `S${flat[i]!.season} E${flat[i]!.episode}`,
+          ...(flat[i]!.name ? { name: flat[i]!.name } : {}),
         });
         episodeNav = {
           current: target(idx),
@@ -220,7 +225,9 @@ export default async function WatchPage({
   // via ProviderConfig.startParam) get the saved position appended to their
   // URL — but only once it is meaningfully past the start (> 30s).
   const resumeSeconds = resumePos?.positionSeconds ?? 0;
-  const providerConfigs = new Map(listProviderConfigs().map((c) => [c.id, c] as const));
+  // The FINAL merged configs (built-ins + DB rows, DB overrides applied) carry
+  // each provider's resume startParam — including operator-added providers.
+  const providerConfigs = new Map(getActiveProviderConfigs().map((c) => [c.id, c] as const));
   const embedSources = resolved.sources.map((s) => {
     if (!s.url || resumeSeconds <= 30 || !s.providerId) return s;
     const config = providerConfigs.get(s.providerId);
@@ -284,6 +291,7 @@ export default async function WatchPage({
           {...(episodeId ? { episodeId } : {})}
           {...(title.type === 'tv' && season !== undefined ? { seasonNumber: season } : {})}
           {...(title.type === 'tv' && episode !== undefined ? { episodeNumber: episode } : {})}
+          {...(episodeNav?.next ? { nextEpisode: episodeNav.next } : {})}
           {...(resumePos ? { initialPosition: resumePos.positionSeconds } : {})}
           preroll={preroll}
         />

@@ -3,7 +3,6 @@ import Image from 'next/image';
 import { cn } from '@/lib/cn';
 import { publicEnv } from '@/lib/env';
 import { Badge } from '@/components/ui/Badge';
-import { buttonClasses } from '@/components/ui/Button';
 import { Container } from '@/components/ui/Container';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { MediaRow } from './MediaRow';
@@ -14,7 +13,9 @@ import { ShareButton } from './ShareButton';
 import { formatRuntime } from './title-detail-helpers';
 import { getSimilarTitles, listCastForTitle, listSeasonsForTitle } from '../queries';
 import { getRatingSummary, getMyRating } from '../ratings-queries';
+import { getResumablePlayback, isSignedIn } from '@/features/playback/progress-queries';
 import { RatingControl } from './RatingControl';
+import { ResumePlayButton, type PlayResumeInfo } from './ResumePlayButton';
 import type { MediaRow as MediaRowType, Title } from '../types';
 
 /** Playback availability, driven by provider/consent policy (Spec Sections 4, 9). */
@@ -61,16 +62,30 @@ export async function TitleDetail({
   /** Resolved server-side from the signed-in viewer's watchlist. */
   initialInWatchlist?: boolean;
 }) {
-  const [similar, seasons, cast, ratingSummary, myRating] = await Promise.all([
+  const [similar, seasons, cast, ratingSummary, myRating, signedIn, playback] = await Promise.all([
     getSimilarTitles(title),
     title.type === 'tv' ? listSeasonsForTitle(title.id) : Promise.resolve([]),
     listCastForTitle(title.id),
     getRatingSummary(title.id),
     getMyRating(title.id),
+    isSignedIn(),
+    getResumablePlayback(title),
   ]);
   const runtime = formatRuntime(title.runtimeMinutes);
   const state = AVAILABILITY[availability];
   const watchHref = `/watch/${title.type}/${title.slug}`;
+  // Signed-in resume: the title page CTA becomes "Resume" and (for a series)
+  // deep-links to the LAST episode the viewer was watching. Guests resolve
+  // their own resume client-side from the browser guest store.
+  const serverResume: PlayResumeInfo | null = playback
+    ? playback.type === 'movie'
+      ? { href: watchHref, label: 'Resume', progress: playback.progress }
+      : {
+          href: `/watch/tv/${title.slug}?season=${playback.episode.seasonNumber}&episode=${playback.episode.episodeNumber}`,
+          label: `Resume S${playback.episode.seasonNumber} E${playback.episode.episodeNumber}`,
+          progress: playback.progress,
+        }
+    : null;
   const shareUrl = new URL(`/title/${title.type}/${title.slug}`, publicEnv.NEXT_PUBLIC_APP_URL).toString();
   const similarRow: MediaRowType = { id: 'similar', heading: 'More like this', titles: similar };
 
@@ -185,24 +200,12 @@ export async function TitleDetail({
 
               {/* Primary actions */}
               <div className="mt-1 flex flex-wrap items-center gap-3">
-                {state.playable ? (
-                  <Link
-                    href={watchHref}
-                    aria-label={`Play ${title.name}`}
-                    className={buttonClasses({ size: 'lg', variant: 'primary' })}
-                  >
-                    <span aria-hidden="true">▶</span> Play
-                  </Link>
-                ) : (
-                  <button
-                    type="button"
-                    disabled
-                    aria-label={`Play ${title.name} (unavailable)`}
-                    className={buttonClasses({ size: 'lg', variant: 'primary' })}
-                  >
-                    <span aria-hidden="true">▶</span> Play
-                  </button>
-                )}
+                <ResumePlayButton
+                  baseHref={watchHref}
+                  playable={state.playable}
+                  signedIn={signedIn}
+                  serverResume={serverResume}
+                />
 
                 <WatchlistButton titleId={title.id} titleName={title.name} initialInWatchlist={initialInWatchlist} />
 
@@ -294,7 +297,15 @@ export async function TitleDetail({
                         </div>
                       )}
                       <div className="flex min-w-0 flex-col">
-                        <p className="truncate text-sm font-semibold text-content">{member.name}</p>
+                        <p className="truncate text-sm font-semibold text-content">
+                          {/* Actor names link to their real person page. */}
+                          <Link
+                            href={`/person/${member.personId}`}
+                            className="transition-colors hover:underline focus-visible:underline focus-visible:outline-none"
+                          >
+                            {member.name}
+                          </Link>
+                        </p>
                         {member.character ? (
                           <p className="truncate text-xs text-content-muted">{member.character}</p>
                         ) : null}

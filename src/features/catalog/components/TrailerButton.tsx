@@ -3,6 +3,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 
+/** Extract the YouTube video id from any common URL shape (`watch?v=`,
+ *  `/embed/…`, `/shorts/…`, `youtu.be/…`). The catalog stores a mix. */
+function youTubeKey(url: string): string | null {
+  const m =
+    /\/(?:embed|shorts)\/([A-Za-z0-9_-]{6,20})/.exec(url) ??
+    /[?&]v=([A-Za-z0-9_-]{6,20})/.exec(url) ??
+    /youtu\.be\/([A-Za-z0-9_-]{6,20})/.exec(url);
+  return m?.[1] ?? null;
+}
+
 /**
  * Trailer modal (Spec Section 4): plays the official YouTube trailer in an
  * accessible dialog — Escape and overlay click close it, focus returns to the
@@ -13,7 +23,7 @@ export function TrailerButton({ trailerUrl, titleName }: { trailerUrl: string; t
   const [open, setOpen] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
 
-  const key = /[?&]v=([A-Za-z0-9_-]{6,20})/.exec(trailerUrl)?.[1];
+  const key = youTubeKey(trailerUrl);
 
   useEffect(() => {
     if (!open) return;

@@ -44,9 +44,20 @@ describe('buildVidsrcUrl', () => {
     expect(url.pathname).toBe('/embed/movie/tt0468569');
   });
 
-  it('prefers IMDb id over TMDB id when both are present', () => {
+  it('prefers TMDB id over IMDb id when both are present (provider prefers TMDB)', () => {
+    // The vsembed built-in sets `preferredId: 'tmdb'`, so TMDB wins.
     const url = new URL(
       buildVidsrcUrl(CONFIG, { titleId: 't', type: 'movie', imdbId: 'tt0468569', tmdbId: '27205' }),
+    );
+    expect(url.pathname).toBe('/embed/movie/27205');
+  });
+
+  it('prefers IMDb id over TMDB when the provider does not declare a preference', () => {
+    const url = new URL(
+      buildVidsrcUrl(
+        withConfig({ preferredId: undefined }),
+        { titleId: 't', type: 'movie', imdbId: 'tt0468569', tmdbId: '27205' },
+      ),
     );
     expect(url.pathname).toBe('/embed/movie/tt0468569');
   });
@@ -196,15 +207,16 @@ describe('registry.resolvePlayback', () => {
   it('returns one source per enabled provider, best (highest priority) first', async () => {
     const resolved = await resolvePlayback(movieTmdb);
     expect(resolved.source).not.toBeNull();
-    // All four configured providers resolve the same request; the highest
+    // All five configured providers resolve the same request; the highest
     // priority provider (vidsrc.mov, Server 1) wins.
     expect(resolved.providerId).toBe('vidsrc-mov');
-    expect(resolved.sources).toHaveLength(4);
+    expect(resolved.sources).toHaveLength(5);
     expect(resolved.sources.map((s) => s.providerId)).toEqual([
       'vidsrc-mov',
       '2embed',
       'vidsrc',
       'vidup',
+      'vidcore',
     ]);
     expect(resolved.error).toBeNull();
     expect(resolved.attempted).toContain('vidsrc');

@@ -2,6 +2,8 @@
 
 import { listTitles } from '@/features/catalog/queries';
 import type { Title } from '@/features/catalog/types';
+import { searchPeople } from '@/features/people/queries';
+import type { PersonSearchResult } from '@/features/people/types';
 import { features } from '@/lib/env';
 
 /**
@@ -64,4 +66,17 @@ export async function searchTitlesAction(query: string): Promise<Title[]> {
     // TMDB unreachable / rate-limited — local results only (silent degrade).
   }
   return local;
+}
+
+/**
+ * Server action backing the search box's "People" group. Unlike titles there is
+ * no search-to-import fallback: people enter the catalog as a by-product of
+ * title syncs (top-billed cast), so we only search what is already local. Runs
+ * the trigram-indexed ILIKE against `people.name` under RLS and returns up to 8
+ * client-safe person DTOs. Kept off the client bundle (server action).
+ */
+export async function searchPeopleAction(query: string): Promise<PersonSearchResult[]> {
+  const q = query.trim();
+  if (!q) return [];
+  return searchPeople(q, 8);
 }

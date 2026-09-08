@@ -15,6 +15,8 @@ export interface EpisodeNavTarget {
   episode: number;
   /** Short label for the aria-live region, e.g. "S1 E2". */
   label: string;
+  /** Episode title, when known — surfaced by the "Up next" player overlay. */
+  name?: string;
 }
 
 const navClasses =

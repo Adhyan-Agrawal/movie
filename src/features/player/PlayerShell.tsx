@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
@@ -9,6 +10,7 @@ import type { PlaybackError, PlaybackSource } from '@/lib/providers/types';
 import { type PlayerState, playerStateForError } from './player-states';
 import { PlayerControlsBar } from './PlayerControlsBar';
 import { NativePlayer } from './NativePlayer';
+import type { EpisodeNavTarget } from './EpisodeNavLinks';
 import { PreRollAd } from '@/features/ads/PreRollAd';
 import { readConsent } from '@/components/consent/ConsentBanner';
 import {
@@ -59,6 +61,13 @@ export interface PlayerShellProps {
   /** TV only: season/episode numbers (guest store resume + native player). */
   seasonNumber?: number;
   episodeNumber?: number;
+  /**
+   * TV only: the following episode when one exists, resolved server-side from
+   * the real episode index. The surface renders a small "Up next" overlay LINK
+   * to it — never an auto-advance — because external embeds expose no end
+   * telemetry we could detect honestly.
+   */
+  nextEpisode?: EpisodeNavTarget;
   /** Saved resume position (seconds) forwarded to the native player. */
   initialPosition?: number;
   /**
@@ -128,6 +137,7 @@ export function PlayerShell({
   episodeNumber,
   initialPosition,
   preroll = null,
+  nextEpisode,
 }: PlayerShellProps) {
   const router = useRouter();
 
@@ -416,6 +426,15 @@ export function PlayerShell({
             )}
           </>
         )}
+
+        {/* "Up next" (TV only): a small overlay link that jumps to the next
+            episode without scrolling. It renders once the real player surface is
+            mounted and the loading overlay has cleared — always-visible but
+            subtle, rather than revealed by end-detection, because external
+            embeds expose no position/ended telemetry to time it honestly. */}
+        {nextEpisode && showPlayer && state === 'ready' ? (
+          <UpNextChip baseHref={`/watch/tv/${title.slug}`} target={nextEpisode} />
+        ) : null}
       </div>
 
       <PlayerControlsBar        backHref={`/title/${title.type}/${title.slug}`}
@@ -494,5 +513,29 @@ function UnavailablePanel({
         You can also choose an alternate authorized source below when one is available.
       </p>
     </div>
+  );
+}
+
+/**
+ * Small "Up next" pill overlaid on the player surface. A plain internal link —
+ * deliberately NOT an auto-advance, and deliberately unobtrusive: the current
+ * episode keeps playing until the viewer chooses to move on.
+ */
+function UpNextChip({ baseHref, target }: { baseHref: string; target: EpisodeNavTarget }) {
+  const episodeLabel = [target.label, target.name].filter(Boolean).join(' · ');
+  return (
+    <Link
+      href={`${baseHref}?season=${target.season}&episode=${target.episode}`}
+      aria-label={`Up next: ${episodeLabel}`}
+      title={episodeLabel}
+      className="absolute left-3 top-3 z-20 inline-flex max-w-[75%] items-center gap-2 rounded-full border border-white/15 bg-black/70 px-3 py-1.5 text-xs text-white shadow-soft backdrop-blur-sm transition-colors hover:border-white/30 hover:bg-black/85 focus-visible:outline-none"
+    >
+      <span aria-hidden="true" className="shrink-0 text-primary">
+        ▶
+      </span>
+      <span className="min-w-0 truncate">
+        <span className="text-content-muted">Up next:</span> <span className="font-semibold">{episodeLabel}</span>
+      </span>
+    </Link>
   );
 }

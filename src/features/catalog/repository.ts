@@ -3,6 +3,7 @@ import 'server-only';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import type { CastMember, MaturityRating, Season, Title, TitleType } from './types';
 import type { TitleFilters } from './queries';
+import type { Person, PersonCredit, PersonSearchResult } from '@/features/people/types';
 
 /**
  * Supabase-backed catalog repository (Spec Section 6: services -> repositories).
@@ -260,6 +261,31 @@ const EPISODE_SELECT =
   'air_date, runtime_minutes, still_url';
 const CAST_SELECT = 'credit_order, character, people ( id, name, profile_url )';
 
+/** Shape of a `people` row (search results + profile header share this subset). */
+interface PersonRow {
+  id: string;
+  name: string;
+  known_for: string | null;
+  profile_url: string | null;
+}
+
+const PERSON_SELECT = 'id, name, known_for, profile_url';
+
+/** Shape of a `title_people` row joined with its (public) `titles` row. */
+interface PersonCreditRow {
+  credit_type: 'cast' | 'crew';
+  character: string | null;
+  job: string | null;
+  credit_order: number;
+  titles: TitleRow | null;
+}
+
+// Reuses TITLE_SELECT so every credit maps through the same `toTitle` path the
+// rest of the catalog uses — the person page gets full Title DTOs and can drop
+// them straight into MediaCard / title links.
+const PERSON_CREDIT_SELECT =
+  'credit_type, character, job, credit_order, titles ( ' + TITLE_SELECT + ' )';
+
 /**
  * Seasons (with any imported episode rows) for one title, ordered by season
  * number. Seasons whose episodes haven't been imported yet still return —
@@ -339,6 +365,100 @@ export async function repoListCastForTitle(titleId: string): Promise<CastMember[
       name: row.people.name,
       character: row.character ?? null,
       profileUrl: row.people.profile_url ?? null,
+    });
+  }
+  return out;
+}
+
+/**
+ * Person search (Spec Section 4: search UI "People" group). Case-insensitive
+ * substring match on `people.name` (`people_name_trgm_idx`), capped at `limit`
+ * results. `people_public_read` is `using (true)`, so any visitor can read the
+ * people catalog; credit counts are computed over `title_people` so RLS narrows
+ * them to credits on PUBLIC titles only.
+ */
+export async function repoSearchPeople(query: string, limit = 8): Promise<PersonSearchResult[]> {
+  const db = await getSupabaseServerClient();
+  const q = query.trim();
+  if (!q) return [];
+
+  const { data, error } = await db
+    .from('people')
+    .select(PERSON_SELECT)
+    .ilike('name', `%${q}%`)
+    .order('name', { ascending: true })
+    .limit(Math.min(20, Math.max(1, limit)));
+  if (error) throw new Error(`repoSearchPeople: ${error.message}`);
+  const rows = (data ?? []) as unknown as PersonRow[];
+  if (rows.length === 0) return [];
+
+  const out: PersonSearchResult[] = rows.map((r) => ({
+    id: r.id,
+    name: r.name,
+    knownFor: r.known_for ?? null,
+    profileUrl: r.profile_url ?? null,
+  }));
+
+  // Public-credit counts are a cosmetic enhancement ("N credits"), so they are
+  // best-effort: a failure here must never sink an otherwise-good person search.
+  try {
+    const { data: credits, error: creditErr } = await db
+      .from('title_people')
+      .select('person_id')
+      .in('person_id', out.map((p) => p.id));
+    if (!creditErr) {
+      const counts = new Map<string, number>();
+      for (const c of (credits ?? []) as unknown as { person_id: string }[]) {
+        counts.set(c.person_id, (counts.get(c.person_id) ?? 0) + 1);
+      }
+      for (const p of out) {
+        const n = counts.get(p.id);
+        if (n) p.roleCount = n;
+      }
+    }
+  } catch {
+    // Non-fatal — counts are decorative.
+  }
+  return out;
+}
+
+/** Single person by UUID (profile header). Null for unknown/non-UUID ids. */
+export async function repoGetPerson(id: string): Promise<Person | null> {
+  if (!UUID_RE.test(id)) return null;
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db.from('people').select(PERSON_SELECT).eq('id', id).maybeSingle();
+  if (error) throw new Error(`repoGetPerson: ${error.message}`);
+  if (!data) return null;
+  const r = data as unknown as PersonRow;
+  return { id: r.id, name: r.name, knownFor: r.known_for ?? null, profileUrl: r.profile_url ?? null };
+}
+
+/**
+ * Every credit row for a person joined to its public title, as full Title DTOs.
+ *
+ * Reads `title_people` through the RLS-scoped server client, so the join
+ * automatically sees only rows whose parent title is published/public — the
+ * same `title_is_public()` gate the catalog uses everywhere. Anonymous visitors
+ * therefore get exactly the person's publicly-visible credits.
+ */
+export async function repoListPersonCredits(personId: string): Promise<PersonCredit[]> {
+  if (!UUID_RE.test(personId)) return [];
+  const db = await getSupabaseServerClient();
+  const { data, error } = await db
+    .from('title_people')
+    .select(PERSON_CREDIT_SELECT)
+    .eq('person_id', personId);
+  if (error) throw new Error(`repoListPersonCredits: ${error.message}`);
+
+  const out: PersonCredit[] = [];
+  for (const row of (data ?? []) as unknown as PersonCreditRow[]) {
+    if (!row.titles) continue;
+    out.push({
+      title: toTitle(row.titles),
+      creditType: row.credit_type,
+      character: row.character ?? null,
+      job: row.job ?? null,
+      creditOrder: row.credit_order,
     });
   }
   return out;

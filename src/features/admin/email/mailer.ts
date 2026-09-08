@@ -49,13 +49,15 @@ export interface SmtpSettings {
 }
 
 /**
- * Load the SMTP settings from `site_settings`. Returns null when any required
- * value is missing or malformed — an incomplete config counts as "no config",
- * so callers fail with a clear "configure SMTP first" message rather than a
- * cryptic transport error.
+ * Load SMTP settings from a specific client. The ADMIN read (below) uses the
+ * RLS-scoped client so only `settings.manage` holders can load credentials; the
+ * SERVICE read (`readSmtpSettingsService`) is for user-facing TRANSACTIONAL
+ * sends (welcome email on signup, etc.) where the recipient is not an admin and
+ * would otherwise see no `smtp.*` rows at all.
  */
-export async function readSmtpSettings(): Promise<SmtpSettings | null> {
-  const db = await getSupabaseServerClient();
+async function readSmtpSettingsFrom(
+  db: Awaited<ReturnType<typeof getSupabaseServerClient>> | Awaited<ReturnType<typeof import('@/lib/supabase/service').getSupabaseServiceClient>>,
+): Promise<SmtpSettings | null> {
   const { data, error } = await db
     .from('site_settings')
     .select('key, value')
@@ -82,6 +84,31 @@ export async function readSmtpSettings(): Promise<SmtpSettings | null> {
   return { host: host.trim(), port, user: user.trim(), pass: pass.trim(), from: from.trim() };
 }
 
+/** Admin-scoped read (RLS): only `settings.manage` holders see the credentials. */
+export async function readSmtpSettings(): Promise<SmtpSettings | null> {
+  return readSmtpSettingsFrom(await getSupabaseServerClient());
+}
+
+/**
+ * Service-role read for user-facing transactional sends (welcome/reset/request
+ * emails). Bypasses the admin-only RLS policy so a non-admin recipient flow can
+ * still send through the operator's relay. Never used by admin settings pages.
+ */
+export async function readSmtpSettingsService(): Promise<SmtpSettings | null> {
+  const { getSupabaseServiceClient } = await import('@/lib/supabase/service');
+  return readSmtpSettingsFrom(getSupabaseServiceClient());
+}
+
+/** Build a nodemailer transporter from a validated {@link SmtpSettings}. */
+export function createSmtpTransporter(settings: SmtpSettings): Transporter {
+  return nodemailer.createTransport({
+    host: settings.host,
+    port: settings.port,
+    secure: settings.port === 465,
+    auth: { user: settings.user, pass: settings.pass },
+  });
+}
+
 /**
  * A nodemailer transporter wired to the stored SMTP config, or null when SMTP
  * is not configured (or the config is incomplete). Port 465 gets implicit TLS;
@@ -90,11 +117,5 @@ export async function readSmtpSettings(): Promise<SmtpSettings | null> {
 export async function getSmtpTransporter(): Promise<Transporter | null> {
   const settings = await readSmtpSettings();
   if (!settings) return null;
-
-  return nodemailer.createTransport({
-    host: settings.host,
-    port: settings.port,
-    secure: settings.port === 465,
-    auth: { user: settings.user, pass: settings.pass },
-  });
+  return createSmtpTransporter(settings);
 }

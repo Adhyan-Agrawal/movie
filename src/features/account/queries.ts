@@ -32,6 +32,16 @@ export async function getSignedInEmail(): Promise<string | null> {
   return data.user.email ?? null;
 }
 
+/** Resolve the signed-in user's id, or null when there is no session. */
+export async function getSignedInAccountId(): Promise<string | null> {
+  if (!features.supabaseConfigured) return null;
+
+  const supabase = await getSupabaseServerClient();
+  const { data, error } = await supabase.auth.getUser();
+  if (error || !data.user) return null;
+  return data.user.id;
+}
+
 /** List the REAL profiles belonging to the signed-in account (RLS-scoped). */
 export async function listAccountProfiles(): Promise<AccountProfile[]> {
   if (!features.supabaseConfigured) return [];

@@ -177,13 +177,47 @@ export const MOVSRC_PROVIDER_CONFIG: ProviderConfig = {
 };
 
 /**
+ * VidCore (Server 5). Documented on https://vidcore.org/#documentation:
+ *   movie ............ moviePathTemplate     /embed/movie/{id}
+ *   specific episode . episodePathTemplate   /embed/tv/{id}/{season}/{episode}
+ *   whole series ..... tvSeriesPathTemplate  /embed/tv/{id}
+ * TMDB ids are the documented key; optional params include autoplay, startAt,
+ * theme, color, lang. VERIFICATION STATUS: pattern matches the docs; a health
+ * probe confirms reachability (see /admin/providers).
+ */
+export const VIDCORE_PROVIDER_CONFIG: ProviderConfig = {
+  id: 'vidcore',
+  enabled: true,
+  displayName: 'VidCore',
+  baseUrl: 'https://vidcore.org',
+  allowedDomains: ['vidcore.org'],
+  moviePathTemplate: '/embed/movie/{id}',
+  tvSeriesPathTemplate: '/embed/tv/{id}',
+  episodePathTemplate: '/embed/tv/{id}/{season}/{episode}',
+  shorthandEpisodeTemplate: '/embed/tv/{id}/{season}/{episode}',
+  defaultPriority: 50, // Server 5
+  timeoutMs: 8000,
+  enabledRegions: ['*'],
+  consentRequired: true,
+  preferredId: 'tmdb',
+  // Documented resume parameter.
+  startParam: 'startAt',
+  // TMDB id of Inception (the provider resolves TMDB ids).
+  testTitleId: '27205',
+};
+
+/**
  * All configured providers, in registry-priority (public server-number) order.
+ * The REGISTRY additionally merges any admin-configured `providers` rows from
+ * the database, so an operator can add their own iframe providers from the
+ * admin panel without code changes (see registry.ts / /admin/providers).
  */
 export const PROVIDER_CONFIGS: readonly ProviderConfig[] = [
   VIDUP_PROVIDER_CONFIG,
   TWOEMBED_PROVIDER_CONFIG,
   VIDSRC_PROVIDER_CONFIG,
   MOVSRC_PROVIDER_CONFIG,
+  VIDCORE_PROVIDER_CONFIG,
 ];
 
 export function getProviderConfig(id: string): ProviderConfig | undefined {

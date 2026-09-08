@@ -3,6 +3,7 @@
 import { redirect } from 'next/navigation';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { getSupabaseServiceClient } from '@/lib/supabase/service';
+import { sendWelcomeEmail } from '@/features/email/send';
 import type { AuthActionState } from './state';
 
 /**
@@ -106,6 +107,11 @@ export async function signUpAction(
   const supabase = await getSupabaseServerClient();
   const { error: signInErr } = await supabase.auth.signInWithPassword({ email, password });
   if (signInErr) return { error: signInErr.message };
+
+  // Best-effort welcome email (Spec Section 10). Intentionally NOT awaited: a
+  // slow or misconfigured SMTP relay must never delay the signup response.
+  // sendWelcomeEmail catches its own errors and no-ops when SMTP is unset.
+  void sendWelcomeEmail({ email });
 
   redirect('/account');
 }

@@ -212,14 +212,23 @@ async function main() {
     if ((data ?? []).length < 1000) break;
   }
   console.log(`TV titles: ${tv.length}`);
+
+  // Per-title watchdog: a single slow/hung title (long TMDB retry chain under
+  // a flaky network) must not stall the whole run.
+  const withTimeout = (p, ms) =>
+    Promise.race([
+      p,
+      new Promise((resolve) => setTimeout(() => resolve({ status: 'timeout', reason: 'watchdog' }), ms)),
+    ]);
   let done = 0, imported = 0, skipped = 0, failed = 0, ep = 0;
   for (const title of tv ?? []) {
     if (done >= LIMIT) break;
     try {
-      const r = await enrichOne(title);
+      const r = await withTimeout(enrichOne(title), 120_000);
       done++;
       if (r.status === 'ok') { imported++; ep += r.episodes; console.log(`✓ ${title.slug} +${r.episodes}`); }
       else if (r.status === 'skip') { skipped++; }
+      else if (r.status === 'timeout') { failed++; console.warn(`✗ ${title.slug} watchdog timeout`); }
       else { failed++; console.warn(`✗ ${title.slug} ${r.reason ?? r.status}`); }
     } catch (e) {
       failed++; done++;

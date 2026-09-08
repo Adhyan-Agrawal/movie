@@ -172,3 +172,69 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
 
   return entries;
 }
+
+/**
+ * The viewer's resumable point ON A SPECIFIC TITLE (Spec Sections 4, 8), used
+ * by the title page to turn "Play" into "Resume" when they come back to
+ * something they've started:
+ *   - movie → a progress fraction (playback re-seeks to the saved position).
+ *   - tv    → the LAST episode they were watching (most recent resumable
+ *             watch_progress row), with its S/E numbers so the CTA deep-links
+ *             straight to that episode instead of restarting the series.
+ * Returns null for anonymous viewers / nothing worth resuming.
+ */
+export type ResumablePlayback =
+  | { type: 'movie'; progress: number }
+  | { type: 'tv'; episode: { episodeId: string; seasonNumber: number; episodeNumber: number; name: string }; progress: number };
+
+export async function getResumablePlayback(title: {
+  id: string;
+  type: 'movie' | 'tv';
+}): Promise<ResumablePlayback | null> {
+  try {
+    const db = await getSupabaseServerClient();
+    const { data: user } = await db.auth.getUser();
+    if (!user.user) return null;
+    const profileId = await getDefaultProfileId();
+    if (!profileId) return null;
+
+    const { data: row, error } = await db
+      .from('watch_progress')
+      .select('episode_id, progress')
+      .eq('profile_id', profileId)
+      .eq('title_id', title.id)
+      .eq('completed', false)
+      .gte('progress', 0.02)
+      .order('updated_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error || !row) return null;
+    const progress = row.progress;
+    if (typeof progress !== 'number' || !isResumable(progress)) return null;
+
+    if (title.type === 'movie') return { type: 'movie', progress };
+    if (!row.episode_id) return null;
+
+    const { data: ep } = await db
+      .from('episodes')
+      .select('season_number, episode_number, name')
+      .eq('id', row.episode_id)
+      .maybeSingle();
+    if (!ep || ep.season_number == null || ep.episode_number == null) return null;
+    return {
+      type: 'tv',
+      progress,
+      episode: {
+        episodeId: row.episode_id,
+        seasonNumber: ep.season_number,
+        episodeNumber: ep.episode_number,
+        name: ep.name,
+      },
+    };
+  } catch (err) {
+    console.warn('playback.getResumablePlayback failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}

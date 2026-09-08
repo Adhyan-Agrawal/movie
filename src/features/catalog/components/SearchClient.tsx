@@ -1,21 +1,25 @@
 'use client';
 
+import Image from 'next/image';
 import Link from 'next/link';
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
 import { buttonClasses } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { searchTitlesAction } from '@/app/search/actions';
+import { searchPeopleAction, searchTitlesAction } from '@/app/search/actions';
 import { MediaCard } from './MediaCard';
+import type { PersonSearchResult } from '@/features/people/types';
 import type { Title } from '../types';
 
 /**
  * Debounced (250ms), cancellable search (Section 4). Syncs `?q=` to the URL,
  * surfaces recent searches (localStorage) + static trending terms, and groups
- * results (Titles now; People/Collections are labeled placeholders). Stale
- * responses are ignored via a monotonic request id. The actual query runs in a
- * server action through `useTransition` so no catalog logic ships to the client.
+ * results into Titles and People (Collections remains a labeled placeholder).
+ * Titles and people are queried in the SAME server-action pass, so both groups
+ * always reflect the current query. Stale responses are ignored via a
+ * monotonic request id. The actual queries run through `useTransition` so no
+ * catalog logic ships to the client.
  */
 
 /** Real genre names only — no fictional title suggestions. */
@@ -53,6 +57,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
 
   const [query, setQuery] = useState(initialQuery);
   const [results, setResults] = useState<Title[]>([]);
+  const [people, setPeople] = useState<PersonSearchResult[]>([]);
   const [activeQuery, setActiveQuery] = useState('');
   const [recents, setRecents] = useState<string[]>([]);
   const [isPending, startTransition] = useTransition();
@@ -71,14 +76,21 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
       const id = ++reqId.current;
       if (!q) {
         setResults([]);
+        setPeople([]);
         setActiveQuery('');
         return;
       }
       startTransition(async () => {
-        const found = await searchTitlesAction(q);
+        // Titles + people resolve in one pass so both groups stay in sync and
+        // share the same activeQuery/settled flags below.
+        const [found, peopleFound] = await Promise.all([
+          searchTitlesAction(q),
+          searchPeopleAction(q),
+        ]);
         // Ignore stale responses that resolved after a newer query started.
         if (id === reqId.current) {
           setResults(found);
+          setPeople(peopleFound);
           setActiveQuery(q);
         }
       });
@@ -142,6 +154,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
     reqId.current += 1; // invalidate any in-flight request
     setQuery('');
     setResults([]);
+    setPeople([]);
     setActiveQuery('');
     syncUrl('');
   };
@@ -156,6 +169,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
   const settled = activeQuery === trimmed;
   const loading = hasQuery && (isPending || !settled);
   const showEmpty = hasQuery && settled && !isPending && results.length === 0;
+  const showPeopleEmpty = hasQuery && settled && !isPending && people.length === 0;
 
   return (
     <div className="flex flex-col gap-8 pb-12">
@@ -304,13 +318,39 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
             ) : null}
           </section>
 
-          <section aria-labelledby="people-heading" className="flex flex-col gap-3">
-            <h2 id="people-heading" className="text-lg font-semibold tracking-tight">
-              People
-            </h2>
-            <div className="rounded-md border border-dashed border-border bg-surface/40 px-4 py-6 text-sm text-content-muted">
-              People search is coming soon.
+          <section aria-labelledby="people-heading" className="flex flex-col gap-4">
+            <div className="flex items-baseline justify-between gap-4">
+              <h2 id="people-heading" className="text-lg font-semibold tracking-tight">
+                People
+              </h2>
+              <p role="status" aria-live="polite" className="text-sm text-content-muted">
+                {loading ? 'Searching…' : `${people.length} ${people.length === 1 ? 'person' : 'people'}`}
+              </p>
             </div>
+
+            {loading ? (
+              <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {Array.from({ length: 4 }).map((_, i) => (
+                  <li key={i} className="flex items-center gap-3 rounded-md border border-border bg-surface/40 p-3">
+                    <Skeleton className="h-12 w-12 rounded-full" />
+                    <div className="flex flex-1 flex-col gap-2">
+                      <Skeleton className="h-3 w-24" />
+                      <Skeleton className="h-2.5 w-16" />
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            ) : people.length > 0 ? (
+              <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {people.map((person) => (
+                  <li key={person.id}>
+                    <PersonCard person={person} />
+                  </li>
+                ))}
+              </ul>
+            ) : showPeopleEmpty ? (
+              <p className="text-sm text-content-muted">No people found for “{activeQuery}”.</p>
+            ) : null}
           </section>
 
           <section aria-labelledby="collections-heading" className="flex flex-col gap-3">
@@ -324,5 +364,42 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
         </div>
       )}
     </div>
+  );
+}
+
+/** One person result card linking to `/person/{id}` (photo + name + blurb). */
+function PersonCard({ person }: { person: PersonSearchResult }) {
+  return (
+    <Link
+      href={`/person/${person.id}`}
+      className="group flex items-center gap-3 rounded-md border border-border bg-surface/40 p-3 transition-colors hover:border-border-strong hover:bg-surface-overlay focus-visible:outline-none"
+    >
+      {person.profileUrl ? (
+        <Image
+          src={person.profileUrl}
+          alt={`Photo of ${person.name}`}
+          width={48}
+          height={48}
+          sizes="48px"
+          className="h-12 w-12 shrink-0 rounded-full object-cover"
+        />
+      ) : (
+        <div
+          aria-hidden="true"
+          className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-surface-raised text-lg text-content-subtle"
+        >
+          ◎
+        </div>
+      )}
+      <div className="flex min-w-0 flex-col">
+        <span className="truncate text-sm font-semibold text-content group-hover:underline">{person.name}</span>
+        {person.knownFor ? <span className="truncate text-xs text-content-muted">Known for {person.knownFor}</span> : null}
+        {typeof person.roleCount === 'number' ? (
+          <span className="truncate text-xs text-content-subtle">
+            {person.roleCount} {person.roleCount === 1 ? 'credit' : 'credits'}
+          </span>
+        ) : null}
+      </div>
+    </Link>
   );
 }

@@ -1,14 +1,24 @@
 'use client';
 
-import { useId, useRef, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { cn } from '@/lib/cn';
 import { Switch } from './Switch';
+import { readAccountSettings, writeAccountSettings } from './settings-store';
 import { DEFAULT_SETTINGS, LANGUAGE_OPTIONS, MATURITY_LEVELS, type AccountSettings } from './types';
 
 const selectClass =
   'h-11 w-full rounded-md border border-border-strong bg-surface-raised px-3 text-sm text-content ' +
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary';
+
+/** Small "stored for the future, not wired yet" marker used on not-live groups. */
+function ComingSoon() {
+  return (
+    <span className="ml-2 align-middle text-[11px] font-medium uppercase tracking-wide text-content-subtle">
+      Coming soon
+    </span>
+  );
+}
 
 function ToggleRow({
   label,
@@ -32,78 +42,30 @@ function ToggleRow({
   );
 }
 
-/** Visual-only 4-digit PIN entry with auto-advance (Section 4 PIN affordance). */
-function PinField({ onSaved, onCancel }: { onSaved: () => void; onCancel: () => void }) {
-  const [digits, setDigits] = useState<string[]>(['', '', '', '']);
-  const refs = useRef<Array<HTMLInputElement | null>>([]);
-
-  const setDigit = (index: number, raw: string) => {
-    const value = raw.replace(/\D/g, '').slice(-1);
-    setDigits((prev) => {
-      const next = [...prev];
-      next[index] = value;
-      return next;
-    });
-    if (value && index < 3) refs.current[index + 1]?.focus();
-  };
-
-  const onKeyDown = (index: number, event: React.KeyboardEvent<HTMLInputElement>) => {
-    if (event.key === 'Backspace' && !digits[index] && index > 0) {
-      refs.current[index - 1]?.focus();
-    }
-  };
-
-  const complete = digits.every((digit) => digit !== '');
-
-  return (
-    <div className="flex flex-col gap-3 rounded-md border border-border bg-surface-raised/50 p-4">
-      <fieldset>
-        <legend className="mb-2 text-sm font-medium text-content">Enter a 4-digit PIN</legend>
-        <div className="flex gap-2">
-          {digits.map((digit, index) => (
-            <input
-              key={index}
-              ref={(element) => {
-                refs.current[index] = element;
-              }}
-              value={digit}
-              type="password"
-              inputMode="numeric"
-              autoComplete="off"
-              maxLength={1}
-              aria-label={`PIN digit ${index + 1}`}
-              onChange={(event) => setDigit(index, event.target.value)}
-              onKeyDown={(event) => onKeyDown(index, event)}
-              className="h-12 w-11 rounded-md border border-border-strong bg-base text-center text-lg text-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-            />
-          ))}
-        </div>
-      </fieldset>
-      <div className="flex items-center gap-2">
-        <Button type="button" size="sm" disabled={!complete} onClick={onSaved}>
-          Save PIN
-        </Button>
-        <Button type="button" size="sm" variant="ghost" onClick={onCancel}>
-          Cancel
-        </Button>
-      </div>
-    </div>
-  );
-}
-
 /**
- * Preferences form (Section 4). Local state only — "Save preferences" is a
- * documented no-op that reports success via an aria-live status region. Real
- * persistence lands with the account service + server validation.
+ * Preferences form (Spec Section 4).
+ *
+ * Persistence is browser-local, keyed per signed-in account (see
+ * ./settings-store for why there is no server write yet). The form hydrates
+ * after mount from this browser's store and reports saves honestly — nothing
+ * here claims the server stored the values. Controls whose behavior isn't
+ * wired to the app yet are marked "Coming soon"; their choices are still
+ * remembered for when the feature ships.
  */
-export function SettingsForm() {
+export function SettingsForm({ accountId }: { accountId: string }) {
   const [form, setForm] = useState<AccountSettings>(DEFAULT_SETTINGS);
   const [saved, setSaved] = useState(false);
-  const [pinEnabled, setPinEnabled] = useState(DEFAULT_SETTINGS.pinSet);
-  const [showPinEntry, setShowPinEntry] = useState(false);
-  const [pinStatus, setPinStatus] = useState('');
+  const [hydrated, setHydrated] = useState(false);
   const languageId = useId();
   const maturityId = useId();
+
+  // localStorage is not available during SSR, so hydrate after mount. Re-read
+  // when the signed-in account changes (another user on this browser).
+  useEffect(() => {
+    setForm(readAccountSettings(accountId));
+    setSaved(false);
+    setHydrated(true);
+  }, [accountId]);
 
   function update<K extends keyof AccountSettings>(key: K, value: AccountSettings[K]) {
     setForm((previous) => ({ ...previous, [key]: value }));
@@ -112,14 +74,24 @@ export function SettingsForm() {
 
   function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    // TODO(account): persist via the account service with server validation.
+    if (!hydrated) return;
+    writeAccountSettings(accountId, form);
     setSaved(true);
   }
 
   return (
     <form onSubmit={onSubmit} className="flex max-w-2xl flex-col gap-8">
+      <div className="rounded-lg border border-border bg-surface/40 px-4 py-3 text-xs text-content-muted">
+        Preferences are saved to <span className="font-medium text-content">this browser</span> for this account and
+        are not synced to other devices yet. Options marked <span className="font-medium text-content">Coming soon</span>{' '}
+        are stored now and will apply once the matching feature is enabled.
+      </div>
+
       <fieldset>
-        <legend className="mb-3 text-sm font-semibold text-content">Language and maturity</legend>
+        <legend className="mb-3 text-sm font-semibold text-content">
+          Language and maturity
+          <ComingSoon />
+        </legend>
         <div className="flex flex-col gap-4 rounded-lg border border-border bg-surface/40 p-5">
           <div className="flex flex-col gap-2">
             <label htmlFor={languageId} className="text-sm font-medium">
@@ -137,10 +109,13 @@ export function SettingsForm() {
                 </option>
               ))}
             </select>
+            <p className="text-xs text-content-subtle">
+              English is the only available UI language today; other choices are remembered for when localized UI ships.
+            </p>
           </div>
           <div className="flex flex-col gap-2">
             <label htmlFor={maturityId} className="text-sm font-medium">
-              Maturity level
+              Default maturity level
             </label>
             <select
               id={maturityId}
@@ -154,12 +129,19 @@ export function SettingsForm() {
                 </option>
               ))}
             </select>
+            <p className="text-xs text-content-subtle">
+              Maturity limits currently apply per profile — set them on the Profiles page. This default is saved for
+              when account-level content gating ships.
+            </p>
           </div>
         </div>
       </fieldset>
 
       <fieldset>
-        <legend className="mb-3 text-sm font-semibold text-content">Playback</legend>
+        <legend className="mb-3 text-sm font-semibold text-content">
+          Playback
+          <ComingSoon />
+        </legend>
         <div className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface/40 px-5">
           <ToggleRow
             label="Autoplay next episode"
@@ -180,10 +162,16 @@ export function SettingsForm() {
             onChange={(value) => update('captions', value)}
           />
         </div>
+        <p className="mt-2 text-xs text-content-subtle">
+          These playback controls are saved as preferences but aren't applied to the player yet.
+        </p>
       </fieldset>
 
       <fieldset>
-        <legend className="mb-3 text-sm font-semibold text-content">Accessibility</legend>
+        <legend className="mb-3 text-sm font-semibold text-content">
+          Accessibility
+          <ComingSoon />
+        </legend>
         <div className="flex flex-col rounded-lg border border-border bg-surface/40 px-5">
           <ToggleRow
             label="Reduce motion"
@@ -192,63 +180,36 @@ export function SettingsForm() {
             onChange={(value) => update('reducedMotion', value)}
           />
         </div>
+        <p className="mt-2 text-xs text-content-subtle">
+          Your device’s reduced-motion setting is honored today; this in-app toggle is stored for when motion overrides
+          ship.
+        </p>
       </fieldset>
 
       <fieldset>
-        <legend className="mb-3 text-sm font-semibold text-content">Profile lock</legend>
-        <div className="flex flex-col gap-4 rounded-lg border border-border bg-surface/40 p-5">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex flex-col gap-0.5 pr-2">
-              <span className="text-sm font-medium text-content">Require a PIN</span>
-              <span className="text-sm text-content-muted">
-                {pinEnabled
-                  ? 'A 4-digit PIN is required to open this profile.'
-                  : 'Protect this profile with a 4-digit PIN.'}
-              </span>
-            </div>
-            <Switch
-              checked={pinEnabled}
-              label="Require a PIN to open this profile"
-              onChange={(value) => {
-                setPinEnabled(value);
-                setShowPinEntry(false);
-                setPinStatus(value ? '' : 'Profile PIN turned off.');
-              }}
-            />
-          </div>
-
-          {pinEnabled ? (
-            showPinEntry ? (
-              <PinField
-                onSaved={() => {
-                  setShowPinEntry(false);
-                  setPinStatus('Profile PIN updated.');
-                }}
-                onCancel={() => setShowPinEntry(false)}
-              />
-            ) : (
-              <div>
-                <Button type="button" variant="secondary" size="sm" onClick={() => setShowPinEntry(true)}>
-                  {form.pinSet ? 'Change PIN' : 'Set PIN'}
-                </Button>
-              </div>
-            )
-          ) : null}
-
-          <p aria-live="polite" className="sr-only">
-            {pinStatus}
-          </p>
+        <legend className="mb-3 text-sm font-semibold text-content">
+          Profile lock
+          <ComingSoon />
+        </legend>
+        <div className="flex flex-col gap-1 rounded-lg border border-border bg-surface/40 px-5 py-4">
+          <span className="text-sm font-medium text-content">Require a PIN to open a profile</span>
+          <span className="text-sm text-content-muted">
+            Profile PINs aren’t available yet. Until they are, profiles on this account are protected by your Lumora
+            sign-in.
+          </span>
         </div>
       </fieldset>
 
       <div className="flex items-center gap-4">
-        <Button type="submit">Save preferences</Button>
+        <Button type="submit" disabled={!hydrated}>
+          Save preferences
+        </Button>
         <p
           role="status"
           aria-live="polite"
           className={cn('text-sm text-success transition-opacity', saved ? 'opacity-100' : 'opacity-0')}
         >
-          {saved ? 'Preferences saved.' : ''}
+          {saved ? 'Saved on this browser for this account.' : ''}
         </p>
       </div>
     </form>

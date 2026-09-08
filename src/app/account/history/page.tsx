@@ -20,7 +20,9 @@ function formatWatchedAt(iso: string): string {
 /**
  * Account watch history (Spec Sections 4, 8): real playback sessions. The
  * external player exposes no position telemetry, so entries show honest
- * "watched" timestamps — never a fabricated progress bar.
+ * "watched" timestamps — never a fabricated progress bar. TV sessions resolve
+ * the exact episode watched (season/episode numbers + name) so the row deep
+ * links to that episode instead of dumping the viewer at S1E1.
  */
 export default async function HistoryPage() {
   const rows = await listWatchHistoryWithTitles(50);
@@ -54,14 +56,25 @@ export default async function HistoryPage() {
       <ul className="flex flex-col divide-y divide-border rounded-lg border border-border bg-surface/40">
         {rows.map(({ entry, title }) => {
           const t = title as Title;
+          // TV sessions resolve the exact episode watched, so the row labels
+          // itself "Title · S2 E5 · Name" and links straight to that episode.
+          const episode = t.type === 'tv' ? entry.episode : undefined;
+          const episodeLabel = episode
+            ? `S${episode.seasonNumber} E${episode.episodeNumber}${episode.name ? ` · ${episode.name}` : ''}`
+            : undefined;
+          const episodeHref = episode
+            ? `/watch/tv/${t.slug}?season=${episode.seasonNumber}&episode=${episode.episodeNumber}`
+            : undefined;
+          const rowLabel = episode ? `${t.name} · ${episodeLabel}` : t.name;
           return (
             <li key={entry.sessionId} className="flex items-center gap-4 p-4">
               <div className="flex min-w-0 flex-1 flex-col gap-0.5">
                 <Link
-                  href={`/title/${t.type}/${t.slug}`}
+                  href={episodeHref ?? `/title/${t.type}/${t.slug}`}
+                  title={episode ? rowLabel : undefined}
                   className="truncate text-sm font-medium hover:underline"
                 >
-                  {t.name}
+                  {rowLabel}
                 </Link>
                 <span className="text-xs text-content-muted">
                   Watched {formatWatchedAt(entry.watchedAt)}
@@ -69,7 +82,7 @@ export default async function HistoryPage() {
                 </span>
               </div>
               <Link
-                href={`/watch/${t.type}/${t.slug}`}
+                href={episodeHref ?? `/watch/${t.type}/${t.slug}`}
                 className={buttonClasses({ variant: 'secondary', size: 'sm' })}
               >
                 Play again
