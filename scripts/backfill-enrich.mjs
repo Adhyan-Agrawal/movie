@@ -86,6 +86,7 @@ async function enrichOne(title) {
       ? `https://www.youtube.com/embed/${detail.videos.results.find((v) => v.type === 'Trailer' && v.site === 'YouTube').key}`
       : null,
     editorial_score: detail.vote_average ? Math.round(detail.vote_average * 10) : null,
+    popularity: typeof detail.popularity === 'number' ? detail.popularity : null,
   };
 
   const { error: uErr } = await svc.from('titles').upsert(

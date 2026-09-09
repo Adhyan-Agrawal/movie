@@ -37,6 +37,11 @@ export async function generateMetadata({ params }: TitleParams): Promise<Metadat
 
   const description = truncate(title.synopsis, 160);
   const url = canonicalUrl(type, slug);
+  // Link-preview image: the title's own poster when it has one, else the logo.
+  const previewImage =
+    title.posterUrl && /^https?:\/\//.test(title.posterUrl)
+      ? title.posterUrl
+      : new URL('/logo.png', publicEnv.NEXT_PUBLIC_APP_URL).toString();
 
   return {
     title: title.name,
@@ -48,11 +53,13 @@ export async function generateMetadata({ params }: TitleParams): Promise<Metadat
       url,
       siteName: publicEnv.NEXT_PUBLIC_APP_NAME,
       type: type === 'movie' ? 'video.movie' : 'video.tv_show',
+      images: [{ url: previewImage, alt: `${title.name} poster` }],
     },
     twitter: {
       card: 'summary_large_image',
       title: title.name,
       description,
+      images: [previewImage],
     },
   };
 }

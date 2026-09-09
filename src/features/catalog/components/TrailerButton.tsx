@@ -30,10 +30,11 @@ export function TrailerButton({ trailerUrl, titleName }: { trailerUrl: string; t
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
     };
+    const trigger = triggerRef.current;
     document.addEventListener('keydown', onKey);
     return () => {
       document.removeEventListener('keydown', onKey);
-      triggerRef.current?.focus();
+      trigger?.focus();
     };
   }, [open]);
 

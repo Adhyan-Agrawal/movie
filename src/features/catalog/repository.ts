@@ -130,7 +130,9 @@ export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[
   // (a gin trigram index) keeps this fast.
   if (filters.query) query = query.ilike('name', `%${filters.query}%`);
 
-  // Sort in-DB by the appropriate column.
+  // Sort in-DB by the appropriate column. "Trending" ranks by TMDB popularity
+  // (recognizable mainstream hits) with editorial score as the tiebreaker —
+  // score alone floats obscure high-rated imports to the top.
   switch (filters.sort) {
     case 'newest':
       query = query.order('release_year', { ascending: false, nullsFirst: false });
@@ -142,9 +144,13 @@ export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[
       query = query.order('name', { ascending: true });
       break;
     case 'score':
+      query = query.order('editorial_score', { ascending: false, nullsFirst: false });
+      break;
     case 'trending':
     default:
-      query = query.order('editorial_score', { ascending: false, nullsFirst: false });
+      query = query
+        .order('popularity', { ascending: false, nullsFirst: false })
+        .order('editorial_score', { ascending: false, nullsFirst: false });
       break;
   }
 

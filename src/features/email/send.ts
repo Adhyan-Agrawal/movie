@@ -53,7 +53,7 @@ export async function sendWelcomeEmail(input: SendWelcomeEmailInput): Promise<vo
     // is nothing to send, and skipping the template read keeps the no-op cheap.
     const settings = await readSmtpSettingsService();
     if (!settings) {
-      console.log('[email] welcome: SMTP not configured, skipping welcome email');
+      console.warn('[email] welcome: SMTP not configured, skipping welcome email');
       return;
     }
     const transporter = createSmtpTransporter(settings);
@@ -77,7 +77,7 @@ export async function sendWelcomeEmail(input: SendWelcomeEmailInput): Promise<vo
       html: rendered.html,
       text: rendered.text,
     });
-    console.log(`[email] welcome: sent to ${to}`);
+    console.warn(`[email] welcome: sent to ${to}`);
   } catch (err) {
     // Never surface email failures to the signup flow. The SMTP password is
     // never included in what we log (nodemailer messages reference host/user).

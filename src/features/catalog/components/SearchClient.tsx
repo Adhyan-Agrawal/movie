@@ -352,15 +352,6 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
               <p className="text-sm text-content-muted">No people found for “{activeQuery}”.</p>
             ) : null}
           </section>
-
-          <section aria-labelledby="collections-heading" className="flex flex-col gap-3">
-            <h2 id="collections-heading" className="text-lg font-semibold tracking-tight">
-              Collections
-            </h2>
-            <div className="rounded-md border border-dashed border-border bg-surface/40 px-4 py-6 text-sm text-content-muted">
-              Collection search is coming soon.
-            </div>
-          </section>
         </div>
       )}
     </div>

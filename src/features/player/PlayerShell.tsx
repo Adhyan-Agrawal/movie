@@ -18,6 +18,7 @@ import {
   reportPlaybackHeartbeatAction,
   reportPlaybackStartAction,
 } from '@/features/playback/session-actions';
+import { reportPlaybackIssueAction } from '@/features/playback/report-actions';
 import { recordGuestWatch } from '@/features/playback/guest-watch';
 
 /**
@@ -89,18 +90,6 @@ const PREROLL_SESSION_KEY = 'lumora:preroll-shown';
  */
 function recordHeartbeat(sessionId: string | null): void {
   if (sessionId) void reportPlaybackHeartbeatAction(sessionId);
-}
-
-/** Client stub for the "report playback issue" action (Spec Section 9 & 14).
- *  Records only safe diagnostics — never the iframe URL or any query/token. */
-function reportPlaybackIssue(diagnostics: {
-  providerId?: string;
-  titleSlug: string;
-  titleType: string;
-  state: PlayerState;
-}): void {
-  // TODO(playback-report): POST to the playback report endpoint. Safe fields only.
-  console.warn('playback.report', diagnostics);
 }
 
 function unavailableMessage(error?: PlaybackError | null): string {
@@ -299,11 +288,13 @@ export function PlayerShell({
 
   function handleReport() {
     setReported(true);
-    reportPlaybackIssue({
-      providerId: source?.providerId,
-      titleSlug: title.slug,
-      titleType: title.type,
-      state: hasSource ? state : error ? playerStateForError(error.code) : 'blocked',
+    // File a real playback report (migration 0008) with safe diagnostics only —
+    // never the iframe URL, query/token, or upstream provider identity.
+    void reportPlaybackIssueAction({
+      titleId: title.id,
+      ...(episodeId ? { episodeId } : {}),
+      serverLabel: activeSource?.label ?? source?.label,
+      playerState: hasSource ? state : error ? playerStateForError(error.code) : 'blocked',
     });
   }
 

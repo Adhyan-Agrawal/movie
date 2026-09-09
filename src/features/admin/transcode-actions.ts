@@ -252,7 +252,7 @@ export async function transcodeUploadAction(
       inputPath: inputFile,
       outputDir: workDir,
       onProgress: ({ percent }) => {
-        if (percent != null) console.log(`[transcodeUploadAction] ${titleId} ${percent.toFixed(0)}%`);
+        if (percent != null) console.warn(`[transcodeUploadAction] ${titleId} ${percent.toFixed(0)}%`);
       },
     });
 

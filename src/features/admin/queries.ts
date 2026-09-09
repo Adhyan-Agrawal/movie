@@ -349,3 +349,64 @@ export async function listAdminAdPlacements(limit = 100): Promise<
   if (error) throw new Error(`listAdminAdPlacements failed: ${error.message}`);
   return data ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Playback reports (migration 0008)
+// ---------------------------------------------------------------------------
+
+/** Client-safe shape for one viewer "Report playback issue" submission. */
+export interface AdminPlaybackReport {
+  id: string;
+  titleId: string;
+  titleName?: string;
+  serverLabel?: string;
+  playerState?: string;
+  message?: string;
+  hasAccount: boolean;
+  createdAt: string;
+}
+
+/**
+ * Viewer playback reports, newest first, with the public title name resolved.
+ * `playback_reports` is admin-read-only (analytics.read RLS) and not yet in the
+ * generated types — cast pragmatically, like `listTitleRequests`.
+ */
+export async function listPlaybackReports(limit = 15): Promise<AdminPlaybackReport[]> {
+  const db = await getSupabaseServerClient();
+  const { data, error } = await (db as any)
+    .from('playback_reports')
+    .select('id, title_id, server_label, player_state, message, created_at, account_id')
+    .order('created_at', { ascending: false })
+    .limit(limit);
+  if (error) throw new Error(`listPlaybackReports failed: ${error.message}`);
+
+  const rows = (data ?? []) as Array<{
+    id: string;
+    title_id: string;
+    server_label: string | null;
+    player_state: string | null;
+    message: string | null;
+    created_at: string;
+    account_id: string | null;
+  }>;
+  if (rows.length === 0) return [];
+
+  const ids = [...new Set(rows.map((r) => r.title_id))];
+  const nameById = new Map<string, string>();
+  for (let i = 0; i < ids.length; i += 100) {
+    const part = ids.slice(i, i + 100);
+    const { data: titles } = await db.from('titles').select('id, name').in('id', part);
+    for (const t of titles ?? []) nameById.set(t.id, t.name);
+  }
+
+  return rows.map((r) => ({
+    id: r.id,
+    titleId: r.title_id,
+    ...(nameById.get(r.title_id) ? { titleName: nameById.get(r.title_id) } : {}),
+    ...(r.server_label ? { serverLabel: r.server_label } : {}),
+    ...(r.player_state ? { playerState: r.player_state } : {}),
+    ...(r.message ? { message: r.message } : {}),
+    hasAccount: r.account_id != null,
+    createdAt: r.created_at,
+  }));
+}

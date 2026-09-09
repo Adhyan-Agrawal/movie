@@ -6,6 +6,7 @@ import { publicEnv } from '@/lib/env';
 import { getAdapter } from '@/lib/providers/registry';
 import { listProviderConfigs } from '@/lib/providers/config';
 import type { HealthResult, HealthStatus } from '@/lib/providers/types';
+import { listPlaybackReports, type AdminPlaybackReport } from '@/features/admin/queries';
 
 export const metadata = {
   title: 'Health',
@@ -91,6 +92,17 @@ export default async function AdminHealthPage() {
       }),
     )
   ).filter((result): result is HealthResult => result !== null);
+
+  // Viewer "Report playback issue" submissions (migration 0008) — the human
+  // side of provider health: which servers actually fail for real viewers.
+  let reports: AdminPlaybackReport[] = [];
+  try {
+    reports = await listPlaybackReports(15);
+  } catch (err) {
+    console.warn('admin.health: playback reports read failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   return (
     <div className="py-6">
@@ -225,6 +237,63 @@ export default async function AdminHealthPage() {
           Probes run server-side on page load — a HEAD request to each provider&apos;s base origin with its configured
           timeout.
         </p>
+      </section>
+
+      <section aria-label="Viewer playback reports" className="mt-8 flex flex-col gap-3">
+        <h2 className="font-display text-lg font-semibold">Viewer playback reports</h2>
+
+        {reports.length === 0 ? (
+          <EmptyState
+            icon="✓"
+            title="No reports yet"
+            description="When a viewer taps “Report playback issue” on a broken server, it lands here so you can see exactly which server failed and for which title."
+          />
+        ) : (
+          <div className="overflow-x-auto rounded-lg border border-border">
+            <table className="w-full border-collapse text-sm">
+              <caption className="sr-only">Viewer-reported playback issues</caption>
+              <thead>
+                <tr className="border-b border-border bg-surface/60 text-left text-xs uppercase tracking-wide text-content-subtle">
+                  <th scope="col" className="px-3 py-2.5">
+                    Title
+                  </th>
+                  <th scope="col" className="px-3 py-2.5">
+                    Server
+                  </th>
+                  <th scope="col" className="px-3 py-2.5">
+                    Player state
+                  </th>
+                  <th scope="col" className="px-3 py-2.5">
+                    Reported
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {reports.map((report) => (
+                  <tr key={report.id} className="border-b border-border/60 last:border-0 align-top">
+                    <th scope="row" className="px-3 py-2.5 text-left font-normal">
+                      <span className="font-medium text-content">{report.titleName ?? 'Unknown title'}</span>
+                      {report.message ? (
+                        <span className="block max-w-md truncate text-xs text-content-subtle" title={report.message}>
+                          {report.message}
+                        </span>
+                      ) : null}
+                    </th>
+                    <td className="px-3 py-2.5">
+                      <Badge tone={report.serverLabel ? 'warning' : 'neutral'}>{report.serverLabel ?? '—'}</Badge>
+                    </td>
+                    <td className="px-3 py-2.5">
+                      <code className="font-mono text-xs text-content-muted">{report.playerState ?? '—'}</code>
+                    </td>
+                    <td className="px-3 py-2.5 text-xs text-content-subtle">
+                      {new Date(report.createdAt).toLocaleString()}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </section>
     </div>
   );

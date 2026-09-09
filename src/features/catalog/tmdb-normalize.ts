@@ -106,6 +106,7 @@ export interface TmdbMovieDetail {
   poster_path: string | null;
   backdrop_path: string | null;
   vote_average: number | null;
+  popularity?: number | null;
   genres: TmdbGenre[];
   release_dates?: { results?: { iso_3166_1: string; release_dates?: { certification: string }[] }[] };
   external_ids?: { imdb_id: string | null };
@@ -125,6 +126,7 @@ export interface TmdbTvDetail {
   poster_path: string | null;
   backdrop_path: string | null;
   vote_average: number | null;
+  popularity?: number | null;
   genres: TmdbGenre[];
   content_ratings?: { results?: { iso_3166_1: string; rating: string }[] };
   seasons?: TmdbSeason[];
@@ -179,6 +181,8 @@ export interface NormalizedTitle {
   posterUrl: string | null;
   backdropUrl: string | null;
   score: number | null;
+  /** TMDB popularity — the trending/hero ranking signal (nullable). */
+  popularity: number | null;
   genres: string[];
   seasons: Omit<NormalizedSeason, 'titleId'>[];
   /** Top-billed cast (movies and TV share TMDB's `credits` payload shape). */
@@ -232,6 +236,7 @@ export function normalizeMovie(d: TmdbMovieDetail): NormalizedTitle | null {
     posterUrl: d.poster_path ? `${TMDB_IMG}/w500${d.poster_path}` : null,
     backdropUrl: d.backdrop_path ? `${TMDB_IMG}/w1280${d.backdrop_path}` : null,
     score: typeof d.vote_average === 'number' ? Math.round(d.vote_average * 10) : null,
+    popularity: d.popularity ?? null,
     genres: (d.genres ?? []).map((g) => g.name),
     seasons: [],
     cast: normalizeCast(d.credits),
@@ -259,6 +264,7 @@ export function normalizeTv(d: TmdbTvDetail): NormalizedTitle | null {
     posterUrl: d.poster_path ? `${TMDB_IMG}/w500${d.poster_path}` : null,
     backdropUrl: d.backdrop_path ? `${TMDB_IMG}/w1280${d.backdrop_path}` : null,
     score: typeof d.vote_average === 'number' ? Math.round(d.vote_average * 10) : null,
+    popularity: d.popularity ?? null,
     genres: (d.genres ?? []).map((g) => g.name),
     seasons: (d.seasons ?? [])
       .filter((s) => s.season_number > 0)

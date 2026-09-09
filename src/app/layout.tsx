@@ -11,14 +11,28 @@ const inter = Inter({
   display: 'swap',
 });
 
+/** Absolute URL to the brand logo — the default link-preview image. */
+const appUrl = new URL(publicEnv.NEXT_PUBLIC_APP_URL);
+const OG_LOGO = new URL('/logo.png', appUrl).toString();
+
 export const metadata: Metadata = {
   title: {
     default: `${publicEnv.NEXT_PUBLIC_APP_NAME} — Cinematic streaming`,
     template: `%s · ${publicEnv.NEXT_PUBLIC_APP_NAME}`,
   },
   description: 'A calm, premium place to discover and watch movies and television.',
-  metadataBase: new URL(publicEnv.NEXT_PUBLIC_APP_URL),
+  metadataBase: appUrl,
   applicationName: publicEnv.NEXT_PUBLIC_APP_NAME,
+  // Default social/link-preview image = the brand logo. Title pages override
+  // this with their poster (see /title/[type]/[slug]/page.tsx).
+  openGraph: {
+    siteName: publicEnv.NEXT_PUBLIC_APP_NAME,
+    images: [{ url: OG_LOGO, width: 512, height: 512, alt: `${publicEnv.NEXT_PUBLIC_APP_NAME} logo` }],
+  },
+  twitter: {
+    card: 'summary',
+    images: [OG_LOGO],
+  },
 };
 
 export const viewport: Viewport = {

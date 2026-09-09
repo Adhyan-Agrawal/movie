@@ -271,11 +271,14 @@ async function upsertTitlesWith(
     backdrop_url: t.backdropUrl,
     trailer_url: t.trailerUrl,
     editorial_score: t.score,
+    popularity: t.popularity,
     status: 'published' as const,
     visibility: 'public' as const,
     published_at: now,
   }));
-  const { error: titleErr } = await db.from('titles').upsert(titleRows, { onConflict: 'slug' });
+  // `popularity` was added in migration 0009 and isn't in the generated types
+  // yet — cast so the insert accepts the newer column.
+  const { error: titleErr } = await (db as any).from('titles').upsert(titleRows, { onConflict: 'slug' });
   if (titleErr) throw new Error(`titles upsert failed: ${titleErr.message}`);
   const slugs = titleRows.map((r) => r.slug);
   // Re-read ONLY the titles we just upserted, in chunks. An unbounded select

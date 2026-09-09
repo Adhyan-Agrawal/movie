@@ -23,6 +23,8 @@ export interface HomeData {
   heroTitles: Title[];
   continueWatching: ContinueWatchingEntry[];
   rows: MediaRow[];
+  /** Personalized "Because you watched" row for signed-in viewers, else null. */
+  forYou: MediaRow | null;
   /** True when the live catalog could not be read (unconfigured or DB error). */
   degraded: boolean;
   /**
@@ -37,7 +39,9 @@ export interface HomeData {
 function buildRows(titles: Title[]): MediaRow[] {
   const rows: MediaRow[] = [];
 
-  const trending = [...titles].sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 12);
+  // Incoming list is popularity-ranked (trending) — keep that order so the
+  // "Trending now" row shows recognizable hits, not obscure high-score titles.
+  const trending = titles.slice(0, 12);
   if (trending.length) rows.push({ id: 'trending', heading: 'Trending now', titles: trending });
 
   const newest = [...titles].sort((a, b) => b.releaseYear - a.releaseYear).slice(0, 12);
@@ -100,16 +104,39 @@ async function loadSignedIn(): Promise<boolean> {
   }
 }
 
+/** Personalized "Because you watched" row for signed-in viewers. */
+async function loadForYou(): Promise<MediaRow | null> {
+  if (!features.supabaseConfigured) return null;
+  try {
+    const { getForYouRow } = await import('./personalization');
+    return await getForYouRow();
+  } catch (err) {
+    console.warn('catalog.getHomeData: personalization failed', {
+      message: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 export async function getHomeData(): Promise<HomeData> {
   if (!features.supabaseConfigured) {
-    return { hero: null, heroTitles: [], continueWatching: [], rows: [], degraded: true, signedIn: false };
+    return {
+      hero: null,
+      heroTitles: [],
+      continueWatching: [],
+      rows: [],
+      forYou: null,
+      degraded: true,
+      signedIn: false,
+    };
   }
 
   try {
-    const [titles, continueWatching, signedIn] = await Promise.all([
+    const [titles, continueWatching, signedIn, forYou] = await Promise.all([
       listTitles({ sort: 'trending' }),
       loadContinueWatching(),
       loadSignedIn(),
+      loadForYou(),
     ]);
     if (!titles.length) {
       // DB reachable but empty catalog — honest empty state, not mock data.
@@ -118,15 +145,26 @@ export async function getHomeData(): Promise<HomeData> {
         heroTitles: [],
         continueWatching,
         rows: [],
+        forYou: null,
         degraded: false,
         signedIn,
       };
     }
 
     // Rotating hero pool (Spec Section 4): the top trending titles drive the
-    // auto-advancing hero carousel, so the banner surfaces a variety of movies
-    // and series across visits instead of pinning one "featured" title forever.
-    const heroTitles = titles.slice(0, 14);
+    // auto-advancing hero carousel. "Trending" is popularity-ranked, but TV
+    // popularity lists are dominated by reality/talk/news — not hero material.
+    // Drop those genres and interleave the top movies + top scripted series so
+    // the banner always features recognisable, premium titles of both kinds.
+    const HERO_EXCLUDED_GENRES = new Set(['Reality', 'Talk', 'News', 'Game Show', 'Soap']);
+    const heroWorthy = titles.filter((t) => !t.genres.some((g) => HERO_EXCLUDED_GENRES.has(g)));
+    const heroMovies = heroWorthy.filter((t) => t.type === 'movie').slice(0, 7);
+    const heroSeries = heroWorthy.filter((t) => t.type === 'tv').slice(0, 7);
+    const heroTitles: Title[] = [];
+    for (let i = 0; i < Math.max(heroMovies.length, heroSeries.length) && heroTitles.length < 14; i++) {
+      if (i < heroMovies.length) heroTitles.push(heroMovies[i]!);
+      if (i < heroSeries.length) heroTitles.push(heroSeries[i]!);
+    }
     // 6-hour bucket advances deterministically so each window is stable for
     // cached renders, then the carousel start position changes.
     const heroBucket = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
@@ -138,6 +176,7 @@ export async function getHomeData(): Promise<HomeData> {
       heroTitles,
       continueWatching,
       rows,
+      forYou,
       degraded: false,
       signedIn,
     };
@@ -150,6 +189,7 @@ export async function getHomeData(): Promise<HomeData> {
       heroTitles: [],
       continueWatching: [],
       rows: [],
+      forYou: null,
       degraded: true,
       signedIn: false,
     };

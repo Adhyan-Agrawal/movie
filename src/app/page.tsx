@@ -10,7 +10,7 @@ import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
 
 export default async function HomePage() {
-  const { hero, heroTitles, continueWatching, rows, degraded, signedIn } = await getHomeData();
+  const { hero, heroTitles, continueWatching, rows, forYou, degraded, signedIn } = await getHomeData();
 
   // Honest empty states: no mock fallback, no fabricated rows.
   if (!hero) {
@@ -57,6 +57,9 @@ export default async function HomePage() {
         ) : (
           <GuestContinueWatchingRow />
         )}
+        {/* Personalized row (Spec Section 13): titles matched to this viewer's
+            taste — shown only when there's enough history to recommend from. */}
+        {forYou ? <MediaRow row={forYou} /> : null}
         {/* Ad (Spec Section 11): one leaderboard below the fold — after the first
             content rows, before the rest. Low density by design. */}
         {rows.length > 1 ? <ConsentGate><AdSlot slot="homeLeaderboard" /></ConsentGate> : null}
