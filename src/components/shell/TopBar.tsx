@@ -23,7 +23,10 @@ export function TopBar({ signedIn = false }: { signedIn?: boolean }) {
   return (
     <header
       className={cn(
-        'sticky top-0 z-30 flex h-16 items-center gap-4 px-4 transition-colors duration-200 md:px-8',
+        // min-h (rather than a fixed h-16) so the notch padding in standalone
+        // mode grows the bar instead of squeezing its 40px row. env() is 0 in
+        // a normal browser tab, so desktop/md+ layout is untouched.
+        'sticky top-0 z-30 flex min-h-[4rem] items-center gap-4 px-4 pt-[env(safe-area-inset-top)] transition-colors duration-200 md:px-8',
         scrolled ? 'border-b border-border bg-base/85 backdrop-blur-md' : 'bg-transparent',
       )}
     >

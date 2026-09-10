@@ -2,6 +2,7 @@ import { Rail } from './Rail';
 import { MobileNav } from './MobileNav';
 import { TopBar } from './TopBar';
 import { Footer } from './Footer';
+import { InstallPrompt } from '@/components/pwa/InstallPrompt';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
 import { isSignedIn } from '@/features/playback/progress-queries';
@@ -21,7 +22,13 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
       <Rail />
       <div className="flex min-h-dvh flex-col md:pl-16">
         <TopBar signedIn={signedIn} />
-        <main id="main" tabIndex={-1} className="flex-1 pb-24 focus:outline-none md:pb-8">
+        {/* pb-24 (6rem) clears the bottom nav; the safe-area inset is added on
+            top so the last row isn't tucked under the home indicator. */}
+        <main
+          id="main"
+          tabIndex={-1}
+          className="flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))] focus:outline-none md:pb-8"
+        >
           {children}
         </main>
         {/* Ad (Spec Section 11): one footer leaderboard, banner-only, gated on
@@ -31,6 +38,9 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
         </ConsentGate>
         <Footer />
       </div>
+      {/* Mounted here (not in layout.tsx) so it renders inside the shell, sat
+          just above the fixed mobile nav. */}
+      <InstallPrompt />
       <MobileNav />
     </div>
   );

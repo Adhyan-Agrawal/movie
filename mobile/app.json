@@ -1,0 +1,40 @@
+{
+  "expo": {
+    "name": "Lumora",
+    "slug": "lumora",
+    "scheme": "lumora",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "backgroundColor": "#08090c",
+    "primaryColor": "#7c5cff",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "org.lumora.app",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    },
+    "android": {
+      "package": "org.lumora.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#08090c",
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#08090c"
+    },
+    "plugins": [
+      "expo-video"
+    ]
+  }
+}

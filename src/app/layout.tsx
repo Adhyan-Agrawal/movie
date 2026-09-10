@@ -4,6 +4,7 @@ import '@/styles/globals.css';
 import { publicEnv } from '@/lib/env';
 import { AppShell } from '@/components/shell/AppShell';
 import { ConsentBanner } from '@/components/consent/ConsentBanner';
+import { ServiceWorkerRegister } from '@/components/pwa/ServiceWorkerRegister';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -33,11 +34,20 @@ export const metadata: Metadata = {
     card: 'summary',
     images: [OG_LOGO],
   },
+  // iOS home-screen install: full-screen, dark status bar, matching title.
+  appleWebApp: {
+    capable: true,
+    title: publicEnv.NEXT_PUBLIC_APP_NAME,
+    statusBarStyle: 'black-translucent',
+  },
 };
 
 export const viewport: Viewport = {
   themeColor: '#08090c',
   colorScheme: 'dark',
+  // Installed/standalone mode draws under the notch and home indicator; the
+  // shell pads with env(safe-area-inset-*) so nothing is clipped.
+  viewportFit: 'cover',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -46,6 +56,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <AppShell>{children}</AppShell>
         <ConsentBanner />
+        <ServiceWorkerRegister />
       </body>
     </html>
   );

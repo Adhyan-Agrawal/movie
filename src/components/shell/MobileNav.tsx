@@ -18,6 +18,8 @@ export function MobileNav() {
       aria-label="Primary"
       className={cn(
         'fixed inset-x-0 bottom-0 z-40 flex border-t border-border bg-surface/90 backdrop-blur-md md:hidden',
+        // Lift the bar above the iOS home indicator. The links keep their own
+        // py-2; this inset is added below it, not swapped in for it.
         'pb-[env(safe-area-inset-bottom)]',
       )}
     >
