@@ -6,6 +6,7 @@ export const dynamic = 'force-dynamic';
 
 const TOKEN_TTL_MS = 5 * 60 * 1000;
 const TMDB_ID_RE = /^[1-9]\d{0,9}$/;
+const MAX_STREAM_INDEX = 10;
 
 type StreamHeaders = Record<string, string>;
 type ProxyPayload = { expiresAt: number; headers: StreamHeaders; url: string };
@@ -122,9 +123,14 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   const type = params.get('type');
   const season = params.get('season');
   const episode = params.get('episode');
+  const streamIndexRaw = params.get('stream') ?? '0';
+  const streamIndex = Number(streamIndexRaw);
   if (!tmdbId || !TMDB_ID_RE.test(tmdbId) || (type !== 'movie' && type !== 'tv')) return jsonError('Invalid playback request.', 400);
   if (type === 'tv' && (!season || !episode || !/^\d{1,3}$/.test(season) || !/^\d{1,3}$/.test(episode))) {
     return jsonError('TV playback requires a numeric season and episode.', 400);
+  }
+  if (!Number.isInteger(streamIndex) || streamIndex < 0 || streamIndex > MAX_STREAM_INDEX) {
+    return jsonError('Invalid playback stream.', 400);
   }
 
   const target = new URL('/api/resolve', config.baseUrl);
@@ -143,7 +149,8 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   if (!response.ok) return jsonError('Playback source resolution failed.', 502);
 
   const body = await response.json() as { streams?: Array<{ url?: unknown; headers?: unknown }> };
-  const stream = body.streams?.find((candidate) => typeof candidate.url === 'string' && candidate.url.startsWith('https://'));
+  const streams = body.streams?.filter((candidate) => typeof candidate.url === 'string' && candidate.url.startsWith('https://')) ?? [];
+  const stream = streams[streamIndex];
   const streamUrl = stream?.url;
   if (typeof streamUrl !== 'string') return jsonError('No playback source is available.', 404);
 

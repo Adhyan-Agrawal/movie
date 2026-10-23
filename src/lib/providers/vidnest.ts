@@ -10,6 +10,7 @@ import { ProviderError } from './types';
 import type { ProviderConfig } from './config';
 
 const TMDB_ID_RE = /^\d{1,12}$/;
+const MAX_DIRECT_SOURCES = 11;
 
 const capabilities: Capabilities = {
   fullscreen: true,
@@ -63,17 +64,23 @@ export function createVidnestAdapter(config: ProviderConfig): ProviderAdapter {
         params.set('episode', String(request.episode));
       }
 
-      return [{
-        id: `${config.id}:${request.type}`,
-        label: config.displayName,
-        kind: 'hls',
-        url: `/api/vidnest?${params}`,
-        capabilities,
-        providerId: config.id,
-        providerLabel: config.displayName,
-        external: true,
-        consentRequired: config.consentRequired,
-      }];
+      return Array.from({ length: MAX_DIRECT_SOURCES }, (_, streamIndex) => {
+        const sourceParams = new URLSearchParams(params);
+        sourceParams.set('stream', String(streamIndex));
+        const label = streamIndex === 0 ? config.displayName : `${config.displayName} ${streamIndex + 1}`;
+
+        return {
+          id: `${config.id}:${request.type}:${streamIndex}`,
+          label,
+          kind: 'hls' as const,
+          url: `/api/vidnest?${sourceParams}`,
+          capabilities,
+          providerId: config.id,
+          providerLabel: label,
+          external: true,
+          consentRequired: config.consentRequired,
+        };
+      });
     },
 
     async healthCheck(): Promise<HealthResult> {
