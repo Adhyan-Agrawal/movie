@@ -293,10 +293,13 @@ export function NativePlayer({
       <video
         ref={videoRef}
         controls
+        controlsList="nodownload noremoteplayback"
+        disablePictureInPicture
         playsInline
         preload="metadata"
         className="min-h-0 w-full flex-1 bg-black"
         aria-label="Video player"
+        onContextMenu={(event) => event.preventDefault()}
       />
       {showSelectors ? (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border bg-surface/60 px-3 py-2 text-xs text-content-muted">

@@ -209,7 +209,7 @@ export const VIDCORE_PROVIDER_CONFIG: ProviderConfig = {
 export const VIDNEST_PROVIDER_CONFIG: ProviderConfig = {
   id: 'vidnest',
   enabled: true,
-  displayName: 'VidNest',
+  displayName: 'Direct',
   baseUrl: 'https://vidnest-pi.vercel.app',
   allowedDomains: ['vidnest-pi.vercel.app'],
   preferredId: 'tmdb',
