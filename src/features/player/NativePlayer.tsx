@@ -107,6 +107,7 @@ export function NativePlayer({
   const [activeQuality, setActiveQuality] = useState(-1); // -1 = auto
   const [activeAudio, setActiveAudio] = useState(-1);
   const [activeSubtitle, setActiveSubtitle] = useState(-1); // -1 = off
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Report the current position; fire-and-forget, never throws into playback.
   // Signed-out viewers have no watch_progress row — their position goes to the
@@ -149,6 +150,10 @@ export function NativePlayer({
     setQualityLevels([]);
     setAudioTracks([]);
     setSubtitleTracks([]);
+    setActiveQuality(-1);
+    setActiveAudio(-1);
+    setActiveSubtitle(-1);
+    setSettingsOpen(false);
 
     const handleLoadedMetadata = () => {
       // Resume once: seek before playback begins, never on later metadata loads.
@@ -196,20 +201,25 @@ export function NativePlayer({
             })),
           );
           setAudioTracks(
-            hls!.audioTracks.map((t) => ({ id: t.id, label: t.name || `Audio ${t.id}` })),
+            hls!.audioTracks.map((t) => ({ id: t.id, label: t.name || t.lang || `Audio ${t.id}` })),
           );
           setSubtitleTracks(
-            hls!.subtitleTracks.map((t) => ({ id: t.id, label: t.name || `Subtitle ${t.id}` })),
+            hls!.subtitleTracks.map((t) => ({ id: t.id, label: t.name || t.lang || `Subtitle ${t.id}` })),
           );
           // Apply the persisted quality preference once levels are known.
           const pref = readQualityPref(titleSlug);
           if (pref != null) {
             const idx = hls!.levels.findIndex((l) => l.height === pref);
-            if (idx >= 0) hls!.currentLevel = idx;
+            if (idx >= 0) {
+              hls!.currentLevel = idx;
+              setActiveQuality(idx);
+            }
           }
           onReady?.();
         });
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => setActiveQuality(data.level));
+        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
+          setActiveQuality(hls!.autoLevelEnabled ? -1 : data.level);
+        });
         hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => setActiveAudio(data.id));
         hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, (_event, data) => setActiveSubtitle(data.id));
         hls.on(Hls.Events.ERROR, (_event, data) => {
@@ -286,7 +296,8 @@ export function NativePlayer({
     );
   }
 
-  const showSelectors = source.kind === 'hls' && qualityLevels.length > 0;
+  const hasTrackControls =
+    source.kind === 'hls' && (qualityLevels.length > 0 || audioTracks.length > 0 || subtitleTracks.length > 0);
 
   return (
     <div className="flex h-full w-full flex-col">
@@ -301,60 +312,76 @@ export function NativePlayer({
         aria-label="Video player"
         onContextMenu={(event) => event.preventDefault()}
       />
-      {showSelectors ? (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-border bg-surface/60 px-3 py-2 text-xs text-content-muted">
-          <label className="flex items-center gap-1.5">
-            Quality
-            <select
-              value={activeQuality}
-              onChange={(e) => handleQualityChange(Number(e.target.value))}
-              className="h-8 rounded border border-border bg-surface-raised px-1.5 text-xs text-content"
+      {hasTrackControls ? (
+        <div className="absolute bottom-14 right-3 z-20">
+          <button
+            type="button"
+            onClick={() => setSettingsOpen((open) => !open)}
+            aria-expanded={settingsOpen}
+            aria-controls="hls-settings"
+            className="inline-flex h-10 items-center gap-2 rounded-full border border-white/20 bg-black/75 px-3 text-xs font-semibold text-white shadow-soft backdrop-blur transition hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          >
+            <span aria-hidden="true">⚙</span> Settings
+          </button>
+
+          {settingsOpen ? (
+            <div
+              id="hls-settings"
+              className="absolute bottom-12 right-0 w-64 overflow-hidden rounded-xl border border-white/15 bg-zinc-950/95 p-2 text-sm text-white shadow-raised backdrop-blur"
             >
-              <option value={-1}>Auto</option>
-              {qualityLevels.map((l) => (
-                <option key={l.id} value={l.id}>
-                  {l.label}
-                </option>
-              ))}
-            </select>
-          </label>
-
-          {audioTracks.length > 0 ? (
-            <label className="flex items-center gap-1.5">
-              Audio
-              <select
-                value={activeAudio}
-                onChange={(e) => handleAudioChange(Number(e.target.value))}
-                className="h-8 rounded border border-border bg-surface-raised px-1.5 text-xs text-content"
-              >
-                {audioTracks.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          ) : null}
-
-          {subtitleTracks.length > 0 ? (
-            <label className="flex items-center gap-1.5">
-              Subtitles
-              <select
-                value={activeSubtitle}
-                onChange={(e) => handleSubtitleChange(Number(e.target.value))}
-                className="h-8 rounded border border-border bg-surface-raised px-1.5 text-xs text-content"
-              >
-                <option value={-1}>Off</option>
-                {subtitleTracks.map((t) => (
-                  <option key={t.id} value={t.id}>
-                    {t.label}
-                  </option>
-                ))}
-              </select>
-            </label>
+              <p className="px-2 pb-2 pt-1 text-xs font-semibold uppercase tracking-wider text-white/55">Playback settings</p>
+              {qualityLevels.length > 0 ? (
+                <SettingsSelect label="Quality" value={activeQuality} onChange={handleQualityChange}>
+                  <option value={-1}>Auto</option>
+                  {qualityLevels.map((level) => (
+                    <option key={level.id} value={level.id}>{level.label}</option>
+                  ))}
+                </SettingsSelect>
+              ) : null}
+              {audioTracks.length > 0 ? (
+                <SettingsSelect label="Audio" value={activeAudio} onChange={handleAudioChange}>
+                  {audioTracks.map((track) => (
+                    <option key={track.id} value={track.id}>{track.label}</option>
+                  ))}
+                </SettingsSelect>
+              ) : null}
+              {subtitleTracks.length > 0 ? (
+                <SettingsSelect label="Subtitles" value={activeSubtitle} onChange={handleSubtitleChange}>
+                  <option value={-1}>Off</option>
+                  {subtitleTracks.map((track) => (
+                    <option key={track.id} value={track.id}>{track.label}</option>
+                  ))}
+                </SettingsSelect>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}
     </div>
+  );
+}
+
+function SettingsSelect({
+  label,
+  value,
+  onChange,
+  children,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 hover:bg-white/10">
+      <span className="text-white/75">{label}</span>
+      <select
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="max-w-36 rounded-md border border-white/15 bg-white/10 px-2 py-1 text-right text-xs text-white outline-none focus:border-primary"
+      >
+        {children}
+      </select>
+    </label>
   );
 }
