@@ -6,7 +6,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, radius, spacing, type } from '../theme';
 import { Button, EmptyState, Loading, Screen } from '../components/ui';
 import { Row } from '../components/Row';
-import { currentUser, fetchContinueWatching, signOut, submitTitleRequest } from '../lib/api';
+import { currentUser, fetchContinueWatching, getTitleBySlug, signOut, submitTitleRequest } from '../lib/api';
 import { readGuestEntries } from '../lib/guest';
 import { supabase } from '../lib/supabase';
 import type { ContinueEntry, TitleType } from '../lib/types';
@@ -67,13 +67,22 @@ export default function AccountScreen() {
     await load();
   }
 
-  function playEntry(entry: ContinueEntry) {
-    const t = entry.title;
+  async function playEntry(entry: ContinueEntry) {
+    let t = entry.title;
+    // Legacy/guest entries may lack provider ids (older guest rows never stored
+    // them, and without an id the bridge returns no source at all). Resolve the
+    // catalog row once so playback always has real ids + a real catalog id.
+    if (!t.tmdbId && !t.imdbId) {
+      const fresh = await getTitleBySlug(t.type, t.slug).catch(() => null);
+      if (fresh) t = fresh;
+    }
     navigation.navigate('Player', {
       titleId: t.id,
       type: t.type,
       slug: t.slug,
       name: t.name,
+      ...(t.posterUrl ? { posterUrl: t.posterUrl } : {}),
+      ...(t.backdropUrl ? { backdropUrl: t.backdropUrl } : {}),
       ...(t.tmdbId ? { tmdbId: t.tmdbId } : {}),
       ...(t.imdbId ? { imdbId: t.imdbId } : {}),
       // Series entries resume the exact episode; movies pass title params only.

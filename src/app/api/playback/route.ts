@@ -64,7 +64,7 @@ export async function GET(request: NextRequest) {
 
   const resolved = await resolvePlayback(playbackRequest);
 
-  // Native (Lumora-hosted) sources outrank embeds, exactly like the web route.
+  // Native (Lumora-hosted) sources remain available after configured providers.
   let nativeSources: PlaybackSource[] = [];
   if (features.supabaseConfigured && titleId) {
     try {
@@ -91,7 +91,7 @@ export async function GET(request: NextRequest) {
   const origin = request.nextUrl.origin;
   // Resume first (needs the real provider id), THEN anonymize — so the public
   // payload never carries an upstream identity.
-  const publicSources = [...nativeSources, ...resolved.sources.map(withResume)].map((s, i) => {
+  const publicSources = [...resolved.sources.map(withResume), ...nativeSources].map((s, i) => {
     const absolute = s.url && s.url.startsWith('/') ? `${origin}${s.url}` : s.url;
     return {
       id: `server-${i + 1}`,

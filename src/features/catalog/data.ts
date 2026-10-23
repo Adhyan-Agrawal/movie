@@ -133,7 +133,10 @@ export async function getHomeData(): Promise<HomeData> {
 
   try {
     const [titles, continueWatching, signedIn, forYou] = await Promise.all([
-      listTitles({ sort: 'trending' }),
+      // Bounded read (egress): the home page only builds twelve-card shelves and
+      // a 14-slide hero from this set — pulling the whole catalog here was the
+      // single biggest egress consumer.
+      listTitles({ sort: 'trending', limit: 60 }),
       loadContinueWatching(),
       loadSignedIn(),
       loadForYou(),

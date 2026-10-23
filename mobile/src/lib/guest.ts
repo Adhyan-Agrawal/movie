@@ -18,6 +18,14 @@ interface GuestEntry {
   name: string;
   posterUrl?: string;
   backdropUrl?: string;
+  /**
+   * Provider ids. Required for playback: the bridge returns no sources without
+   * a TMDB or IMDb id, so a guest entry without them can't be played at all.
+   */
+  tmdbId?: string;
+  imdbId?: string;
+  /** Catalog id (uuid) — enables native sources + real progress keys. */
+  catalogId?: string;
   progress?: number;
   positionSeconds?: number;
   seasonNumber?: number;
@@ -49,10 +57,10 @@ async function write(entries: GuestEntry[]): Promise<void> {
 export async function readGuestEntries(): Promise<ContinueEntry[]> {
   const entries = (await readRaw()).sort((a, b) => b.updatedAt - a.updatedAt);
   return entries.map((e) => {
-    // Rebuild a minimal Title for rendering the card; the real row is fetched
-    // lazily by the screen if it needs full detail.
+    // Rebuild a Title for the card; ids are carried through so the player can
+    // actually resolve a source for this entry.
     const title: Title = {
-      id: e.slug,
+      id: e.catalogId ?? e.slug,
       type: e.type,
       slug: e.slug,
       name: e.name,
@@ -62,6 +70,8 @@ export async function readGuestEntries(): Promise<ContinueEntry[]> {
       genres: [],
       ...(e.posterUrl ? { posterUrl: e.posterUrl } : {}),
       ...(e.backdropUrl ? { backdropUrl: e.backdropUrl } : {}),
+      ...(e.tmdbId ? { tmdbId: e.tmdbId } : {}),
+      ...(e.imdbId ? { imdbId: e.imdbId } : {}),
     };
     return {
       title,

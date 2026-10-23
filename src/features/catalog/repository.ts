@@ -158,6 +158,21 @@ export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[
   // don't reorder between requests.
   query = query.order('id', { ascending: true });
 
+  // BOUNDED READ (egress). Callers that only need "a shelf" or "a page" pass a
+  // limit — fetching the whole 4k-row catalog (with genre joins) per render is
+  // what blew the Supabase egress quota. Only an explicit unbounded request
+  // pages through everything, and even that is hard-capped.
+  if (filters.limit && filters.limit > 0) {
+    const { data, error } = await query.limit(filters.limit);
+    if (error) throw new Error(`repoListTitles: ${error.message}`);
+    const rows = (data ?? []).map((r) => toTitle(r as unknown as TitleRow));
+    if (filters.genre) {
+      const g = filters.genre.toLowerCase();
+      return rows.filter((t) => t.genres.some((name) => name.toLowerCase() === g));
+    }
+    return rows;
+  }
+
   // Page through EVERY match — a bare select silently truncates at Supabase's
   // 1,000-row default, which dropped titles past the first thousand from
   // browse/home/sitemap (3,600+ titles in the catalog).
@@ -188,6 +203,71 @@ export interface PagedTitles {
   total: number;
 }
 
+export async function repoListTitlesPage(
+  filters: TitleFilters,
+  page: number,
+  pageSize: number,
+): Promise<PagedTitles> {
+  const db = await getSupabaseServerClient();
+  const select = filters.genre
+    ? TITLE_SELECT.replace('title_genres ( genres ( name ) )', 'title_genres!inner ( genres!inner ( name ) )')
+    : TITLE_SELECT;
+  let query = db.from('titles').select(select, { count: 'exact' });
+
+  if (filters.type) query = query.eq('type', filters.type);
+  if (filters.year) query = query.eq('release_year', filters.year);
+  if (filters.minYear) query = query.gte('release_year', filters.minYear);
+  if (filters.maxYear) query = query.lte('release_year', filters.maxYear);
+  if (filters.maturity) query = query.eq('maturity', filters.maturity);
+  if (filters.query) query = query.ilike('name', `%${filters.query}%`);
+  if (filters.genre) query = query.eq('title_genres.genres.name', filters.genre);
+
+  switch (filters.sort) {
+    case 'newest':
+      query = query.order('release_year', { ascending: false, nullsFirst: false });
+      break;
+    case 'oldest':
+      query = query.order('release_year', { ascending: true, nullsFirst: false });
+      break;
+    case 'az':
+      query = query.order('name', { ascending: true });
+      break;
+    case 'score':
+      query = query.order('editorial_score', { ascending: false, nullsFirst: false });
+      break;
+    case 'trending':
+    default:
+      query = query.order('popularity', { ascending: false, nullsFirst: false })
+        .order('editorial_score', { ascending: false, nullsFirst: false });
+  }
+
+  const safePage = Math.max(1, page);
+  const safePageSize = Math.min(Math.max(1, pageSize), 48);
+  const { data, error, count } = await query
+    .order('id', { ascending: true })
+    .range((safePage - 1) * safePageSize, safePage * safePageSize - 1);
+  if (error) throw new Error(`repoListTitlesPage: ${error.message}`);
+  return { rows: (data ?? []).map((row) => toTitle(row as unknown as TitleRow)), total: count ?? 0 };
+}
+
+export async function repoListTitleRoutes(): Promise<Array<Pick<Title, 'slug' | 'type'>>> {
+  const db = await getSupabaseServerClient();
+  const routes: Array<Pick<Title, 'slug' | 'type'>> = [];
+  const pageSize = 1000;
+  for (let offset = 0; ; offset += pageSize) {
+    const { data, error } = await db
+      .from('titles')
+      .select('slug, type')
+      .order('id', { ascending: true })
+      .range(offset, offset + pageSize - 1);
+    if (error) throw new Error(`repoListTitleRoutes: ${error.message}`);
+    const rows = data ?? [];
+    routes.push(...rows.map((row) => ({ slug: row.slug, type: row.type as TitleType })));
+    if (rows.length < pageSize) break;
+  }
+  return routes;
+}
+
 /**
  * Paged variant of {@link repoListTitles} for the admin console. An un-paged
  * read silently truncates at Supabase's default 1,000-row cap, so this pages
@@ -215,8 +295,9 @@ export async function repoListTitlesPaged(
 
 /** Similar titles by shared-genre overlap (transparent v1 rule, Section 13). */
 export async function repoGetSimilarTitles(title: Title, limit = 6): Promise<Title[]> {
-  // Pull a candidate pool of the same type and rank by genre overlap in-memory.
-  const pool = await repoListTitles({ type: title.type, sort: 'score' });
+  // Bounded candidate pool (egress): rank the top-scored slice of the same
+  // type rather than reading the entire catalog for every title page.
+  const pool = await repoListTitles({ type: title.type, sort: 'score', limit: 400 });
   return pool
     .filter((t) => t.id !== title.id)
     .map((t) => ({ t, overlap: t.genres.filter((gname) => title.genres.includes(gname)).length }))

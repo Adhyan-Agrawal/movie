@@ -12,11 +12,12 @@ import { useNavigation, useRoute, type RouteProp } from '@react-navigation/nativ
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
+import * as ScreenOrientation from 'expo-screen-orientation';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import type { VideoSource } from 'expo-video';
 
 import { Button, Loading } from '../components/ui';
-import { currentUser, getResumePosition, listSeasons, reportProgress, resolvePlayback } from '../lib/api';
+import { currentUser, getResumePosition, listSeasons, recordPlaybackSession, reportProgress, resolvePlayback } from '../lib/api';
 import { recordGuestWatch, updateGuestPosition } from '../lib/guest';
 import type { PlaybackSource } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
@@ -64,6 +65,17 @@ type Nav = NativeStackNavigationProp<RootStackParamList>;
 
 /** Cadence for native progress reports (the player's timeUpdate interval matches). */
 const PROGRESS_INTERVAL_MS = 5000;
+
+/**
+ * Browser User-Agent for the embed WebView.
+ *
+ * A stock Android WebView advertises a `wv` token, which Cloudflare reads as a
+ * bot — vidup.to (Server 4) responds with "Sorry, you have been blocked". An
+ * ordinary mobile-browser UA lets the provider's own player load, exactly as it
+ * does in the web app (where the iframe runs under a normal browser UA).
+ */
+const BROWSER_USER_AGENT =
+  'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 /** Sources that play through expo-video (everything except the embed frame). */
 function isNativeSource(kind: PlaybackSource['kind']): boolean {
@@ -151,6 +163,8 @@ export default function PlayerScreen() {
     type: titleType,
     slug,
     name,
+    posterUrl,
+    backdropUrl,
     tmdbId,
     imdbId,
     season,
@@ -169,6 +183,18 @@ export default function PlayerScreen() {
   const [failedSourceId, setFailedSourceId] = useState<string | null>(null);
   const [signedIn, setSignedIn] = useState(false);
   const [attempt, setAttempt] = useState(0);
+  /** Dedupes the per-play session row across retries (see below). */
+  const sessionRecordedRef = useRef<string | null>(null);
+
+  // Rotation: follow the phone while a player is open (so tilting to landscape
+  // works), then restore portrait when leaving. The rest of the app is
+  // portrait-locked in App.tsx.
+  useEffect(() => {
+    void ScreenOrientation.unlockAsync().catch(() => {});
+    return () => {
+      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    };
+  }, []);
 
   const activeSource = useMemo(
     () => sources.find((s) => s.id === activeId) ?? sources[0] ?? null,
@@ -194,6 +220,10 @@ export default function PlayerScreen() {
       const resume = await getResumePosition(titleId, episodeId);
       const resolved = await resolvePlayback({
         type: titleType,
+        // Catalog ids let the bridge also return Lumora-hosted (native HLS/mp4)
+        // sources. resolvePlayback UUID-guards these, so a guest's slug is safe.
+        ...(titleId ? { titleId } : {}),
+        ...(episodeId ? { episodeId } : {}),
         ...(tmdbId ? { tmdbId } : {}),
         ...(imdbId ? { imdbId } : {}),
         ...(season !== undefined ? { season } : {}),
@@ -208,16 +238,30 @@ export default function PlayerScreen() {
       setPhase(resolved.length ? 'ready' : 'error');
 
       // Signed-out viewers get a device-local entry (the native twin of the web
-      // guest store); signed-in viewers are tracked server-side instead. This is
-      // all an embed can ever give us — it exposes no position.
+      // guest store). Signed-in viewers are tracked server-side: a playback
+      // session row is recorded for EVERY play (embeds expose no position, so
+      // this row is what lets a signed-in embed watch show up in Continue
+      // Watching on the web, which falls back to recent playback_sessions).
       if (!user) {
         void recordGuestWatch({
           slug,
           type: titleType,
           name,
+          ...(posterUrl ? { posterUrl } : {}),
+          ...(backdropUrl ? { backdropUrl } : {}),
+          // Ids must persist: the bridge can't resolve a source without a TMDB
+          // or IMDb id, so a guest entry saved without them is unplayable.
+          ...(tmdbId ? { tmdbId } : {}),
+          ...(imdbId ? { imdbId } : {}),
+          ...(titleId ? { catalogId: titleId } : {}),
           ...(season !== undefined ? { seasonNumber: season } : {}),
           ...(episode !== undefined ? { episodeNumber: episode } : {}),
         });
+      } else if (resolved.length > 0 && sessionRecordedRef.current !== `${titleId}:${episodeId ?? ''}`) {
+        // Once per play: `attempt` is an effect dep, so a Retry tap would
+        // otherwise insert a second session row for the same viewing.
+        sessionRecordedRef.current = `${titleId}:${episodeId ?? ''}`;
+        void recordPlaybackSession(titleId, episodeId);
       }
     })();
 
@@ -381,6 +425,18 @@ export default function PlayerScreen() {
           allowsFullscreenVideo
           allowsInlineMediaPlayback
           mediaPlaybackRequiresUserAction={false}
+          // A stock WebView announces itself with a "wv" token in the UA, which
+          // Cloudflare treats as a bot — vidup.to (Server 4) answers with
+          // "Sorry, you have been blocked". Presenting an ordinary mobile
+          // browser UA is what lets the provider's own player load, exactly as
+          // it does in the web app.
+          userAgent={BROWSER_USER_AGENT}
+          applicationNameForUserAgent=""
+          originWhitelist={['*']}
+          thirdPartyCookiesEnabled
+          domStorageEnabled
+          sharedCookiesEnabled
+          setSupportMultipleWindows={false}
           onError={handleSurfaceError}
         />
       );

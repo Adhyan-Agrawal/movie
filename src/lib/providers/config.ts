@@ -206,6 +206,24 @@ export const VIDCORE_PROVIDER_CONFIG: ProviderConfig = {
   testTitleId: '27205',
 };
 
+export const VIDNEST_PROVIDER_CONFIG: ProviderConfig = {
+  id: 'vidnest',
+  enabled: true,
+  displayName: 'VidNest',
+  baseUrl: 'https://vidnest-pi.vercel.app',
+  allowedDomains: ['vidnest-pi.vercel.app'],
+  preferredId: 'tmdb',
+  moviePathTemplate: '',
+  tvSeriesPathTemplate: '',
+  episodePathTemplate: '',
+  shorthandEpisodeTemplate: '',
+  defaultPriority: 500,
+  timeoutMs: 8000,
+  enabledRegions: ['*'],
+  consentRequired: true,
+  testTitleId: '27205',
+};
+
 /**
  * All configured providers, in registry-priority (public server-number) order.
  * The REGISTRY additionally merges any admin-configured `providers` rows from
@@ -213,6 +231,7 @@ export const VIDCORE_PROVIDER_CONFIG: ProviderConfig = {
  * admin panel without code changes (see registry.ts / /admin/providers).
  */
 export const PROVIDER_CONFIGS: readonly ProviderConfig[] = [
+  VIDNEST_PROVIDER_CONFIG,
   VIDUP_PROVIDER_CONFIG,
   TWOEMBED_PROVIDER_CONFIG,
   VIDSRC_PROVIDER_CONFIG,

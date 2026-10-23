@@ -4,7 +4,7 @@
     "slug": "lumora",
     "scheme": "lumora",
     "version": "1.0.0",
-    "orientation": "portrait",
+    "orientation": "default",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "dark",
     "backgroundColor": "#08090c",

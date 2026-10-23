@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { cn } from '@/lib/cn';
 import { buttonClasses } from '@/components/ui/Button';
-import { listTitles } from '@/features/catalog/queries';
+import { listTitlesPage } from '@/features/catalog/queries';
 import type { TitleFilters } from '@/features/catalog/queries';
 import type { TitleType } from '@/features/catalog/types';
 import { FilterBar } from './FilterBar';
@@ -93,12 +93,12 @@ export async function BrowseResults({
   lockType?: TitleType;
   lockGenre?: string;
 }) {
-  const all = await listTitles(filters);
-  const total = all.length;
-  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const requested = toInt(first(sp.page)) ?? 1;
+  let result = await listTitlesPage(filters, requested, PAGE_SIZE);
+  const pageCount = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
   const current = Math.min(Math.max(1, requested), pageCount);
-  const slice = all.slice((current - 1) * PAGE_SIZE, current * PAGE_SIZE);
+  if (current !== requested) result = await listTitlesPage(filters, current, PAGE_SIZE);
+  const { titles: slice, total } = result;
 
   const disabledClass = cn(buttonClasses({ variant: 'secondary' }), 'pointer-events-none opacity-40');
 

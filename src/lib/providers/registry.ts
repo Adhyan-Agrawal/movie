@@ -25,6 +25,7 @@
 import type { PlaybackError, PlaybackRequest, PlaybackSource, ProviderAdapter } from './types';
 import { PROVIDER_CONFIGS, type ProviderConfig } from './config';
 import { createVidsrcAdapter } from './vidsrc';
+import { createVidnestAdapter } from './vidnest';
 import { mergeProviderConfigs, type ProviderDbRow } from './db-providers';
 import { getSupabaseServiceClient } from '@/lib/supabase/service';
 import { features } from '@/lib/env';
@@ -39,9 +40,13 @@ interface RegistryEntry {
  * the differences between providers are entirely configuration (domains, path
  * templates, priorities).
  */
+function createAdapter(config: ProviderConfig): ProviderAdapter {
+  return config.id === 'vidnest' ? createVidnestAdapter(config) : createVidsrcAdapter(config);
+}
+
 const BUILTIN_ENTRIES: readonly RegistryEntry[] = PROVIDER_CONFIGS.map((config) => ({
   config,
-  adapter: createVidsrcAdapter(config),
+  adapter: createAdapter(config),
 }));
 
 /**
@@ -68,7 +73,7 @@ export async function refreshProviderRegistry(): Promise<void> {
     const { data, error } = await db.from('providers').select('*');
     if (error) throw new Error(error.message);
     const configs = mergeProviderConfigs(PROVIDER_CONFIGS, (data ?? []) as ProviderDbRow[]);
-    mergedEntries = configs.map((config) => ({ config, adapter: createVidsrcAdapter(config) }));
+    mergedEntries = configs.map((config) => ({ config, adapter: createAdapter(config) }));
   } catch (error) {
     mergedEntries = [...BUILTIN_ENTRIES];
     console.error('providers.registry.mergeFailed', {

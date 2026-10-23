@@ -26,7 +26,7 @@ export async function searchTitlesAction(query: string): Promise<Title[]> {
   const q = query.trim();
   if (!q) return [];
 
-  const local = await listTitles({ query: q, sort: 'score' });
+  const local = await listTitles({ query: q, sort: 'score', limit: 24 });
   if (local.length > 0) return local;
   if (!features.supabaseConfigured) return [];
 
@@ -36,7 +36,7 @@ export async function searchTitlesAction(query: string): Promise<Title[]> {
     if (imported.length > 0) {
       // Re-query the local catalog so results flow through the same mapping
       // and RLS path the UI always uses.
-      const merged = await listTitles({ query: q, sort: 'score' });
+      const merged = await listTitles({ query: q, sort: 'score', limit: 24 });
       if (merged.length > 0) return merged;
       // Local re-query can miss short queries (ILIKE) — fall back to mapping
       // the imported titles directly.

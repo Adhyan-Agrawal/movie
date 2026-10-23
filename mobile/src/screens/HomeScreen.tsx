@@ -18,8 +18,9 @@ import { Button, EmptyState, Loading, Screen, SectionTitle } from '../components
 import { Hero } from '../components/Hero';
 import { Row } from '../components/Row';
 import { MediaCard } from '../components/MediaCard';
-import { fetchHome, listAllGenres, listTitles } from '../lib/api';
-import type { MediaRow, Title } from '../lib/types';
+import { currentUser, fetchContinueWatching, fetchHome, getTitleBySlug, listAllGenres, listTitles } from '../lib/api';
+import { readGuestEntries } from '../lib/guest';
+import type { ContinueEntry, MediaRow, Title } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 
 /**
@@ -52,6 +53,7 @@ export default function HomeScreen() {
   const [state, setState] = useState<LoadState>('loading');
   const [hero, setHero] = useState<Title[]>([]);
   const [rows, setRows] = useState<MediaRow[]>([]);
+  const [continueEntries, setContinueEntries] = useState<ContinueEntry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
 
   const [genres, setGenres] = useState<string[]>([]);
@@ -66,18 +68,62 @@ export default function HomeScreen() {
     [navigation],
   );
 
+  /**
+   * Resume from a Continue-Watching card. Entries saved before ids were
+   * persisted (or guest rows) may lack tmdb/imdb ids — without one the bridge
+   * returns no source, so resolve the catalog row first.
+   */
+  const playEntry = useCallback(
+    async (entry: ContinueEntry) => {
+      let t = entry.title;
+      if (!t.tmdbId && !t.imdbId) {
+        const fresh = await getTitleBySlug(t.type, t.slug).catch(() => null);
+        if (fresh) t = fresh;
+      }
+      navigation.navigate('Player', {
+        titleId: t.id,
+        type: t.type,
+        slug: t.slug,
+        name: t.name,
+        ...(t.posterUrl ? { posterUrl: t.posterUrl } : {}),
+        ...(t.backdropUrl ? { backdropUrl: t.backdropUrl } : {}),
+        ...(t.tmdbId ? { tmdbId: t.tmdbId } : {}),
+        ...(t.imdbId ? { imdbId: t.imdbId } : {}),
+        ...(entry.seasonNumber !== undefined ? { season: entry.seasonNumber } : {}),
+        ...(entry.episodeNumber !== undefined ? { episode: entry.episodeNumber } : {}),
+        ...(entry.episodeId ? { episodeId: entry.episodeId } : {}),
+      });
+    },
+    [navigation],
+  );
+
   /** Fetch the full home payload. Errors become an explicit error state. */
   const loadHome = useCallback(async (isRefresh: boolean) => {
     if (isRefresh) setRefreshing(true);
     else setState('loading');
     try {
-      const data = await fetchHome();
+      // Continue Watching lives on Home (not just the Account tab) — signed-in
+      // viewers read their server rows, guests their device-local store. A
+      // failure here must not sink the catalog, so it degrades to no shelf.
+      const [data, continueEntries] = await Promise.all([
+        fetchHome(),
+        (async () => {
+          try {
+            const user = await currentUser();
+            return user ? await fetchContinueWatching(12) : await readGuestEntries();
+          } catch {
+            return [];
+          }
+        })(),
+      ]);
       setHero(data.hero);
       setRows(data.rows);
+      setContinueEntries(continueEntries);
       setState('ready');
     } catch {
       setHero([]);
       setRows([]);
+      setContinueEntries([]);
       setState('error');
     } finally {
       if (isRefresh) setRefreshing(false);
@@ -166,6 +212,19 @@ export default function HomeScreen() {
 
         {state === 'ready' && hasContent ? (
           <>
+            {/* Continue Watching first: it's the most likely thing a returning
+                viewer wants, and it only renders when there's real history. */}
+            {continueEntries.length > 0 ? (
+              <Row
+                heading="Continue watching"
+                titles={continueEntries.map((e) => e.title)}
+                onPressTitle={(t) => {
+                  const entry = continueEntries.find((e) => e.title.id === t.id);
+                  if (entry) void playEntry(entry);
+                }}
+                progressById={Object.fromEntries(continueEntries.map((e) => [e.title.id, e.progress]))}
+              />
+            ) : null}
             <Hero titles={hero} onPressTitle={openTitle} />
             {rows.map((row) => (
               <Row

@@ -130,5 +130,5 @@ export const config = {
    * routes. Static assets under _next are already excluded; other public files
    * are cheap to pass through and never carry an auth session.
    */
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|api/media|api/vidnest|api/playback).*)'],
 };

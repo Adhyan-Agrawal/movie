@@ -13,6 +13,9 @@ export type RootStackParamList = {
     type: TitleType;
     slug: string;
     name: string;
+    /** Artwork, so the guest continue-watching card shows a poster. */
+    posterUrl?: string;
+    backdropUrl?: string;
     tmdbId?: string;
     imdbId?: string;
     season?: number;

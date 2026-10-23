@@ -3,7 +3,9 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
+import { useEffect } from 'react';
 import { Text } from 'react-native';
+import * as ScreenOrientation from 'expo-screen-orientation';
 
 import { colors } from './src/theme';
 import type { RootStackParamList, TabParamList } from './src/navigation';
@@ -63,6 +65,12 @@ function MainTabs() {
 }
 
 export default function App() {
+  // The app is portrait-first; the PLAYER unlocks rotation for itself (see
+  // PlayerScreen) and restores portrait on exit.
+  useEffect(() => {
+    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+  }, []);
+
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />

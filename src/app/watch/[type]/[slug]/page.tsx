@@ -254,15 +254,15 @@ export default async function WatchPage({
   });
 
   // PUBLIC SOURCE LABELING: the public player never names the upstream
-  // provider — not in labels, ids, or serialized props. Native sources merge
-  // FIRST (Lumora's own media outranks third-party embeds, so a native upload
-  // is "Server 1" and the provider embeds shift down), then every source is
+  // provider — not in labels, ids, or serialized props. Resolved providers
+  // merge FIRST; storage-backed native sources remain available as fallbacks.
+  // Every source is
   // branded "Server 1", "Server 2", … in merge order; every identifying field
   // is overwritten so nothing upstream reaches the client payload. The real
   // provider identity stays in the admin console and server logs. The consent
   // copy in PlayerShell still discloses that embed playback runs via an
   // EXTERNAL service (cookies/terms apply) — just unbranded.
-  const publicSources: PlaybackSource[] = [...nativeSources, ...embedSources].map((s, i) => ({
+  const publicSources: PlaybackSource[] = [...embedSources, ...nativeSources].map((s, i) => ({
     ...s,
     id: `server-${i + 1}`,
     label: `Server ${i + 1}`,

@@ -265,7 +265,7 @@ export function PlayerShell({
     const id = sessionIdRef.current;
     if (!id) return;
     recordHeartbeat(id); // first beat at mount
-    const interval = window.setInterval(() => recordHeartbeat(id), 30_000);
+    const interval = window.setInterval(() => recordHeartbeat(id), 300_000);
     return () => window.clearInterval(interval);
   }, [showPlayer, sessionReady]);
 

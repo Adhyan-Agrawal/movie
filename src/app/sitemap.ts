@@ -1,6 +1,8 @@
 import type { MetadataRoute } from 'next';
 import { publicEnv } from '@/lib/env';
-import { listTitles } from '@/features/catalog/queries';
+import { listTitleRoutes } from '@/features/catalog/queries';
+
+export const revalidate = 3600;
 
 /**
  * Sitemap for published, public content (Section 16). Static routes plus one
@@ -25,7 +27,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     priority: path === '' ? 1 : 0.6,
   }));
 
-  const titles = await listTitles();
+  const titles = await listTitleRoutes();
   const titleRoutes: MetadataRoute.Sitemap = titles.map((t) => ({
     url: `${base}/title/${t.type}/${t.slug}`,
     changeFrequency: 'weekly',

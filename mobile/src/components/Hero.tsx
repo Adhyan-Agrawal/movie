@@ -17,15 +17,21 @@ export function Hero({ titles, onPressTitle }: { titles: Title[]; onPressTitle: 
   const listRef = useRef<FlatList<Title>>(null);
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
+  // Mirror of `index` for the interval: reading state inside the tick would use
+  // a stale closure, and scrolling from inside a setState updater is a side
+  // effect React may run twice (StrictMode) — so advance explicitly instead.
+  const indexRef = useRef(0);
+  useEffect(() => {
+    indexRef.current = index;
+  }, [index]);
 
   useEffect(() => {
     if (paused || titles.length <= 1) return;
     const timer = setInterval(() => {
-      setIndex((i) => {
-        const next = (i + 1) % titles.length;
-        listRef.current?.scrollToIndex({ index: next, animated: true });
-        return next;
-      });
+      const next = (indexRef.current + 1) % titles.length;
+      indexRef.current = next;
+      setIndex(next);
+      listRef.current?.scrollToIndex({ index: next, animated: true });
     }, ADVANCE_MS);
     return () => clearInterval(timer);
   }, [paused, titles.length]);

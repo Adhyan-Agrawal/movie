@@ -155,10 +155,12 @@ export async function listSeasons(titleId: string): Promise<Season[]> {
     .order('episode_number', { ascending: true });
   if (epErr) throw epErr;
 
-  const bySeason = new Map<string, Season['episodes']>();
+  // Group by season_id, falling back to season_number: `episodes.season_id` is
+  // nullable, and the old code silently dropped any episode that lacked it.
+  const bySeasonId = new Map<string, Season['episodes']>();
+  const bySeasonNumber = new Map<number, Season['episodes']>();
   for (const e of episodes ?? []) {
-    const list = bySeason.get(e.season_id) ?? [];
-    list.push({
+    const episode = {
       id: e.id,
       seasonNumber: e.season_number ?? 0,
       episodeNumber: e.episode_number,
@@ -167,8 +169,16 @@ export async function listSeasons(titleId: string): Promise<Season[]> {
       airDate: e.air_date,
       runtimeMinutes: e.runtime_minutes,
       stillUrl: e.still_url,
-    });
-    if (e.season_id) bySeason.set(e.season_id, list);
+    };
+    if (e.season_id) {
+      const list = bySeasonId.get(e.season_id) ?? [];
+      list.push(episode);
+      bySeasonId.set(e.season_id, list);
+    } else {
+      const list = bySeasonNumber.get(episode.seasonNumber) ?? [];
+      list.push(episode);
+      bySeasonNumber.set(episode.seasonNumber, list);
+    }
   }
 
   return seasons.map((s: any) => ({
@@ -178,7 +188,7 @@ export async function listSeasons(titleId: string): Promise<Season[]> {
     overview: s.overview ?? '',
     airDate: s.air_date,
     episodeCount: s.episode_count,
-    episodes: bySeason.get(s.id) ?? [],
+    episodes: bySeasonId.get(s.id) ?? bySeasonNumber.get(s.season_number) ?? [],
   }));
 }
 
@@ -256,18 +266,28 @@ export async function getPerson(id: string): Promise<Person | null> {
   return { id: data.id, name: data.name, knownFor: data.known_for ?? null, profileUrl: data.profile_url ?? null };
 }
 
-export async function getPersonCredits(personId: string): Promise<Array<{ title: Title; creditType: string; character: string | null }>> {
+export async function getPersonCredits(
+  personId: string,
+): Promise<Array<{ title: Title; creditType: string; character: string | null; job: string | null }>> {
+  // `title_people` holds ONLY the credit (title_id, person_id, credit_type,
+  // character, job…) — the title columns live on the joined `titles` row. The
+  // credit's own table has no FK to title_genres, so the embed must hang off
+  // `titles` (same shape as the web repository's CAST_SELECT).
   const { data, error } = await supabase
     .from('title_people')
-    .select(`credit_type, character, ${TITLE_SELECT.replace(/\s+/g, ' ')}`)
+    .select(`credit_type, character, job, credit_order, titles ( ${TITLE_SELECT} )`)
     .eq('person_id', personId)
+    .order('credit_order', { ascending: true })
     .limit(60);
   if (error) throw error;
-  return (data ?? []).map((row: any) => ({
-    title: toTitle(row.title_genres !== undefined ? row : { ...row.titles }),
-    creditType: row.credit_type,
-    character: row.character ?? null,
-  }));
+  return (data ?? [])
+    .filter((row: any) => row.titles)
+    .map((row: any) => ({
+      title: toTitle(row.titles),
+      creditType: row.credit_type,
+      character: row.character ?? null,
+      job: row.job ?? null,
+    }));
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +320,29 @@ export async function resolvePlayback(request: PlaybackRequest): Promise<Playbac
 // ---------------------------------------------------------------------------
 // Auth
 // ---------------------------------------------------------------------------
+
+/**
+ * Record a server-side playback session (mirrors the web's
+ * reportPlaybackStartAction). Embeds expose no position telemetry, so this row
+ * is what lets a signed-in embed watch appear in Continue Watching on the web
+ * (which falls back to recent playback_sessions) and here.
+ */
+export async function recordPlaybackSession(
+  titleId: string,
+  episodeId?: string,
+): Promise<{ ok: boolean }> {
+  const user = await currentUser();
+  if (!user) return { ok: false };
+  const profileId = await defaultProfileId();
+  const { error } = await supabase.from('playback_sessions').insert({
+    account_id: user.id,
+    ...(profileId ? { profile_id: profileId } : {}),
+    title_id: titleId,
+    ...(episodeId ? { episode_id: episodeId } : {}),
+    state: 'playing',
+  });
+  return { ok: !error };
+}
 
 export async function signIn(email: string, password: string): Promise<{ ok: boolean; message?: string }> {
   const { error } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
@@ -340,19 +383,50 @@ async function defaultProfileId(): Promise<string | null> {
   return data?.id ?? null;
 }
 
+/** The viewer's default watchlist id, creating it on first use. */
+async function defaultWatchlistId(accountId: string, profileId: string): Promise<string | null> {
+  // Take the profile's first list rather than filtering on `is_default`: the
+  // DB also has lists created by the web, and `unique(profile_id, name)` means
+  // creating a second list with a different-cased name would collide later.
+  const { data: existing, error } = await supabase
+    .from('watchlists')
+    .select('id')
+    .eq('profile_id', profileId)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle();
+  if (error) console.warn('api.defaultWatchlistId: read failed', { message: error.message });
+  if (existing?.id) return existing.id;
+
+  // 'My list' matches the DB default + the web's casing (case-sensitive unique).
+  const { data: created, error: createErr } = await supabase
+    .from('watchlists')
+    .insert({ profile_id: profileId, account_id: accountId, name: 'My list', is_default: true })
+    .select('id')
+    .single();
+  if (createErr) console.warn('api.defaultWatchlistId: create failed', { message: createErr.message });
+  return created?.id ?? null;
+}
+
 export async function isInWatchlist(titleId: string): Promise<boolean> {
   const user = await currentUser();
   if (!user) return false;
   const profileId = await defaultProfileId();
   if (!profileId) return false;
-  // Filter through the viewer's OWN list (the joined-table filter keeps this
-  // correct even if more profiles/lists are added later).
-  const { data } = await supabase
+  // `watchlist_items` is keyed by (watchlist_id, title_id) — it has no `id` or
+  // `account_id` column, so scope through the joined watchlist's profile.
+  const { data, error } = await supabase
     .from('watchlist_items')
-    .select('id, watchlists!inner(profile_id)')
+    .select('title_id, watchlists!inner(profile_id)')
     .eq('title_id', titleId)
     .eq('watchlists.profile_id', profileId)
     .limit(1);
+  if (error) {
+    // Surfaced deliberately: a silent error here made the bookmark state wrong
+    // for every title (the query selected a column that doesn't exist).
+    console.warn('api.isInWatchlist failed', { message: error.message });
+    return false;
+  }
   return (data ?? []).length > 0;
 }
 
@@ -362,40 +436,33 @@ export async function toggleWatchlist(titleId: string): Promise<{ ok: boolean; a
   const profileId = await defaultProfileId();
   if (!profileId) return { ok: false };
 
-  const inList = await isInWatchlist(titleId);
-  if (inList) {
-    await supabase.from('watchlist_items').delete().eq('title_id', titleId);
-    return { ok: true, added: false };
+  const listId = await defaultWatchlistId(user.id, profileId);
+  if (!listId) return { ok: false };
+
+  if (await isInWatchlist(titleId)) {
+    const { error } = await supabase
+      .from('watchlist_items')
+      .delete()
+      .eq('watchlist_id', listId)
+      .eq('title_id', titleId);
+    return { ok: !error, added: false };
   }
-  // Find (or create) the viewer's default watchlist.
-  let { data: list } = await supabase
-    .from('watchlists')
-    .select('id')
-    .eq('profile_id', profileId)
-    .eq('is_default', true)
-    .maybeSingle();
-  if (!list) {
-    const { data: created } = await supabase
-      .from('watchlists')
-      .insert({ profile_id: profileId, account_id: user.id, name: 'My List', is_default: true })
-      .select('id')
-      .single();
-    list = created;
-  }
-  if (!list) return { ok: false };
-  const { error } = await supabase
-    .from('watchlist_items')
-    .insert({ watchlist_id: list.id, title_id: titleId, account_id: user.id });
+  const { error } = await supabase.from('watchlist_items').insert({ watchlist_id: listId, title_id: titleId });
   return { ok: !error, added: !error };
 }
 
 export async function listWatchlist(): Promise<Title[]> {
   const user = await currentUser();
   if (!user) return [];
+  const profileId = await defaultProfileId();
+  if (!profileId) return [];
+  const listId = await defaultWatchlistId(user.id, profileId);
+  if (!listId) return [];
   const { data, error } = await supabase
     .from('watchlist_items')
-    .select(`title_id, titles ( ${TITLE_SELECT} )`)
-    .order('created_at', { ascending: false })
+    .select(`title_id, added_at, titles ( ${TITLE_SELECT} )`)
+    .eq('watchlist_id', listId)
+    .order('added_at', { ascending: false })
     .limit(60);
   if (error) return [];
   return (data ?? [])
@@ -409,6 +476,9 @@ export async function fetchContinueWatching(limit = 12): Promise<ContinueEntry[]
   if (!user) return [];
   const profileId = await defaultProfileId();
   if (!profileId) return [];
+
+  const out: ContinueEntry[] = [];
+  const seen = new Set<string>();
 
   const { data, error } = await supabase
     .from('watch_progress')
@@ -434,10 +504,12 @@ export async function fetchContinueWatching(limit = 12): Promise<ContinueEntry[]
     }
   }
 
-  const out: ContinueEntry[] = [];
   for (const row of data ?? []) {
-    const { data: t } = await supabase.from('titles').select(TITLE_SELECT).eq('id', (row as any).title_id).maybeSingle();
+    const titleId = (row as any).title_id as string;
+    if (seen.has(titleId)) continue;
+    const { data: t } = await supabase.from('titles').select(TITLE_SELECT).eq('id', titleId).maybeSingle();
     if (!t) continue;
+    seen.add(titleId);
     const ep = (row as any).episode_id ? episodes.get((row as any).episode_id) : undefined;
     out.push({
       title: toTitle(t),
@@ -447,6 +519,31 @@ export async function fetchContinueWatching(limit = 12): Promise<ContinueEntry[]
       ...((row as any).episode_id ? { episodeId: (row as any).episode_id } : {}),
     });
   }
+
+  // Fallback (mirrors the web): embed playback shares no position, so the only
+  // trace is a recent playback_sessions row. Surface those as "Continue" entries
+  // so a title watched in the app shows up here — and so web/app agree.
+  if (out.length < limit) {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: sessions } = await supabase
+      .from('playback_sessions')
+      .select('title_id, started_at')
+      .eq('account_id', user.id)
+      .gte('started_at', since)
+      .order('started_at', { ascending: false })
+      .limit(100);
+
+    for (const s of sessions ?? []) {
+      if (out.length >= limit) break;
+      const titleId = (s as any).title_id as string;
+      if (!titleId || seen.has(titleId)) continue;
+      const { data: t } = await supabase.from('titles').select(TITLE_SELECT).eq('id', titleId).maybeSingle();
+      if (!t) continue;
+      seen.add(titleId);
+      out.push({ title: toTitle(t) });
+    }
+  }
+
   return out;
 }
 

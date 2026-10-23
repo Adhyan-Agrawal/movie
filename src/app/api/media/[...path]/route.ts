@@ -68,7 +68,7 @@ export async function GET(_request: NextRequest, { params }: { params: Promise<{
       status: 200,
       headers: {
         'Content-Type': contentTypeFor(storagePath),
-        'Cache-Control': 'public, max-age=300, immutable',
+        'Cache-Control': 'public, max-age=300, s-maxage=86400, stale-while-revalidate=604800, immutable',
         'X-Content-Type-Options': 'nosniff',
       },
     });
