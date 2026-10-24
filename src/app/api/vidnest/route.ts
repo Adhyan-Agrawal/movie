@@ -166,6 +166,7 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
   if (!payload) return jsonError('Invalid or expired playback token.', 403);
 
   const upstreamHeaders = new Headers(payload.headers);
+  upstreamHeaders.set('Accept-Encoding', 'identity');
   for (const name of ['range', 'if-range']) {
     const value = request.headers.get(name);
     if (value !== null) upstreamHeaders.set(name, value);
@@ -188,7 +189,7 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
   let completePlaylistFetched = false;
 
   // An opaque manifest's requested range may omit its signature entirely.
-  if (request.headers.has('range') && !inspected.playlist
+  if (request.headers.has('range') && !inspected.playlist && !inspected.contentType
     && !/^(?:audio|video|image)\//i.test(response.headers.get('content-type') ?? '')) {
     const fullHeaders = new Headers(upstreamHeaders);
     fullHeaders.delete('range');
@@ -206,6 +207,7 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
         inspected = fullInspection;
         completePlaylistFetched = true;
       } else {
+        inspected.contentType = fullInspection.contentType;
         await fullInspection.body.cancel();
       }
     } else {
