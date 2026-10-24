@@ -164,19 +164,37 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
     if (value !== null) upstreamHeaders.set(name, value);
   }
 
-  const response = await fetch(payload.url, { headers: upstreamHeaders, cache: 'no-store', signal: request.signal });
+  let response = await fetch(payload.url, { headers: upstreamHeaders, cache: 'no-store', signal: request.signal });
+  if (response.status === 416) {
+    const headers = new Headers({ 'Cache-Control': 'private, no-store' });
+    const contentRange = response.headers.get('content-range');
+    if (contentRange) headers.set('Content-Range', contentRange);
+    await response.body?.cancel();
+    return new NextResponse(null, { status: 416, headers });
+  }
   if (!response.ok || !response.body) return jsonError('Playback stream is unavailable.', 502);
 
-  const sourceUrl = response.url || payload.url;
+  let sourceUrl = response.url || payload.url;
   const inspected = isPlaylist(response, sourceUrl)
     ? { body: response.body, playlist: true }
     : await probePlaylist(response.body);
 
   if (inspected.playlist) {
-    const playlist = rewritePlaylist(await new Response(inspected.body).text(), sourceUrl, payload.headers, secret);
+    // Rewriting changes byte offsets, so playlists must use their complete representation.
+    let body = inspected.body;
+    if (request.headers.has('range')) {
+      await body.cancel();
+      upstreamHeaders.delete('range');
+      upstreamHeaders.delete('if-range');
+      response = await fetch(payload.url, { headers: upstreamHeaders, cache: 'no-store', signal: request.signal });
+      if (!response.ok || !response.body) return jsonError('Playback stream is unavailable.', 502);
+      sourceUrl = response.url || payload.url;
+      body = response.body;
+    }
+    const playlist = rewritePlaylist(await new Response(body).text(), sourceUrl, payload.headers, secret);
     return new NextResponse(playlist, {
       headers: { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl' },
-      status: response.status,
+      status: 200,
     });
   }
 

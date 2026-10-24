@@ -19,6 +19,7 @@ export interface PlayerControlsBarProps {
   sources: PlaybackSource[];
   selectedSourceId: string | null;
   onSelectSource: (id: string) => void;
+  showSourceSelector?: boolean;
   onReportIssue: () => void;
   reported?: boolean;
   className?: string;
@@ -35,6 +36,7 @@ export function PlayerControlsBar({
   sources,
   selectedSourceId,
   onSelectSource,
+  showSourceSelector = true,
   onReportIssue,
   reported = false,
   className,
@@ -53,7 +55,7 @@ export function PlayerControlsBar({
       </Link>
 
       <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2">
+        {showSourceSelector ? <div className="flex items-center gap-2">
           <label htmlFor={selectId} className="text-xs font-medium text-content-muted">
             Source
           </label>
@@ -77,7 +79,7 @@ export function PlayerControlsBar({
               <option value="">No alternate sources</option>
             )}
           </select>
-        </div>
+        </div> : null}
 
         <button type="button" onClick={onReportIssue} className={buttonClasses({ variant: 'ghost' })}>
           <span aria-hidden="true">⚑</span> Report playback issue

@@ -63,6 +63,7 @@ body {
 
 .lumora-videojs {
   background: #000;
+  container-type: size;
   font-family: inherit;
 }
 

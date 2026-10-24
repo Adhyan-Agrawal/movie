@@ -318,9 +318,6 @@ export function PlayerShell({
   // video from scratch on every parent render).
   const handleNativeReady = useCallback(() => setState('ready'), []);
   const handleNativeError = useCallback(() => setState('provider-error'), []);
-  // NativePlayer may gain this coordinated optional prop concurrently. A
-  // spread forwards it now without requiring it in the current interface.
-  const nativePosterProps = title.posterUrl ? { posterUrl: title.posterUrl } : {};
 
   return (
     <section aria-label={`Player for ${title.name}`} className="flex flex-col gap-3">
@@ -359,9 +356,12 @@ export function PlayerShell({
               <NativePlayer
                 key={`${activeSource!.id}-${reloadKey}`}
                 source={{ url: activeSource!.url!, kind: nativeKind! }}
+                sources={sources}
+                selectedSourceId={activeSource?.id ?? null}
+                onSelectSource={handleSelectSource}
                 titleId={title.id}
                 titleSlug={title.slug}
-                {...nativePosterProps}
+                {...(title.posterUrl ? { posterUrl: title.posterUrl } : {})}
                 {...(episodeId ? { episodeId } : {})}
                 {...(seasonNumber !== undefined ? { seasonNumber } : {})}
                 {...(episodeNumber !== undefined ? { episodeNumber } : {})}
@@ -422,7 +422,8 @@ export function PlayerShell({
 
       <PlayerControlsBar        backHref={`/title/${title.type}/${title.slug}`}
         backLabel={`Back to ${title.name} details`}
-        sources={sources}
+         sources={sources}
+         showSourceSelector={nativeKind === null || !showPlayer || playerFailed}
         selectedSourceId={activeSource?.id ?? null}
         onSelectSource={handleSelectSource}
         onReportIssue={handleReport}

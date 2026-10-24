@@ -65,6 +65,40 @@ afterEach(() => {
 });
 
 describe('Vidnest proxy transport', () => {
+  it('refetches ranged playlists in full before rewriting and returns 200', async () => {
+    const upstreamUrl = 'https://cdn.example/master.m3u8';
+    const fetchMock = installFetch(upstreamUrl, responseAt('#EXTM3U\n#EXTINF:', {
+      status: 206,
+      headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Content-Range': 'bytes 0-15/80' },
+    }, upstreamUrl));
+    fetchMock.mockResolvedValueOnce(responseAt('#EXTM3U\n#EXTINF:6,\nsegment.ts\n', {
+      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+    }, upstreamUrl));
+
+    const response = await GET(playbackRequest({ Range: 'bytes=0-15', 'If-Range': '"manifest-v1"' }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-range')).toBeNull();
+    expect(decodeProxyPaths(await response.text()).map((payload) => payload.url)).toEqual([
+      'https://cdn.example/segment.ts',
+    ]);
+    const fullFetchHeaders = new Headers((fetchMock.mock.calls[2]![1] as RequestInit).headers);
+    expect(fullFetchHeaders.get('range')).toBeNull();
+    expect(fullFetchHeaders.get('if-range')).toBeNull();
+  });
+
+  it('preserves an unsatisfiable media range and its length metadata', async () => {
+    installFetch('https://cdn.example/media', new Response(null, {
+      status: 416,
+      headers: { 'Content-Range': 'bytes */10' },
+    }));
+
+    const response = await GET(playbackRequest({ Range: 'bytes=10-' }));
+
+    expect(response.status).toBe(416);
+    expect(response.headers.get('content-range')).toBe('bytes */10');
+  });
+
   it('forwards range validators and preserves a 206 response with media metadata', async () => {
     const media = new Uint8Array([2, 3, 4, 5]);
     const upstream = responseAt(media, {

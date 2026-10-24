@@ -204,14 +204,14 @@ describe('vidsrc adapter', () => {
 });
 
 describe('registry.resolvePlayback', () => {
-  it('returns one source per enabled provider, best (highest priority) first', async () => {
+  it('returns direct streams followed by enabled embeds in priority order', async () => {
     const resolved = await resolvePlayback(movieTmdb);
     expect(resolved.source).not.toBeNull();
-    // All five configured providers resolve the same request; the highest
-    // priority provider (vidsrc.mov, Server 1) wins.
-    expect(resolved.providerId).toBe('vidsrc-mov');
-    expect(resolved.sources).toHaveLength(5);
+    // VidNest offers eleven direct servers before the five embed providers.
+    expect(resolved.providerId).toBe('vidnest');
+    expect(resolved.sources).toHaveLength(16);
     expect(resolved.sources.map((s) => s.providerId)).toEqual([
+      ...Array.from({ length: 11 }, () => 'vidnest'),
       'vidsrc-mov',
       '2embed',
       'vidsrc',
