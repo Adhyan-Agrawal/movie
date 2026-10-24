@@ -221,7 +221,8 @@ async function mediaSnapshot(video) {
 
 async function qualityState(video) {
   return video.evaluate((element) => {
-    const levels = element.player?.qualityLevels?.();
+    const player = element.player ?? element.closest('.video-js')?.player;
+    const levels = player?.qualityLevels?.();
     if (!levels) return null;
     return Array.from({ length: levels.length }, (_, index) => ({
       enabled: Boolean(levels[index]?.enabled),
@@ -230,9 +231,21 @@ async function qualityState(video) {
   });
 }
 
+async function waitForQualityState(video, predicate, timeout = 10_000) {
+  const deadline = Date.now() + timeout;
+  let state = null;
+  while (Date.now() < deadline) {
+    state = await qualityState(video);
+    if (state && predicate(state)) return state;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return state;
+}
+
 async function audioState(video) {
   return video.evaluate((element) => {
-    const tracks = element.player?.audioTracks?.();
+    const player = element.player ?? element.closest('.video-js')?.player;
+    const tracks = player?.audioTracks?.();
     if (!tracks) return null;
     return Array.from({ length: tracks.length }, (_, index) => ({
       enabled: Boolean(tracks[index]?.enabled),
@@ -243,7 +256,8 @@ async function audioState(video) {
 
 async function subtitleState(video) {
   return video.evaluate((element) => {
-    const tracks = element.player?.textTracks?.();
+    const player = element.player ?? element.closest('.video-js')?.player;
+    const tracks = player?.textTracks?.();
     if (!tracks) return null;
     return Array.from({ length: tracks.length }, (_, index) => tracks[index])
       .filter((track) => track?.kind === 'subtitles' || track?.kind === 'captions')
@@ -256,6 +270,10 @@ async function options(select) {
     label: option.textContent?.trim() ?? '',
     value: option.value,
   })));
+}
+
+function settingsSelect(page, label) {
+  return page.locator('#hls-settings label').filter({ hasText: label }).locator('select').first();
 }
 
 async function waitForOptions(select, minimumCount, label) {
@@ -378,10 +396,12 @@ try {
   assert(await settingsButton.getAttribute('aria-expanded') === 'true', 'NativePlayer Settings menu opens');
   assert(await waitForVisible(page.locator('#hls-settings')), 'combined playback Settings panel is visible');
 
-  const qualitySelect = page.getByLabel('Quality', { exact: true });
-  const audioSelect = page.getByLabel('Audio', { exact: true });
-  const subtitleSelect = page.getByLabel('Subtitles', { exact: true });
-  const serverSelect = page.getByLabel('Server', { exact: true });
+  const qualitySelect = settingsSelect(page, 'Quality');
+  const audioSelect = settingsSelect(page, 'Audio');
+  const subtitleSelect = settingsSelect(page, 'Subtitles');
+  const serverSelect = settingsSelect(page, 'Server');
+  const settingsLabels = await page.locator('#hls-settings label > span').allTextContents();
+  assert(settingsLabels.includes('Server'), `combined Settings includes Server (${settingsLabels.join(', ') || 'no labels'})`);
   await waitForOptions(serverSelect, 2, 'Server');
   await waitForOptions(qualitySelect, 2, 'Quality');
   await waitForOptions(audioSelect, 2, 'Audio');
@@ -405,17 +425,26 @@ try {
     .sort((a, b) => (Number.parseInt(b.label, 10) || 0) - (Number.parseInt(a.label, 10) || 0))[0];
   assert(Boolean(manualQuality), 'manual quality option is available');
   await qualitySelect.selectOption(manualQuality.value);
-  await page.waitForTimeout(250);
-  const manualQualityState = await qualityState(video);
+  assert((await qualitySelect.inputValue()) === manualQuality.value, `quality UI selects ${manualQuality.label}`);
+  const manualQualityState = await waitForQualityState(video, (state) => {
+    const enabled = state.filter((level) => level.enabled);
+    return state.length === qualityOptions.length - 1
+      && enabled.length === 1
+      && enabled[0]?.id === manualQuality.value;
+  });
+  assert(manualQualityState?.length === qualityOptions.length - 1,
+    `quality API exposes ${qualityOptions.length - 1} renditions after manual selection (actual=${manualQualityState?.length ?? 'unavailable'})`);
   const enabledManualLevels = manualQualityState?.filter((level) => level.enabled) ?? [];
+  const selectedManualLevelEnabled = enabledManualLevels.some((level) => level.id === manualQuality.value);
   assert(
-    enabledManualLevels.length === 1 && enabledManualLevels[0]?.id === manualQuality.value,
-    `manual quality selection enables only ${manualQuality.label}`,
+    enabledManualLevels.length === 1 && selectedManualLevelEnabled,
+    `manual quality selection enables only ${manualQuality.label} (enabled=${enabledManualLevels.length}, selectedEnabled=${selectedManualLevelEnabled})`,
   );
 
   await qualitySelect.selectOption('auto');
-  await page.waitForTimeout(250);
-  const autoQualityState = await qualityState(video);
+  const autoQualityState = await waitForQualityState(video, (state) => (
+    state.length === qualityOptions.length - 1 && state.every((level) => level.enabled)
+  ));
   assert(
     Boolean(autoQualityState?.length) && autoQualityState.every((level) => level.enabled),
     'Quality Auto re-enables every rendition',
@@ -472,7 +501,8 @@ try {
     await fullscreenButton.click({ timeout: 5_000 });
     await page.waitForFunction(() => {
       const element = document.querySelector('section[aria-label^="Player for"] video');
-      return Boolean(document.fullscreenElement || element?.player?.isFullscreen?.());
+      const player = element?.player ?? element?.closest('.video-js')?.player;
+      return Boolean(document.fullscreenElement || player?.isFullscreen?.());
     }, undefined, { timeout: 3_000 });
     fullscreenEntered = true;
   } catch {
@@ -481,7 +511,7 @@ try {
   if (fullscreenEntered) {
     console.log('PASS  fullscreen mode can be entered');
     await settingsButton.click();
-    const fullscreenServerSelect = page.getByLabel('Server', { exact: true });
+    const fullscreenServerSelect = settingsSelect(page, 'Server');
     assert(await waitForVisible(fullscreenServerSelect, 3_000), 'player Settings remain visible in fullscreen');
     const settingsInsideFullscreenPlayer = await fullscreenServerSelect.evaluate((select) => {
       const fullscreenRoot = document.fullscreenElement ?? select.closest('.vjs-fullscreen');
@@ -491,12 +521,16 @@ try {
     await settingsButton.click();
     await page.evaluate(async () => {
       if (document.fullscreenElement) await document.exitFullscreen();
-      else document.querySelector('section[aria-label^="Player for"] video')?.player?.exitFullscreen?.();
+      else {
+        const element = document.querySelector('section[aria-label^="Player for"] video');
+        const player = element?.player ?? element?.closest('.video-js')?.player;
+        player?.exitFullscreen?.();
+      }
     });
   }
 
   await settingsButton.click();
-  const serverSelectForSwitch = page.getByLabel('Server', { exact: true });
+  const serverSelectForSwitch = settingsSelect(page, 'Server');
   assert(await waitForVisible(serverSelectForSwitch), 'Server selector is available inside player Settings');
   const currentSource = await serverSelectForSwitch.inputValue();
   const instanceMarker = `smoke-${Date.now()}`;
@@ -522,7 +556,7 @@ try {
   const remountedSettingsButton = page.getByRole('button', { name: /settings/i }).first();
   assert(await waitForVisible(remountedSettingsButton), 'Settings control returns after server remount');
   await remountedSettingsButton.click();
-  const remountedServerSelect = page.getByLabel('Server', { exact: true });
+  const remountedServerSelect = settingsSelect(page, 'Server');
   assert((await remountedServerSelect.inputValue()) === alternate.option.value,
     'alternate server remains selected in player Settings after remount');
 

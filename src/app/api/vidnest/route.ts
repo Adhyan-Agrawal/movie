@@ -59,9 +59,11 @@ function readToken(token: string, secret: string): ProxyPayload | null {
 function sanitizeHeaders(input: unknown): StreamHeaders {
   if (!input || typeof input !== 'object') return {};
   const headers: StreamHeaders = {};
-  for (const name of ['referer', 'origin']) {
-    const value = (input as Record<string, unknown>)[name];
-    if (typeof value !== 'string') continue;
+  for (const [rawName, rawValue] of Object.entries(input)) {
+    const name = rawName.toLowerCase();
+    if (name !== 'referer' && name !== 'origin') continue;
+    if (typeof rawValue !== 'string' || /[\r\n]/.test(rawValue)) continue;
+    const value = rawValue.trim();
     try {
       if (new URL(value).protocol === 'https:') headers[name] = value;
     } catch {
@@ -105,6 +107,7 @@ function replayStream(
 async function probePlaylist(body: ReadableStream<Uint8Array>): Promise<{
   body: ReadableStream<Uint8Array>;
   playlist: boolean;
+  contentType?: string;
 }> {
   const reader = body.getReader();
   const buffered: Uint8Array[] = [];
@@ -129,7 +132,11 @@ async function probePlaylist(body: ReadableStream<Uint8Array>): Promise<{
     if (probeLength >= PLAYLIST_SIGNATURE.length + 3 && prefix && !PLAYLIST_SIGNATURE.startsWith(prefix)) break;
   }
 
-  return { body: replayStream(reader, buffered), playlist };
+  const boxType = probeLength >= 8 ? new TextDecoder().decode(probe.subarray(4, 8)) : '';
+  const contentType = probeLength >= 377 && probe[0] === 0x47 && probe[188] === 0x47 && probe[376] === 0x47
+    ? 'video/mp2t'
+    : ['ftyp', 'styp', 'moof'].includes(boxType) ? 'video/mp4' : undefined;
+  return { body: replayStream(reader, buffered), playlist, contentType };
 }
 
 function rewritePlaylist(playlist: string, sourceUrl: string, headers: StreamHeaders, secret: string): string {
@@ -175,14 +182,41 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
   if (!response.ok || !response.body) return jsonError('Playback stream is unavailable.', 502);
 
   let sourceUrl = response.url || payload.url;
-  const inspected = isPlaylist(response, sourceUrl)
-    ? { body: response.body, playlist: true }
+  let inspected = isPlaylist(response, sourceUrl)
+    ? { body: response.body, playlist: true, contentType: undefined }
     : await probePlaylist(response.body);
+  let completePlaylistFetched = false;
+
+  // An opaque manifest's requested range may omit its signature entirely.
+  if (request.headers.has('range') && !inspected.playlist
+    && !/^(?:audio|video|image)\//i.test(response.headers.get('content-type') ?? '')) {
+    const fullHeaders = new Headers(upstreamHeaders);
+    fullHeaders.delete('range');
+    fullHeaders.delete('if-range');
+    const fullResponse = await fetch(payload.url, { headers: fullHeaders, cache: 'no-store', signal: request.signal });
+    if (fullResponse.ok && fullResponse.body) {
+      const fullUrl = fullResponse.url || payload.url;
+      const fullInspection = isPlaylist(fullResponse, fullUrl)
+        ? { body: fullResponse.body, playlist: true, contentType: undefined }
+        : await probePlaylist(fullResponse.body);
+      if (fullInspection.playlist) {
+        await inspected.body.cancel();
+        response = fullResponse;
+        sourceUrl = fullUrl;
+        inspected = fullInspection;
+        completePlaylistFetched = true;
+      } else {
+        await fullInspection.body.cancel();
+      }
+    } else {
+      await fullResponse.body?.cancel();
+    }
+  }
 
   if (inspected.playlist) {
     // Rewriting changes byte offsets, so playlists must use their complete representation.
     let body = inspected.body;
-    if (request.headers.has('range')) {
+    if (request.headers.has('range') && !completePlaylistFetched) {
       await body.cancel();
       upstreamHeaders.delete('range');
       upstreamHeaders.delete('if-range');
@@ -200,9 +234,13 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
 
   const headers = new Headers({ 'Cache-Control': 'private, no-store' });
   for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+    // Fetch decodes compressed bodies; the upstream encoded length no longer applies.
+    if (name === 'content-length' && response.headers.has('content-encoding')
+      && response.headers.get('content-encoding')?.toLowerCase() !== 'identity') continue;
     const value = response.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
+  if (inspected.contentType) headers.set('Content-Type', inspected.contentType);
   return new NextResponse(inspected.body, { headers, status: response.status });
 }
 

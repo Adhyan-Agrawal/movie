@@ -65,6 +65,87 @@ afterEach(() => {
 });
 
 describe('Vidnest proxy transport', () => {
+  it.each(['bytes=0-1', 'bytes=12-13'])('classifies opaque ranged HLS from a complete response (%s)', async (range) => {
+    const upstreamUrl = 'https://cdn.example/opaque';
+    const fetchMock = installFetch(upstreamUrl, responseAt(range === 'bytes=0-1' ? '#E' : 'F:', {
+      status: 206,
+      headers: { 'Content-Type': 'application/octet-stream', 'Content-Range': 'bytes 0-1/40' },
+    }, upstreamUrl));
+    fetchMock.mockResolvedValueOnce(responseAt('#EXTM3U\n#EXTINF:6,\nsegment.ts\n', {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }, upstreamUrl));
+
+    const response = await GET(playbackRequest({ Range: range }));
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('content-type')).toContain('application/vnd.apple.mpegurl');
+    expect(response.headers.get('content-range')).toBeNull();
+    expect(decodeProxyPaths(await response.text()).map((payload) => payload.url)).toEqual(['https://cdn.example/segment.ts']);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(new Headers((fetchMock.mock.calls[2]![1] as RequestInit).headers).get('range')).toBeNull();
+  });
+
+  it('accepts mixed-case provider headers without widening the allowlist', async () => {
+    const fetchMock = installFetch('https://cdn.example/master.m3u8', new Response('#EXTM3U\nsegment.ts\n'), {
+      Referer: 'https://player.example/watch',
+      ORIGIN: 'https://player.example',
+      Authorization: 'Bearer private',
+      Cookie: 'private=1',
+    });
+
+    const response = await GET(playbackRequest());
+
+    expect(response.status).toBe(200);
+    const headers = new Headers((fetchMock.mock.calls[1]![1] as RequestInit).headers);
+    expect(headers.get('referer')).toBe('https://player.example/watch');
+    expect(headers.get('origin')).toBe('https://player.example');
+    expect(headers.get('authorization')).toBeNull();
+    expect(headers.get('cookie')).toBeNull();
+  });
+
+  it('corrects a valid MPEG-TS segment mislabeled as HTML without changing bytes', async () => {
+    const segment = new Uint8Array(188 * 3);
+    segment[0] = segment[188] = segment[376] = 0x47;
+    installFetch('https://cdn.example/opaque', new Response(segment, {
+      headers: { 'Content-Type': 'text/html; charset=UTF-8' },
+    }));
+
+    const response = await GET(playbackRequest());
+
+    expect(response.headers.get('content-type')).toBe('video/mp2t');
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(segment);
+  });
+
+  it('does not forward an encoded content length for an already-decoded media body', async () => {
+    const media = new Uint8Array(128);
+    installFetch('https://cdn.example/media', new Response(media, {
+      headers: { 'Content-Type': 'video/mp4', 'Content-Encoding': 'gzip', 'Content-Length': '32' },
+    }));
+
+    const response = await GET(playbackRequest());
+
+    expect(response.headers.get('content-length')).toBeNull();
+    expect(response.headers.get('content-encoding')).toBeNull();
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(media);
+  });
+
+  it('keeps ambiguous binary range bytes intact after classifying the complete resource', async () => {
+    const media = new Uint8Array([2, 3, 4, 5]);
+    const fetchMock = installFetch('https://cdn.example/opaque', new Response(media, {
+      status: 206,
+      headers: { 'Content-Type': 'application/octet-stream', 'Content-Range': 'bytes 2-5/10' },
+    }));
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array(10), {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }));
+
+    const response = await GET(playbackRequest({ Range: 'bytes=2-5' }));
+
+    expect(response.status).toBe(206);
+    expect(response.headers.get('content-range')).toBe('bytes 2-5/10');
+    expect(new Uint8Array(await response.arrayBuffer())).toEqual(media);
+  });
+
   it('refetches ranged playlists in full before rewriting and returns 200', async () => {
     const upstreamUrl = 'https://cdn.example/master.m3u8';
     const fetchMock = installFetch(upstreamUrl, responseAt('#EXTM3U\n#EXTINF:', {
@@ -207,7 +288,7 @@ describe('Vidnest proxy transport', () => {
 
     const response = await GET(playbackRequest());
 
-    expect(response.headers.get('content-type')).toBe('application/octet-stream');
+    expect(response.headers.get('content-type')).toBe('video/mp4');
     expect(response.headers.get('content-length')).toBe(String(expected.byteLength));
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(expected);
   });

@@ -56,6 +56,8 @@ const CONTENT_SECURITY_POLICY = [
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline'",
   SCRIPT_SRC,
+  // Video.js/VHS creates a blob worker for media transmuxing.
+  "worker-src 'self' blob:",
   // Native player (Spec Sections 7, 9): signed Supabase-storage URLs and
   // admin-configured remote streams. https: is required because remote
   // licensed CDN hosts are not known ahead of time; hls.js fetches segments
