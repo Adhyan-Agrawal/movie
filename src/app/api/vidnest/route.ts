@@ -4,7 +4,9 @@ import { NextRequest, NextResponse } from 'next/server';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const TOKEN_TTL_MS = 5 * 60 * 1000;
+const TOKEN_TTL_MS = 4 * 60 * 60 * 1000;
+const PLAYLIST_PROBE_BYTES = 1024;
+const PLAYLIST_SIGNATURE = '#EXTM3U';
 const TMDB_ID_RE = /^[1-9]\d{0,9}$/;
 const MAX_STREAM_INDEX = 10;
 
@@ -70,7 +72,64 @@ function sanitizeHeaders(input: unknown): StreamHeaders {
 }
 
 function isPlaylist(response: Response, url: string): boolean {
-  return response.headers.get('content-type')?.toLowerCase().includes('mpegurl') || /\.m3u8(?:$|\?)/i.test(url);
+  const contentType = response.headers.get('content-type')?.toLowerCase();
+  return Boolean(contentType?.includes('mpegurl') || contentType?.includes('m3u8') || /\.m3u8(?:$|[?#])/i.test(url));
+}
+
+function replayStream(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  buffered: Uint8Array[],
+): ReadableStream<Uint8Array> {
+  let bufferedIndex = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (bufferedIndex < buffered.length) {
+        controller.enqueue(buffered[bufferedIndex++]!);
+        return;
+      }
+
+      try {
+        const result = await reader.read();
+        if (result.done) controller.close();
+        else controller.enqueue(result.value);
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+    cancel(reason) {
+      return reader.cancel(reason);
+    },
+  });
+}
+
+async function probePlaylist(body: ReadableStream<Uint8Array>): Promise<{
+  body: ReadableStream<Uint8Array>;
+  playlist: boolean;
+}> {
+  const reader = body.getReader();
+  const buffered: Uint8Array[] = [];
+  const probe = new Uint8Array(PLAYLIST_PROBE_BYTES);
+  let probeLength = 0;
+  let playlist = false;
+
+  while (probeLength < PLAYLIST_PROBE_BYTES) {
+    const result = await reader.read();
+    if (result.done) break;
+
+    buffered.push(result.value);
+    const copyLength = Math.min(result.value.byteLength, PLAYLIST_PROBE_BYTES - probeLength);
+    probe.set(result.value.subarray(0, copyLength), probeLength);
+    probeLength += copyLength;
+
+    const prefix = new TextDecoder().decode(probe.subarray(0, probeLength)).replace(/^\uFEFF/, '').trimStart();
+    if (prefix.startsWith(PLAYLIST_SIGNATURE)) {
+      playlist = true;
+      break;
+    }
+    if (probeLength >= PLAYLIST_SIGNATURE.length + 3 && prefix && !PLAYLIST_SIGNATURE.startsWith(prefix)) break;
+  }
+
+  return { body: replayStream(reader, buffered), playlist };
 }
 
 function rewritePlaylist(playlist: string, sourceUrl: string, headers: StreamHeaders, secret: string): string {
@@ -99,22 +158,34 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
   const payload = readToken(token, secret);
   if (!payload) return jsonError('Invalid or expired playback token.', 403);
 
-  const response = await fetch(payload.url, { headers: payload.headers, cache: 'no-store', signal: request.signal });
+  const upstreamHeaders = new Headers(payload.headers);
+  for (const name of ['range', 'if-range']) {
+    const value = request.headers.get(name);
+    if (value !== null) upstreamHeaders.set(name, value);
+  }
+
+  const response = await fetch(payload.url, { headers: upstreamHeaders, cache: 'no-store', signal: request.signal });
   if (!response.ok || !response.body) return jsonError('Playback stream is unavailable.', 502);
 
-  if (isPlaylist(response, payload.url)) {
-    const playlist = rewritePlaylist(await response.text(), payload.url, payload.headers, secret);
+  const sourceUrl = response.url || payload.url;
+  const inspected = isPlaylist(response, sourceUrl)
+    ? { body: response.body, playlist: true }
+    : await probePlaylist(response.body);
+
+  if (inspected.playlist) {
+    const playlist = rewritePlaylist(await new Response(inspected.body).text(), sourceUrl, payload.headers, secret);
     return new NextResponse(playlist, {
       headers: { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl' },
+      status: response.status,
     });
   }
 
   const headers = new Headers({ 'Cache-Control': 'private, no-store' });
-  const contentType = response.headers.get('content-type');
-  const contentLength = response.headers.get('content-length');
-  if (contentType) headers.set('Content-Type', contentType);
-  if (contentLength) headers.set('Content-Length', contentLength);
-  return new NextResponse(response.body, { headers, status: response.status });
+  for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag', 'last-modified']) {
+    const value = response.headers.get(name);
+    if (value !== null) headers.set(name, value);
+  }
+  return new NextResponse(inspected.body, { headers, status: response.status });
 }
 
 async function resolve(request: NextRequest, config: { baseUrl: URL; secret: string }): Promise<NextResponse> {

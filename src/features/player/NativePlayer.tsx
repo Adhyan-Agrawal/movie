@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type Player from 'video.js/dist/types/player';
-import type Hls from 'hls.js';
 import { reportProgressAction } from '@/features/playback/progress-actions';
 import { updateGuestPosition } from '@/features/playback/guest-watch';
 
@@ -14,14 +13,29 @@ export interface NativePlayerProps {
   seasonNumber?: number;
   episodeNumber?: number;
   initialPosition?: number;
+  posterUrl?: string;
   onReady?: () => void;
   onError?: () => void;
 }
 
 interface TrackOption { id: string; label: string }
-interface Representation { id: string; height?: number; enabled: (enabled?: boolean) => boolean }
+interface QualityLevel { id: string; height?: number; bitrate?: number; enabled: boolean }
 interface AudioTrack { id: string; label: string; language: string; enabled: boolean }
 interface TextTrack { id: string; label: string; language: string; kind: string; mode: TextTrackMode }
+interface QualityLevelList {
+  readonly length: number;
+  readonly selectedIndex: number;
+  readonly [index: number]: QualityLevel | undefined;
+  on: (event: 'addqualitylevel' | 'removequalitylevel' | 'change', listener: () => void) => void;
+  off: (event: 'addqualitylevel' | 'removequalitylevel' | 'change', listener: () => void) => void;
+}
+interface PublicTrackList<Track> {
+  readonly length: number;
+  readonly [index: number]: Track | undefined;
+  on: (event: 'addtrack' | 'removetrack' | 'change', listener: () => void) => void;
+  off: (event: 'addtrack' | 'removetrack' | 'change', listener: () => void) => void;
+}
+type PlayerWithQualityLevels = Player & { qualityLevels: () => QualityLevelList };
 
 const REPORT_INTERVAL_SECONDS = 5;
 const QUALITY_PREF_PREFIX = 'lumora:pref:quality:';
@@ -46,18 +60,39 @@ function mimeType(kind: NativePlayerProps['source']['kind']): string {
   return kind === 'hls' ? 'application/x-mpegURL' : kind === 'dash' ? 'application/dash+xml' : 'video/mp4';
 }
 
-function audioTrackEntries(player: Player): AudioTrack[] {
-  return (player.audioTracks() as unknown as { tracks_: AudioTrack[] }).tracks_;
+function qualityLevelEntries(list: QualityLevelList): QualityLevel[] {
+  const levels: QualityLevel[] = [];
+  for (let index = 0; index < list.length; index += 1) {
+    const level = list[index];
+    if (level) levels.push(level);
+  }
+  return levels;
 }
 
-function textTrackEntries(player: Player): TextTrack[] {
-  return (player.textTracks() as unknown as { tracks_: TextTrack[] }).tracks_;
+function audioTrackList(player: Player): PublicTrackList<AudioTrack> {
+  return player.audioTracks() as unknown as PublicTrackList<AudioTrack>;
 }
 
-export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumber, episodeNumber, initialPosition, onReady, onError }: NativePlayerProps) {
-  const videoRef = useRef<HTMLVideoElement | null>(null);
+function textTrackList(player: Player): PublicTrackList<TextTrack> {
+  return player.textTracks() as unknown as PublicTrackList<TextTrack>;
+}
+
+function configureMediaElement(player: Player): void {
+  const video = player.el().querySelector('video');
+  if (!(video instanceof HTMLVideoElement)) return;
+  try {
+    (video as HTMLVideoElement & { controlsList?: { add: (...tokens: string[]) => void } }).controlsList?.add('nodownload', 'noremoteplayback');
+  } catch { /* Unsupported browser. */ }
+  video.disablePictureInPicture = true;
+  video.disableRemotePlayback = true;
+}
+
+export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumber, episodeNumber, initialPosition, posterUrl, onReady, onError }: NativePlayerProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const playerRef = useRef<Player | null>(null);
-  const hlsRef = useRef<Hls | null>(null);
+  const qualityLevelListRef = useRef<QualityLevelList | null>(null);
+  const preferredQualityHeightRef = useRef<number | null>(null);
+  const selectedQualityIdRef = useRef<string | null>(null);
   const resumedRef = useRef(false);
   const lastReportedRef = useRef(0);
   const [qualityLevels, setQualityLevels] = useState<TrackOption[]>([]);
@@ -68,9 +103,11 @@ export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumb
   const [activeSubtitle, setActiveSubtitle] = useState('off');
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const report = useCallback((video: HTMLVideoElement) => {
-    const positionSeconds = video.currentTime;
-    const durationSeconds = Number.isFinite(video.duration) ? video.duration : undefined;
+  const report = useCallback((player: Player) => {
+    const currentTime = player.currentTime();
+    const duration = player.duration();
+    const positionSeconds = typeof currentTime === 'number' && Number.isFinite(currentTime) ? currentTime : 0;
+    const durationSeconds = typeof duration === 'number' && Number.isFinite(duration) ? duration : undefined;
     const guestPosition = () => updateGuestPosition(titleSlug, positionSeconds, durationSeconds, {
       ...(episodeId ? { episodeId } : {}),
       ...(seasonNumber !== undefined ? { seasonNumber } : {}),
@@ -80,13 +117,6 @@ export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumb
       .then((result) => { if (!result.ok) guestPosition(); })
       .catch(guestPosition);
   }, [titleId, titleSlug, episodeId, seasonNumber, episodeNumber]);
-
-  const representations = useCallback((): Representation[] => {
-    const player = playerRef.current;
-    if (!player) return [];
-    const streamingPlayer = player as unknown as { tech: (options: unknown) => { vhs?: { representations?: () => Representation[] } } };
-    return streamingPlayer.tech({ IWillNotUseThisInPlugins: true }).vhs?.representations?.() ?? [];
-  }, []);
 
   useEffect(() => {
     const video = videoRef.current;

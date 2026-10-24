@@ -157,12 +157,17 @@ export function PlayerShell({
   const [adsConsent, setAdsConsent] = useState(false);
 
   useEffect(() => {
+    let hasAdsConsent = false;
     try {
-      setAdsConsent(Boolean(readConsent()?.ads));
+      hasAdsConsent = Boolean(readConsent()?.ads);
     } catch {
       // Private mode — best effort only.
     }
-  }, []);
+    setAdsConsent(hasAdsConsent);
+    // Resolve this only after mount so the server and hydration renders match.
+    // Without advertising consent there is no ad gate to wait for.
+    if (preroll && !hasAdsConsent) setAdDone(true);
+  }, [preroll]);
 
   useEffect(() => {
     if (!preroll) return;
@@ -188,8 +193,17 @@ export function PlayerShell({
         ? activeSource.kind
         : null
       : null;
-  const showNative = showPlayer && nativeKind !== null;
   const playerFailed = showPlayer && state === 'provider-error';
+
+  const handleAdDone = useCallback(() => {
+    try {
+      sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
+    } catch {
+      // Private mode — best effort only.
+    }
+    setAdDone(true);
+    setState('loading');
+  }, []);
 
   // Pre-roll safety net: if the creative never calls onDone (blocked zone, ad
   // network failure), auto-continue to the video after 8s. Otherwise a broken
@@ -197,17 +211,9 @@ export function PlayerShell({
   // continue-watching recording that only happens once the player mounts.
   useEffect(() => {
     if (!showAd) return;
-    const timer = window.setTimeout(() => {
-      try {
-        sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
-      } catch {
-        // Private mode — best effort only.
-      }
-      setAdDone(true);
-      setState('loading');
-    }, 8000);
+    const timer = window.setTimeout(handleAdDone, 8000);
     return () => window.clearTimeout(timer);
-  }, [showAd]);
+  }, [showAd, handleAdDone]);
 
   // Lumora-owned session recording — provider telemetry is unavailable.
   const sessionIdRef = useRef<string | null>(null);
@@ -312,6 +318,9 @@ export function PlayerShell({
   // video from scratch on every parent render).
   const handleNativeReady = useCallback(() => setState('ready'), []);
   const handleNativeError = useCallback(() => setState('provider-error'), []);
+  // NativePlayer may gain this coordinated optional prop concurrently. A
+  // spread forwards it now without requiring it in the current interface.
+  const nativePosterProps = title.posterUrl ? { posterUrl: title.posterUrl } : {};
 
   return (
     <section aria-label={`Player for ${title.name}`} className="flex flex-col gap-3">
@@ -330,16 +339,10 @@ export function PlayerShell({
             width={preroll!.width}
             height={preroll!.height}
             titleName={title.name}
-            onDone={() => {
-              try {
-                sessionStorage.setItem(PREROLL_SESSION_KEY, '1');
-              } catch {
-                // Private mode — best effort only.
-              }
-              setAdDone(true);
-              setState('loading');
-            }}
+            onDone={handleAdDone}
           />
+        ) : !showPlayer ? (
+          <PlayerLoadingOverlay />
         ) : playerFailed ? (
           <UnavailablePanel
             message={unavailableMessage({ code: 'provider-error', message: '', recoverable: true })}
@@ -348,21 +351,9 @@ export function PlayerShell({
           />
         ) : (
           <>
-            {state !== 'ready' ? (
-              <div
-                role="status"
-                aria-live="polite"
-                className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-surface/70 backdrop-blur-sm"
-              >
-                <span
-                  aria-hidden="true"
-                  className="h-8 w-8 rounded-full border-2 border-border-strong border-t-primary animate-spin"
-                />
-                <span className="text-sm text-content-muted">Loading player…</span>
-              </div>
-            ) : null}
+            {state !== 'ready' ? <PlayerLoadingOverlay /> : null}
 
-            {showNative ? (
+            {nativeKind !== null ? (
               /* Lumora-hosted media: a real <video> element with native
                  controls, resume support, and honest position telemetry. */
               <NativePlayer
@@ -370,6 +361,7 @@ export function PlayerShell({
                 source={{ url: activeSource!.url!, kind: nativeKind! }}
                 titleId={title.id}
                 titleSlug={title.slug}
+                {...nativePosterProps}
                 {...(episodeId ? { episodeId } : {})}
                 {...(seasonNumber !== undefined ? { seasonNumber } : {})}
                 {...(episodeNumber !== undefined ? { episodeNumber } : {})}
@@ -450,6 +442,22 @@ export function PlayerShell({
         </p>
       )}
     </section>
+  );
+}
+
+function PlayerLoadingOverlay() {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-surface/70 backdrop-blur-sm"
+    >
+      <span
+        aria-hidden="true"
+        className="h-8 w-8 rounded-full border-2 border-border-strong border-t-primary animate-spin"
+      />
+      <span className="text-sm text-content-muted">Loading player…</span>
+    </div>
   );
 }
 
