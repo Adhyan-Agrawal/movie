@@ -67,7 +67,7 @@ export function createVidnestAdapter(config: ProviderConfig): ProviderAdapter {
       return Array.from({ length: MAX_DIRECT_SOURCES }, (_, streamIndex) => {
         const sourceParams = new URLSearchParams(params);
         sourceParams.set('stream', String(streamIndex));
-        const label = streamIndex === 0 ? config.displayName : `${config.displayName} ${streamIndex + 1}`;
+        const label = `Server ${streamIndex + 1}`;
 
         return {
           id: `${config.id}:${request.type}:${streamIndex}`,
@@ -76,7 +76,7 @@ export function createVidnestAdapter(config: ProviderConfig): ProviderAdapter {
           url: `/api/vidnest?${sourceParams}`,
           capabilities,
           providerId: config.id,
-          providerLabel: label,
+          providerLabel: config.displayName,
           external: true,
           consentRequired: config.consentRequired,
         };

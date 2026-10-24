@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type Player from 'video.js/dist/types/player';
+import type Hls from 'hls.js';
 import { reportProgressAction } from '@/features/playback/progress-actions';
 import { updateGuestPosition } from '@/features/playback/guest-watch';
 
@@ -56,6 +57,7 @@ function textTrackEntries(player: Player): TextTrack[] {
 export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumber, episodeNumber, initialPosition, onReady, onError }: NativePlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<Player | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const resumedRef = useRef(false);
   const lastReportedRef = useRef(0);
   const [qualityLevels, setQualityLevels] = useState<TrackOption[]>([]);
@@ -91,6 +93,9 @@ export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumb
     if (!video) return;
     let cancelled = false;
     let player: Player | null = null;
+    let hls: Hls | null = null;
+    let fallbackStarted = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
     resumedRef.current = false;
     lastReportedRef.current = 0;
     setQualityLevels([]); setAudioTracks([]); setSubtitleTracks([]);
@@ -162,14 +167,63 @@ export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumb
       player.on('timeupdate', handleTimeUpdate);
       player.on('pause', () => report(video));
       player.on('ended', () => { lastReportedRef.current = video.currentTime; report(video); });
-      player.on('canplay', () => onReady?.());
-      player.on('error', () => onError?.());
+      const startHlsFallback = () => {
+        if (fallbackStarted || cancelled || source.kind !== 'hls') {
+          onError?.();
+          return;
+        }
+        fallbackStarted = true;
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        player?.dispose();
+        playerRef.current = null;
+        void import('hls.js').then(({ default: Hls }) => {
+          if (cancelled || !Hls.isSupported()) {
+            onError?.();
+            return;
+          }
+          hls = new Hls();
+          hlsRef.current = hls;
+          hls.on(Hls.Events.MANIFEST_PARSED, () => {
+            setQualityLevels(hls!.levels.map((level, index) => ({ id: String(index), label: level.height ? `${level.height}p` : `Quality ${index + 1}` })));
+            setAudioTracks(hls!.audioTracks.map((track) => ({ id: String(track.id), label: track.name || track.lang || `Audio ${track.id + 1}` })));
+            setSubtitleTracks(hls!.subtitleTracks.map((track) => ({ id: String(track.id), label: track.name || track.lang || `Subtitle ${track.id + 1}` })));
+            onReady?.();
+          });
+          hls.on(Hls.Events.ERROR, (_event, data) => { if (data.fatal) onError?.(); });
+          hls.loadSource(source.url);
+          hls.attachMedia(video);
+        }).catch(() => onError?.());
+      };
+      if (source.kind === 'hls') fallbackTimer = setTimeout(startHlsFallback, 10_000);
+      player.on('canplay', () => {
+        if (fallbackTimer) clearTimeout(fallbackTimer);
+        onReady?.();
+      });
+      player.on('error', startHlsFallback);
     }).catch(() => onError?.());
 
-    return () => { cancelled = true; player?.dispose(); playerRef.current = null; };
+    return () => {
+      cancelled = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      player?.dispose();
+      hls?.destroy();
+      playerRef.current = null;
+      hlsRef.current = null;
+    };
   }, [source.url, source.kind, initialPosition, report, onReady, onError, titleSlug, representations]);
 
   const handleQualityChange = (id: string) => {
+    const hls = hlsRef.current;
+    if (hls) {
+      hls.currentLevel = id === 'auto' ? -1 : Number(id);
+      setActiveQuality(id);
+      if (id === 'auto') clearQualityPref(titleSlug);
+      else {
+        const selected = hls.levels[Number(id)];
+        if (selected?.height) writeQualityPref(titleSlug, selected.height);
+      }
+      return;
+    }
     const levels = representations();
     levels.forEach((level) => level.enabled(id === 'auto' || level.id === id));
     setActiveQuality(id);
@@ -178,6 +232,12 @@ export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumb
     if (selected?.height) writeQualityPref(titleSlug, selected.height);
   };
   const handleAudioChange = (id: string) => {
+    const hls = hlsRef.current;
+    if (hls) {
+      hls.audioTrack = Number(id);
+      setActiveAudio(id);
+      return;
+    }
     const player = playerRef.current;
     const tracks = player ? audioTrackEntries(player) : undefined;
     if (!tracks) return;
@@ -188,6 +248,12 @@ export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumb
     setActiveAudio(id);
   };
   const handleSubtitleChange = (id: string) => {
+    const hls = hlsRef.current;
+    if (hls) {
+      hls.subtitleTrack = id === 'off' ? -1 : Number(id);
+      setActiveSubtitle(id);
+      return;
+    }
     const player = playerRef.current;
     const tracks = player ? textTrackEntries(player) : undefined;
     if (!tracks) return;
