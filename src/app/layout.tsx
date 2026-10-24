@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import { Inter } from 'next/font/google';
+import 'video.js/dist/video-js.css';
 import '@/styles/globals.css';
 import { publicEnv } from '@/lib/env';
 import { AppShell } from '@/components/shell/AppShell';

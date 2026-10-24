@@ -61,6 +61,32 @@ body {
   min-height: 100dvh;
 }
 
+.lumora-videojs {
+  background: #000;
+  font-family: inherit;
+}
+
+.lumora-videojs .vjs-control-bar {
+  background: linear-gradient(transparent, rgb(0 0 0 / 92%));
+  padding: 0.25rem 0.5rem;
+}
+
+.lumora-videojs .vjs-big-play-button {
+  border: 0;
+  border-radius: 9999px;
+  background: rgb(var(--color-primary));
+  line-height: 2.3em;
+  height: 2.5em;
+  width: 2.5em;
+  inset: 50% auto auto 50%;
+  transform: translate(-50%, -50%);
+}
+
+.lumora-videojs:hover .vjs-big-play-button,
+.lumora-videojs .vjs-big-play-button:focus {
+  background: rgb(var(--color-primary-hover));
+}
+
 /* Visible focus for keyboard users (WCAG 2.2 AA, Section 5) */
 :focus-visible {
   outline: 2px solid rgb(var(--color-primary));

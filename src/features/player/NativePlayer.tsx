@@ -1,387 +1,220 @@
 'use client';
 
 import { useCallback, useEffect, useRef, useState } from 'react';
-import Hls from 'hls.js';
+import type Player from 'video.js/dist/types/player';
 import { reportProgressAction } from '@/features/playback/progress-actions';
 import { updateGuestPosition } from '@/features/playback/guest-watch';
-
-/**
- * Native HTML5 player (Spec Section 9) for Lumora-hosted mp4/hls/dash sources.
- *
- * Unlike the external embed this player owns real telemetry: timeupdate (throttled),
- * pause, and ended all report the TRUE position to watch_progress, which drives
- * resume and the continue-watching row. Guests (signed out) get the same feature
- * locally: when the server report has no session to attach to, the position is
- * written to this browser's guest store instead. Everything is fire-and-forget —
- * a failed report must never interrupt playback.
- *
- * TRACK SELECTORS (multi-quality / multi-audio / subtitles): hls.js parses the
- * master manifest's levels, audio tracks, and subtitle tracks once MANIFEST_PARSED
- * fires. For HLS sources we render a compact Quality / Audio / Subtitles selector
- * under the video and surface the chosen quality persistently per title. Native
- * HLS (Safari) and mp4/dash don't go through hls.js, so no selector is shown
- * there — the browser offers its own controls.
- *
- * HLS strategy: native HLS where the browser supports it (Safari), hls.js via
- * MSE elsewhere, and an honest "unsupported" state when neither works. DASH is
- * set as a direct src — native DASH playback is browser-limited and that is an
- * accepted v1 limitation (no dash.js integration yet).
- */
 
 export interface NativePlayerProps {
   source: { url: string; kind: 'mp4' | 'hls' | 'dash' };
   titleId: string;
-  /** Title slug — the guest (localStorage) fallback key + quality pref key. */
   titleSlug: string;
   episodeId?: string;
-  /** TV only: season/episode numbers so the guest store can resume the spot. */
   seasonNumber?: number;
   episodeNumber?: number;
-  /** Saved resume position (seconds), applied once after metadata loads. */
   initialPosition?: number;
-  /** Fires when the media is ready to play (drives the shell's loading state). */
   onReady?: () => void;
-  /** Fires on a fatal media error (drives the shell's unavailable state). */
   onError?: () => void;
 }
 
-/** Minimum seconds of playback between progress reports. */
+interface TrackOption { id: string; label: string }
+interface Representation { id: string; height?: number; enabled: (enabled?: boolean) => boolean }
+interface AudioTrack { id: string; label: string; language: string; enabled: boolean }
+interface TextTrack { id: string; label: string; language: string; kind: string; mode: TextTrackMode }
+
 const REPORT_INTERVAL_SECONDS = 5;
-/** localStorage key prefix for the per-title quality preference. */
 const QUALITY_PREF_PREFIX = 'lumora:pref:quality:';
 
 function readQualityPref(titleSlug: string): number | null {
   try {
     const raw = localStorage.getItem(`${QUALITY_PREF_PREFIX}${titleSlug}`);
-    const n = raw ? Number.parseInt(raw, 10) : NaN;
-    return Number.isInteger(n) && n > 0 ? n : null;
-  } catch {
-    return null;
-  }
+    const height = raw ? Number.parseInt(raw, 10) : NaN;
+    return Number.isInteger(height) && height > 0 ? height : null;
+  } catch { return null; }
 }
 
 function writeQualityPref(titleSlug: string, height: number): void {
-  try {
-    localStorage.setItem(`${QUALITY_PREF_PREFIX}${titleSlug}`, String(height));
-  } catch {
-    // Private mode — best effort.
-  }
+  try { localStorage.setItem(`${QUALITY_PREF_PREFIX}${titleSlug}`, String(height)); } catch { /* Best effort. */ }
 }
 
 function clearQualityPref(titleSlug: string): void {
-  try {
-    localStorage.removeItem(`${QUALITY_PREF_PREFIX}${titleSlug}`);
-  } catch {
-    // Best effort.
-  }
+  try { localStorage.removeItem(`${QUALITY_PREF_PREFIX}${titleSlug}`); } catch { /* Best effort. */ }
 }
 
-/** Compact option list for a native <select>. */
-interface TrackOption {
-  id: number;
-  label: string;
+function mimeType(kind: NativePlayerProps['source']['kind']): string {
+  return kind === 'hls' ? 'application/x-mpegURL' : kind === 'dash' ? 'application/dash+xml' : 'video/mp4';
 }
 
-export function NativePlayer({
-  source,
-  titleId,
-  titleSlug,
-  episodeId,
-  seasonNumber,
-  episodeNumber,
-  initialPosition,
-  onReady,
-  onError,
-}: NativePlayerProps) {
+function audioTrackEntries(player: Player): AudioTrack[] {
+  return (player.audioTracks() as unknown as { tracks_: AudioTrack[] }).tracks_;
+}
+
+function textTrackEntries(player: Player): TextTrack[] {
+  return (player.textTracks() as unknown as { tracks_: TextTrack[] }).tracks_;
+}
+
+export function NativePlayer({ source, titleId, titleSlug, episodeId, seasonNumber, episodeNumber, initialPosition, onReady, onError }: NativePlayerProps) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [unsupported, setUnsupported] = useState(false);
-  // Guards that must apply exactly once per source mount.
+  const playerRef = useRef<Player | null>(null);
   const resumedRef = useRef(false);
   const lastReportedRef = useRef(0);
-
-  // hls.js instance + parsed track lists (only for MSE-based HLS playback).
-  const hlsRef = useRef<Hls | null>(null);
   const [qualityLevels, setQualityLevels] = useState<TrackOption[]>([]);
   const [audioTracks, setAudioTracks] = useState<TrackOption[]>([]);
   const [subtitleTracks, setSubtitleTracks] = useState<TrackOption[]>([]);
-  const [activeQuality, setActiveQuality] = useState(-1); // -1 = auto
-  const [activeAudio, setActiveAudio] = useState(-1);
-  const [activeSubtitle, setActiveSubtitle] = useState(-1); // -1 = off
+  const [activeQuality, setActiveQuality] = useState('auto');
+  const [activeAudio, setActiveAudio] = useState('');
+  const [activeSubtitle, setActiveSubtitle] = useState('off');
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  // Report the current position; fire-and-forget, never throws into playback.
-  // Signed-out viewers have no watch_progress row — their position goes to the
-  // local guest store instead so their continue-watching row still works.
-  const report = useCallback(
-    (video: HTMLVideoElement) => {
-      const positionSeconds = video.currentTime;
-      const durationSeconds = Number.isFinite(video.duration) ? video.duration : undefined;
-      void reportProgressAction({
-        titleId,
-        ...(episodeId ? { episodeId } : {}),
-        positionSeconds,
-        durationSeconds,
-      })
-        .then((result) => {
-          if (!result.ok)
-            updateGuestPosition(titleSlug, positionSeconds, durationSeconds, {
-              ...(episodeId ? { episodeId } : {}),
-              ...(seasonNumber !== undefined ? { seasonNumber } : {}),
-              ...(episodeNumber !== undefined ? { episodeNumber } : {}),
-            });
-        })
-        .catch(() => {
-          updateGuestPosition(titleSlug, positionSeconds, durationSeconds, {
-            ...(episodeId ? { episodeId } : {}),
-            ...(seasonNumber !== undefined ? { seasonNumber } : {}),
-            ...(episodeNumber !== undefined ? { episodeNumber } : {}),
-          });
-        });
-    },
-    [titleId, titleSlug, episodeId, seasonNumber, episodeNumber],
-  );
+  const report = useCallback((video: HTMLVideoElement) => {
+    const positionSeconds = video.currentTime;
+    const durationSeconds = Number.isFinite(video.duration) ? video.duration : undefined;
+    const guestPosition = () => updateGuestPosition(titleSlug, positionSeconds, durationSeconds, {
+      ...(episodeId ? { episodeId } : {}),
+      ...(seasonNumber !== undefined ? { seasonNumber } : {}),
+      ...(episodeNumber !== undefined ? { episodeNumber } : {}),
+    });
+    void reportProgressAction({ titleId, ...(episodeId ? { episodeId } : {}), positionSeconds, durationSeconds })
+      .then((result) => { if (!result.ok) guestPosition(); })
+      .catch(guestPosition);
+  }, [titleId, titleSlug, episodeId, seasonNumber, episodeNumber]);
+
+  const representations = useCallback((): Representation[] => {
+    const player = playerRef.current;
+    if (!player) return [];
+    const streamingPlayer = player as unknown as { tech: (options: unknown) => { vhs?: { representations?: () => Representation[] } } };
+    return streamingPlayer.tech({ IWillNotUseThisInPlugins: true }).vhs?.representations?.() ?? [];
+  }, []);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video) return;
+    let cancelled = false;
+    let player: Player | null = null;
     resumedRef.current = false;
     lastReportedRef.current = 0;
-    setUnsupported(false);
-    setQualityLevels([]);
-    setAudioTracks([]);
-    setSubtitleTracks([]);
-    setActiveQuality(-1);
-    setActiveAudio(-1);
-    setActiveSubtitle(-1);
-    setSettingsOpen(false);
+    setQualityLevels([]); setAudioTracks([]); setSubtitleTracks([]);
+    setActiveQuality('auto'); setActiveAudio(''); setActiveSubtitle('off'); setSettingsOpen(false);
+    try {
+      (video as HTMLVideoElement & { controlsList?: { add: (...tokens: string[]) => void } }).controlsList?.add('nodownload', 'noremoteplayback');
+    } catch { /* Unsupported browser. */ }
+    video.disablePictureInPicture = true;
+    video.disableRemotePlayback = true;
 
-    const handleLoadedMetadata = () => {
-      // Resume once: seek before playback begins, never on later metadata loads.
-      if (!resumedRef.current && initialPosition !== undefined && initialPosition > 0) {
-        resumedRef.current = true;
-        video.currentTime = initialPosition;
-      }
-    };
-    const handleTimeUpdate = () => {
-      if (video.currentTime - lastReportedRef.current >= REPORT_INTERVAL_SECONDS) {
-        lastReportedRef.current = video.currentTime;
-        report(video);
-      }
-    };
-    const handlePause = () => report(video);
-    const handleEnded = () => {
-      lastReportedRef.current = video.currentTime;
-      report(video);
-    };
-    const handleCanPlay = () => onReady?.();
-    const handleError = () => onError?.();
+    void import('video.js').then(({ default: createPlayer }) => {
+      if (cancelled) return;
+      player = createPlayer(video, {
+        controls: true,
+        preload: 'metadata',
+        responsive: true,
+        fill: true,
+        playbackRates: [0.5, 0.75, 1, 1.25, 1.5, 2],
+        sources: [{ src: source.url, type: mimeType(source.kind) }],
+        html5: { vhs: { limitRenditionByPlayerDimensions: true } },
+        controlBar: { pictureInPictureToggle: false },
+      });
+      playerRef.current = player;
 
-    video.addEventListener('loadedmetadata', handleLoadedMetadata);
-    video.addEventListener('timeupdate', handleTimeUpdate);
-    video.addEventListener('pause', handlePause);
-    video.addEventListener('ended', handleEnded);
-    video.addEventListener('canplay', handleCanPlay);
-    video.addEventListener('error', handleError);
+      const refreshTracks = () => {
+        if (!player) return;
+        const levels = representations();
+        setQualityLevels(levels.map((level) => ({ id: level.id, label: level.height ? `${level.height}p` : 'Adaptive' })));
+        const audio = audioTrackEntries(player);
+        const audioOptions: TrackOption[] = [];
+        for (let index = 0; index < audio.length; index += 1) {
+          const track = audio[index];
+          if (!track) continue;
+          audioOptions.push({ id: track.id, label: track.label || track.language || `Audio ${index + 1}` });
+          if (track.enabled) setActiveAudio(track.id);
+        }
+        setAudioTracks(audioOptions);
+        const subtitles = textTrackEntries(player);
+        const subtitleOptions: TrackOption[] = [];
+        for (let index = 0; index < subtitles.length; index += 1) {
+          const track = subtitles[index];
+          if (!track || (track.kind !== 'subtitles' && track.kind !== 'captions')) continue;
+          subtitleOptions.push({ id: track.id, label: track.label || track.language || `Subtitle ${index + 1}` });
+          if (track.mode === 'showing') setActiveSubtitle(track.id);
+        }
+        setSubtitleTracks(subtitleOptions);
+        const preferredHeight = readQualityPref(titleSlug);
+        const preferred = preferredHeight ? levels.find((level) => level.height === preferredHeight) : undefined;
+        if (preferred) {
+          levels.forEach((level) => level.enabled(level.id === preferred.id));
+          setActiveQuality(preferred.id);
+        }
+      };
+      const handleMetadata = () => {
+        if (!resumedRef.current && initialPosition && initialPosition > 0 && player) {
+          resumedRef.current = true;
+          player.currentTime(initialPosition);
+        }
+        refreshTracks();
+      };
+      const handleTimeUpdate = () => {
+        if (video.currentTime - lastReportedRef.current >= REPORT_INTERVAL_SECONDS) {
+          lastReportedRef.current = video.currentTime;
+          report(video);
+        }
+      };
+      player.on('loadedmetadata', handleMetadata);
+      player.on('loadeddata', refreshTracks);
+      player.on('timeupdate', handleTimeUpdate);
+      player.on('pause', () => report(video));
+      player.on('ended', () => { lastReportedRef.current = video.currentTime; report(video); });
+      player.on('canplay', () => onReady?.());
+      player.on('error', () => onError?.());
+    }).catch(() => onError?.());
 
-    let hls: Hls | null = null;
-    if (source.kind === 'hls') {
-      if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS (Safari) — the browser owns quality controls.
-        video.src = source.url;
-      } else if (Hls.isSupported()) {
-        // MSE-based playback everywhere else.
-        hls = new Hls();
-        hlsRef.current = hls;
+    return () => { cancelled = true; player?.dispose(); playerRef.current = null; };
+  }, [source.url, source.kind, initialPosition, report, onReady, onError, titleSlug, representations]);
 
-        hls.on(Hls.Events.MANIFEST_PARSED, (_event, _data) => {
-          setQualityLevels(
-            hls!.levels.map((level, i) => ({
-              id: i,
-              label: level.height ? `${level.height}p` : `Level ${i + 1}`,
-            })),
-          );
-          setAudioTracks(
-            hls!.audioTracks.map((t) => ({ id: t.id, label: t.name || t.lang || `Audio ${t.id}` })),
-          );
-          setSubtitleTracks(
-            hls!.subtitleTracks.map((t) => ({ id: t.id, label: t.name || t.lang || `Subtitle ${t.id}` })),
-          );
-          // Apply the persisted quality preference once levels are known.
-          const pref = readQualityPref(titleSlug);
-          if (pref != null) {
-            const idx = hls!.levels.findIndex((l) => l.height === pref);
-            if (idx >= 0) {
-              hls!.currentLevel = idx;
-              setActiveQuality(idx);
-            }
-          }
-          onReady?.();
-        });
-        hls.on(Hls.Events.LEVEL_SWITCHED, (_event, data) => {
-          setActiveQuality(hls!.autoLevelEnabled ? -1 : data.level);
-        });
-        hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (_event, data) => setActiveAudio(data.id));
-        hls.on(Hls.Events.SUBTITLE_TRACK_SWITCH, (_event, data) => setActiveSubtitle(data.id));
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (data.fatal) handleError();
-        });
-        hls.loadSource(source.url);
-        hls.attachMedia(video);
-      } else {
-        // Neither native HLS nor MSE — say so honestly.
-        setUnsupported(true);
-      }
-    } else {
-      video.src = source.url;
-    }
-
-    return () => {
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      video.removeEventListener('timeupdate', handleTimeUpdate);
-      video.removeEventListener('pause', handlePause);
-      video.removeEventListener('ended', handleEnded);
-      video.removeEventListener('canplay', handleCanPlay);
-      video.removeEventListener('error', handleError);
-      if (hls) {
-        hls.destroy();
-        hlsRef.current = null;
-      }
-      // Detach the media so a re-mount (server switch / retry) starts clean.
-      video.pause();
-      video.removeAttribute('src');
-      video.load();
-    };
-  }, [source.url, source.kind, initialPosition, report, onReady, onError, titleSlug]);
-
-  // Track selection handlers — operate on the live hls.js instance.
-  const handleQualityChange = (i: number) => {
-    const hls = hlsRef.current;
-    if (!hls) return;
-    hls.currentLevel = i;
-    setActiveQuality(i);
-    if (i < 0) {
-      clearQualityPref(titleSlug);
-    } else {
-      const height = hls.levels[i]?.height;
-      if (height) writeQualityPref(titleSlug, height);
-    }
+  const handleQualityChange = (id: string) => {
+    const levels = representations();
+    levels.forEach((level) => level.enabled(id === 'auto' || level.id === id));
+    setActiveQuality(id);
+    if (id === 'auto') { clearQualityPref(titleSlug); return; }
+    const selected = levels.find((level) => level.id === id);
+    if (selected?.height) writeQualityPref(titleSlug, selected.height);
   };
-  const handleAudioChange = (id: number) => {
-    const hls = hlsRef.current;
-    if (!hls) return;
-    hls.audioTrack = id;
+  const handleAudioChange = (id: string) => {
+    const player = playerRef.current;
+    const tracks = player ? audioTrackEntries(player) : undefined;
+    if (!tracks) return;
+    for (let index = 0; index < tracks.length; index += 1) {
+      const track = tracks[index];
+      if (track) track.enabled = track.id === id;
+    }
     setActiveAudio(id);
   };
-  const handleSubtitleChange = (id: number) => {
-    const hls = hlsRef.current;
-    if (!hls) return;
-    hls.subtitleTrack = id;
+  const handleSubtitleChange = (id: string) => {
+    const player = playerRef.current;
+    const tracks = player ? textTrackEntries(player) : undefined;
+    if (!tracks) return;
+    for (let index = 0; index < tracks.length; index += 1) {
+      const track = tracks[index];
+      if (track && (track.kind === 'subtitles' || track.kind === 'captions')) track.mode = id !== 'off' && track.id === id ? 'showing' : 'disabled';
+    }
     setActiveSubtitle(id);
   };
-
-  if (unsupported) {
-    return (
-      <div
-        role="alert"
-        className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center"
-      >
-        <div aria-hidden="true" className="text-3xl text-danger">
-          ⚠
-        </div>
-        <h2 className="text-lg font-semibold">Stream format not supported</h2>
-        <p className="max-w-md text-sm text-content-muted">
-          This browser cannot play this stream. Choose an alternate source below.
-        </p>
-      </div>
-    );
-  }
-
-  const hasTrackControls =
-    source.kind === 'hls' && (qualityLevels.length > 0 || audioTracks.length > 0 || subtitleTracks.length > 0);
+  const hasTrackControls = qualityLevels.length > 0 || audioTracks.length > 0 || subtitleTracks.length > 0;
 
   return (
-    <div className="flex h-full w-full flex-col">
-      <video
-        ref={videoRef}
-        controls
-        controlsList="nodownload noremoteplayback"
-        disablePictureInPicture
-        playsInline
-        preload="metadata"
-        className="min-h-0 w-full flex-1 bg-black"
-        aria-label="Video player"
-        onContextMenu={(event) => event.preventDefault()}
-      />
-      {hasTrackControls ? (
-        <div className="absolute bottom-14 right-3 z-20">
-          <button
-            type="button"
-            onClick={() => setSettingsOpen((open) => !open)}
-            aria-expanded={settingsOpen}
-            aria-controls="hls-settings"
-            className="inline-flex h-10 items-center gap-2 rounded-full border border-white/20 bg-black/75 px-3 text-xs font-semibold text-white shadow-soft backdrop-blur transition hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-          >
-            <span aria-hidden="true">⚙</span> Settings
-          </button>
-
-          {settingsOpen ? (
-            <div
-              id="hls-settings"
-              className="absolute bottom-12 right-0 w-64 overflow-hidden rounded-xl border border-white/15 bg-zinc-950/95 p-2 text-sm text-white shadow-raised backdrop-blur"
-            >
-              <p className="px-2 pb-2 pt-1 text-xs font-semibold uppercase tracking-wider text-white/55">Playback settings</p>
-              {qualityLevels.length > 0 ? (
-                <SettingsSelect label="Quality" value={activeQuality} onChange={handleQualityChange}>
-                  <option value={-1}>Auto</option>
-                  {qualityLevels.map((level) => (
-                    <option key={level.id} value={level.id}>{level.label}</option>
-                  ))}
-                </SettingsSelect>
-              ) : null}
-              {audioTracks.length > 0 ? (
-                <SettingsSelect label="Audio" value={activeAudio} onChange={handleAudioChange}>
-                  {audioTracks.map((track) => (
-                    <option key={track.id} value={track.id}>{track.label}</option>
-                  ))}
-                </SettingsSelect>
-              ) : null}
-              {subtitleTracks.length > 0 ? (
-                <SettingsSelect label="Subtitles" value={activeSubtitle} onChange={handleSubtitleChange}>
-                  <option value={-1}>Off</option>
-                  {subtitleTracks.map((track) => (
-                    <option key={track.id} value={track.id}>{track.label}</option>
-                  ))}
-                </SettingsSelect>
-              ) : null}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
+    <div className="relative h-full w-full bg-black">
+      <video ref={videoRef} className="video-js lumora-videojs h-full w-full" aria-label="Video player" onContextMenu={(event) => event.preventDefault()} />
+      {hasTrackControls ? <div className="absolute bottom-14 right-3 z-20">
+        <button type="button" onClick={() => setSettingsOpen((open) => !open)} aria-expanded={settingsOpen} aria-controls="hls-settings" className="inline-flex h-10 items-center gap-2 rounded-full border border-white/20 bg-black/75 px-3 text-xs font-semibold text-white shadow-soft backdrop-blur transition hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"><span aria-hidden="true">⚙</span> Settings</button>
+        {settingsOpen ? <div id="hls-settings" className="absolute bottom-12 right-0 w-64 overflow-hidden rounded-xl border border-white/15 bg-zinc-950/95 p-2 text-sm text-white shadow-raised backdrop-blur">
+          <p className="px-2 pb-2 pt-1 text-xs font-semibold uppercase tracking-wider text-white/55">Playback settings</p>
+          {qualityLevels.length > 0 ? <SettingsSelect label="Quality" value={activeQuality} onChange={handleQualityChange}><option value="auto">Auto</option>{qualityLevels.map((level) => <option key={level.id} value={level.id}>{level.label}</option>)}</SettingsSelect> : null}
+          {audioTracks.length > 0 ? <SettingsSelect label="Audio" value={activeAudio} onChange={handleAudioChange}>{audioTracks.map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}</SettingsSelect> : null}
+          {subtitleTracks.length > 0 ? <SettingsSelect label="Subtitles" value={activeSubtitle} onChange={handleSubtitleChange}><option value="off">Off</option>{subtitleTracks.map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}</SettingsSelect> : null}
+        </div> : null}
+      </div> : null}
     </div>
   );
 }
 
-function SettingsSelect({
-  label,
-  value,
-  onChange,
-  children,
-}: {
-  label: string;
-  value: number;
-  onChange: (value: number) => void;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 hover:bg-white/10">
-      <span className="text-white/75">{label}</span>
-      <select
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
-        className="max-w-36 rounded-md border border-white/15 bg-white/10 px-2 py-1 text-right text-xs text-white outline-none focus:border-primary"
-      >
-        {children}
-      </select>
-    </label>
-  );
+function SettingsSelect({ label, value, onChange, children }: { label: string; value: string; onChange: (value: string) => void; children: React.ReactNode }) {
+  return <label className="flex items-center justify-between gap-3 rounded-lg px-2 py-2 hover:bg-white/10"><span className="text-white/75">{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} className="max-w-36 rounded-md border border-white/15 bg-white/10 px-2 py-1 text-right text-xs text-white outline-none focus:border-primary">{children}</select></label>;
 }
