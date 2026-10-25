@@ -15,6 +15,28 @@ const MEDIA_BYTES = new Uint8Array(1024);
 MEDIA_BYTES[0] = MEDIA_BYTES[188] = MEDIA_BYTES[376] = 0x47;
 let GET: typeof import('@/app/api/vidnest/route').GET;
 
+function muxedAudio(languages: string[]): Uint8Array {
+  const tables = [
+    [0, 0, 0, 0, 1, 0xc1, 0, 0, 0, 1, 0xe1, 0],
+    [2, 0, 0, 0, 1, 0xc1, 0, 0, 0xe1, 1, 0xf0, 0, ...languages.flatMap((language, index) =>
+      [0x0f, 0xe1, index + 1, 0xf0, 6, 0x0a, 4, ...Array.from(language, (character) => character.charCodeAt(0)), 0])],
+  ];
+  const bytes = new Uint8Array(188 * 3).fill(255);
+  tables.forEach((table, index) => {
+    const length = table.length + 1;
+    table[1] = 0xb0 | (length >> 8); table[2] = length & 255;
+    let crc = 0xffffffff;
+    for (const byte of table) {
+      crc ^= byte << 24;
+      for (let bit = 0; bit < 8; bit++) crc = (crc << 1) ^ (crc & 0x80000000 ? 0x04c11db7 : 0);
+    }
+    bytes.set([0x47, 0x40 | index, 0, 0x10, 0, ...table,
+      (crc >>> 24) & 255, (crc >>> 16) & 255, (crc >>> 8) & 255, crc & 255], index * 188);
+  });
+  bytes.set([0x47, 0x1f, 0xff, 0x10], 376);
+  return bytes;
+}
+
 function playbackResponse(url: unknown): Response {
   const path = new URL(String(url)).pathname;
   if (path.endsWith('/segment.ts')) return new Response(MEDIA_BYTES, { headers: { 'Content-Type': 'video/mp2t' } });
@@ -126,7 +148,7 @@ describe('VidNest stream catalog', () => {
       const name = new URL(String(url)).pathname.slice(1);
       if (name === 'failed') throw new Error('Upstream private details');
       if (name === 'html') return new Response('<html>unavailable</html>');
-      if (name === 'oversized') return new Response('x'.repeat(256 * 1024 + 1));
+      if (name === 'oversized') return new Response('x'.repeat(1024 * 1024 + 1));
       return new Response(new ReadableStream({ cancel }));
     }));
     const responsePromise = GET(request());
@@ -142,7 +164,7 @@ describe('VidNest stream catalog', () => {
     vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
       if (isResolver(url)) return resolved([{ url: 'https://cdn.example/large' }, { url: 'https://cdn.example/failed' }]);
       return new Response(new ReadableStream({ cancel }), String(url).endsWith('large')
-        ? { headers: { 'Content-Length': String(256 * 1024 + 1) } } : { status: 503 });
+        ? { headers: { 'Content-Length': String(1024 * 1024 + 1) } } : { status: 503 });
     }));
     const streams = await catalog(await GET(request()));
     expect(streams).toHaveLength(2);
@@ -253,6 +275,109 @@ describe('VidNest stream catalog', () => {
     expect(streams).toHaveLength(1);
     expect(streams[0]!.startupLatencyMs).toEqual(expect.any(Number));
     expect(fetchMock).toHaveBeenCalledTimes(5);
+  });
+
+  it('reads legitimate child playlists larger than 256 KiB and catalogs real cross-source audio languages', async () => {
+    const languages = ['hin', 'eng', 'und'];
+    const largeMedia = MEDIA + '#padding\n'.repeat(33000);
+    expect(largeMedia.length).toBeGreaterThan(256 * 1024);
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (isResolver(url)) return resolved(languages.map((_, index) => ({ url: `https://cdn.example/${index}/master.m3u8` })));
+      const target = new URL(String(url));
+      if (target.pathname.endsWith('master.m3u8')) return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000,CODECS="avc1.42e01e,mp4a.40.2"\nvideo.m3u8');
+      if (target.pathname.endsWith('video.m3u8')) return new Response(largeMedia, { headers: { 'Content-Length': String(largeMedia.length) } });
+      expect(new Headers(init?.headers).get('range')).toBe('bytes=0-262143');
+      return new Response(muxedAudio([languages[Number(target.pathname.split('/')[1])]!]));
+    }));
+    const streams = await catalog(await GET(request()));
+    expect(streams.map((stream) => stream.audioTracks)).toEqual([
+      [{ id: 'decoded:hin:0', language: 'hin', label: 'Hindi', default: true }],
+      [{ id: 'decoded:eng:0', language: 'eng', label: 'English', default: true }], [],
+    ]);
+    expect(streams.every((stream) => stream.startupLatencyMs !== undefined && stream.subtitles.length === 0)).toBe(true);
+    expect(JSON.stringify(streams)).not.toMatch(/cdn\.example|"headers"/);
+  });
+
+  it('exposes multiple decoded languages only for separate audio elementary streams', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => isResolver(url)
+      ? resolved([{ url: 'https://cdn.example/media.m3u8' }])
+      : new Response(String(url).endsWith('.ts') ? muxedAudio(['eng', 'hin']) : MEDIA)));
+    expect((await catalog(await GET(request())))[0]!.audioTracks).toEqual([
+      { id: 'decoded:eng:0', language: 'eng', label: 'English', default: true },
+      { id: 'decoded:hin:1', language: 'hin', label: 'Hindi' },
+    ]);
+  });
+
+  it('still rejects child playlists over the 1 MiB hard cap without probing media', async () => {
+    const fetchMock = vi.fn(async (url: unknown) => {
+      if (isResolver(url)) return resolved([{ url: 'https://cdn.example/master.m3u8' }]);
+      return String(url).endsWith('master.m3u8')
+        ? new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nvideo.m3u8')
+        : new Response(MEDIA + '#padding\n'.repeat(120000));
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const streams = await catalog(await GET(request()));
+    expect(streams[0]!.audioTracks).toEqual([]);
+    expect(streams[0]!.startupLatencyMs).toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('decodes a complete PSI table ending between geometric rescans at EOF', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
+      if (isResolver(url)) return resolved([{ url: 'https://cdn.example/media.m3u8' }]);
+      if (!String(url).endsWith('.ts')) return new Response(MEDIA);
+      return new Response(new ReadableStream({ start(controller) {
+        for (const byte of muxedAudio(['hin'])) controller.enqueue(new Uint8Array([byte]));
+        controller.close();
+      } }));
+    }));
+    expect((await catalog(await GET(request())))[0]!.audioTracks)
+      .toEqual([{ id: 'decoded:hin:0', language: 'hin', label: 'Hindi', default: true }]);
+  });
+
+  it('preserves declared audio groups and gateway languages instead of adding decoded alternatives', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => isResolver(url)
+      ? resolved([{ url: 'https://cdn.example/group.m3u8' }, { url: 'https://cdn.example/gateway.m3u8', audioLanguage: 'hi' }])
+      : new Response(String(url).endsWith('group.m3u8') ? MASTER : String(url).endsWith('.ts') ? muxedAudio(['eng']) : MEDIA)));
+    const streams = await catalog(await GET(request()));
+    expect(streams[0]!.audioTracks).toEqual([{ id: '0', language: 'en', label: 'English', default: true }]);
+    expect(streams[1]!.audioTracks).toEqual([{ id: 'muxed', language: 'hi', label: 'hi', default: true }]);
+  });
+
+  it('decodes audio through the targeted short-200 TS no-Range retry', async () => {
+    const ranges: Array<string | null> = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown, init?: RequestInit) => {
+      if (isResolver(url)) return resolved([{ url: 'https://cdn.example/media.m3u8' }]);
+      if (!String(url).endsWith('.ts')) return new Response(MEDIA);
+      const range = new Headers(init?.headers).get('range'); ranges.push(range);
+      return new Response(range ? muxedAudio(['hin']).subarray(0, 254) : muxedAudio(['hin']), { status: 200 });
+    }));
+    const stream = (await catalog(await GET(request())))[0]!;
+    expect(stream.audioTracks).toEqual([{ id: 'decoded:hin:0', language: 'hin', label: 'Hindi', default: true }]);
+    expect(stream.startupLatencyMs).toEqual(expect.any(Number));
+    expect(ranges).toEqual(['bytes=0-262143', null]);
+  });
+
+  it('includes arrival and decoding of a later PMT in startup latency and cancels after complete metadata', async () => {
+    vi.useFakeTimers();
+    const bytes = muxedAudio(['eng']);
+    const cancel = vi.fn();
+    vi.stubGlobal('fetch', vi.fn(async (url: unknown) => {
+      if (isResolver(url)) return resolved([{ url: 'https://cdn.example/media.m3u8' }]);
+      if (!String(url).endsWith('.ts')) return new Response(MEDIA);
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(new Uint8Array(Buffer.concat([bytes.subarray(0, 188), bytes.subarray(376), bytes.subarray(376)])));
+        setTimeout(() => controller.enqueue(bytes.subarray(188, 376)), 150);
+      }, cancel }));
+    }));
+    let done = false;
+    const pending = GET(request()).then((response) => { done = true; return response; });
+    await vi.advanceTimersByTimeAsync(149); expect(done).toBe(false);
+    await vi.advanceTimersByTimeAsync(2);
+    const stream = (await catalog(await pending))[0]!;
+    expect(stream.audioTracks[0]!.language).toBe('eng');
+    expect(stream.startupLatencyMs).toBe(150);
+    expect(cancel).toHaveBeenCalledOnce();
   });
 
   it('bounds resolver time, deduplicates its timeout, and retries after timeout', async () => {

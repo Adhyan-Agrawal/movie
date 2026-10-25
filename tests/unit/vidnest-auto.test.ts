@@ -168,12 +168,14 @@ describe('VidNest automatic healthy startup', () => {
 
   it('cancels a Range-ignoring media body after at most the bounded startup prefix', async () => {
     const cancel = vi.fn();
+    const boundedBytes = new Uint8Array(256 * 1024);
+    boundedBytes.set(BYTES);
     const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
       const target = new URL(String(url));
       if (target.pathname === '/api/resolve') return resolution(['bounded']);
       if (target.pathname.endsWith('master.m3u8')) return new Response(MEDIA);
-      expect(new Headers(init?.headers).get('range')).toBe('bytes=0-1023');
-      return new Response(new ReadableStream({ start(controller) { controller.enqueue(BYTES); }, cancel }), {
+      expect(new Headers(init?.headers).get('range')).toBe('bytes=0-262143');
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(boundedBytes); }, cancel }), {
         headers: { 'Content-Length': '1000000000' },
       });
     });
@@ -360,7 +362,7 @@ describe('VidNest automatic healthy startup', () => {
       return new Response(bytes, { status: 206, headers: { 'Content-Range': `bytes ${offset}-${offset + bytes.length - 1}/5000` } });
     }));
     expect((await GET(request())).status).toBe(200);
-    expect(ranges).toEqual(['bytes=0-799', 'bytes=800-1823']);
+    expect(ranges).toEqual(['bytes=0-799', 'bytes=800-2847']);
   });
 
   it('rejects unsafe startup redirects before requesting the insecure destination', async () => {

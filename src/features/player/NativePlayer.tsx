@@ -3,15 +3,18 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type Player from 'video.js/dist/types/player';
-import type { DirectStream, Quality } from '@/lib/providers/types';
+import type { DirectStream, Quality, Track } from '@/lib/providers/types';
 import { reportProgressAction } from '@/features/playback/progress-actions';
 import { readGuestEntries, updateGuestPosition } from '@/features/playback/guest-watch';
 import { markPlaybackCheckpointSynced, playbackMediaKey, readPlaybackCheckpoint, writePlaybackCheckpoint, type PlaybackCheckpoint } from '@/features/playback/playback-checkpoint';
 import { shiftedCueTiming } from './subtitle-timing';
+import { requestCasting, type CastingHandle, type CastingProgress } from './casting';
 import { aggregateStreamOptions, chooseStream, preferencesForStream, qualityKey, trackKey, type StreamPreferences, type StreamOption } from './stream-options';
 
 export interface NativePlayerProps {
   source: { url: string; kind: 'mp4' | 'hls' | 'dash'; streamCatalogUrl?: string };
+  subtitleCatalogUrl?: string;
+  upNext?: { name: string; href: string; posterUrl?: string };
   titleId: string;
   titleSlug: string;
   titleName?: string;
@@ -90,9 +93,8 @@ function formatTime(seconds: number): string {
 function configureMediaElement(player: Player): void {
   const video = player.el().querySelector('video');
   if (!(video instanceof HTMLVideoElement)) return;
-  try { (video as HTMLVideoElement & { controlsList?: { add: (...tokens: string[]) => void } }).controlsList?.add('nodownload', 'noremoteplayback'); } catch { /* Unsupported browser. */ }
+  try { (video as HTMLVideoElement & { controlsList?: { add: (...tokens: string[]) => void } }).controlsList?.add('nodownload'); } catch { /* Unsupported browser. */ }
   video.disablePictureInPicture = true;
-  video.disableRemotePlayback = true;
   video.playsInline = true;
 }
 
@@ -106,7 +108,7 @@ export function NativePlayer(props: NativePlayerProps) {
   const delayRef = useRef<(offset: number) => void>(() => {});
   const [options, setOptions] = useState<{ qualities: StreamOption[]; audioTracks: StreamOption[]; subtitles: StreamOption[] }>({ qualities: [], audioTracks: [], subtitles: [] });
   const [preferences, setPreferences] = useState<StreamPreferences>(INITIAL_PREFERENCES);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [activePanel, setActivePanel] = useState<'quality' | 'audio' | 'subtitles' | 'settings' | null>(null);
   const [portalTarget, setPortalTarget] = useState<Element | null>(null);
   const [timingOffset, setTimingOffset] = useState(0);
   const [progress, setProgress] = useState({ position: 0, duration: 0 });
@@ -114,9 +116,15 @@ export function NativePlayer(props: NativePlayerProps) {
   const [catalogStatus, setCatalogStatus] = useState<'loading' | 'ready' | 'unavailable'>('ready');
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
   const [fastestAvailable, setFastestAvailable] = useState(false);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [seekFeedback, setSeekFeedback] = useState<{ side: 'left' | 'right'; sequence: number } | null>(null);
   const settingsId = useId();
   const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const speedRef = useRef<(rate: number) => void>(() => {});
+  const castActionRef = useRef<() => void>(() => {});
+  const castCommandRef = useRef<(command: 'play' | 'pause' | 'back' | 'forward') => void>(() => {});
+  const [castStatus, setCastStatus] = useState<{ state: 'idle' | 'connecting' | 'connected' | 'error'; message?: string }>({ state: 'idle' });
+  const [remoteProgress, setRemoteProgress] = useState<CastingProgress | null>(null);
   const hasCoordinates = seasonNumber !== undefined && episodeNumber !== undefined;
   const mediaKey = playbackMediaKey(titleId, hasCoordinates ? undefined : episodeId, seasonNumber, episodeNumber);
 
@@ -130,18 +138,25 @@ export function NativePlayer(props: NativePlayerProps) {
     const abortController = new AbortController();
     const startProps = latestProps.current;
     let local = readPlaybackCheckpoint(viewerKey, mediaKey);
-    if (!local && episodeId) local = readPlaybackCheckpoint(viewerKey, playbackMediaKey(titleId, episodeId));
+    let localNeedsMigration = false;
+    if (!local && episodeId) {
+      local = readPlaybackCheckpoint(viewerKey, playbackMediaKey(titleId, episodeId));
+      localNeedsMigration = Boolean(local);
+    }
     if (!local && viewerKey === 'guest') {
       const previous = readGuestEntries().find((entry) => entry.slug === titleSlug && (hasCoordinates
         ? entry.type === 'tv' && entry.seasonNumber === seasonNumber && entry.episodeNumber === episodeNumber
         : episodeId ? entry.type === 'tv' && entry.episodeId === episodeId : entry.type === 'movie'));
-      if (previous?.positionSeconds !== undefined) local = { positionSeconds: previous.positionSeconds, updatedAt: previous.updatedAt };
+      if (previous?.positionSeconds !== undefined) {
+        local = { positionSeconds: previous.positionSeconds, updatedAt: previous.updatedAt };
+        localNeedsMigration = true;
+      }
     }
     const useLocal = Boolean(local && (local.pendingSync || local.updatedAt > (startProps.resumeUpdatedAt ?? 0)));
     const resumePosition = local && useLocal
       ? local.positionSeconds : Math.max(0, startProps.initialPosition ?? 0);
-    if (local && useLocal) {
-      writePlaybackCheckpoint(viewerKey, mediaKey, local.positionSeconds, local.durationSeconds, local.pendingSync ?? false);
+    if (local && useLocal && localNeedsMigration) {
+      writePlaybackCheckpoint(viewerKey, mediaKey, local.positionSeconds, local.durationSeconds, local.pendingSync ?? false, local.updatedAt);
     }
     let resumed = false;
     let sourceReady = false;
@@ -149,6 +164,7 @@ export function NativePlayer(props: NativePlayerProps) {
     let currentUrl = source.url;
     let currentCatalogId = source.streamCatalogUrl ? new URL(source.url, window.location.href).searchParams.get('stream') ?? '0' : undefined;
     let catalog: DirectStream[] = [];
+    let externalSubtitles: Track[] = [];
     let catalogPending = Boolean(source.streamCatalogUrl);
     let userSelected = false;
     let explicitAudio = false;
@@ -165,20 +181,22 @@ export function NativePlayer(props: NativePlayerProps) {
     let readyReported = false;
     let fatalReported = false;
     let switchTimer: ReturnType<typeof setTimeout> | undefined;
+    let castHandle: CastingHandle | null = null;
+    let lastRemote: CastingProgress | null = null;
+    let lastCastReportAt = 0;
     const failedStreams = new Set<string>();
     setOptions({ qualities: [], audioTracks: [], subtitles: [] });
-    setPreferences(desired); setSettingsOpen(false); setTimingOffset(0);
+    setPreferences(desired); setActivePanel(null); setTimingOffset(0); setPlaybackRate(1);
     setProgress({ position: resumePosition, duration: local?.durationSeconds ?? 0 });
-    setSwitching(false); setSeekFeedback(null); setSelectionNotice(null); setFastestAvailable(false);
+    setSwitching(false); setSeekFeedback(null); setSelectionNotice(null); setFastestAvailable(false); setCastStatus({ state: 'idle' }); setRemoteProgress(null);
     setCatalogStatus(source.streamCatalogUrl ? 'loading' : 'ready');
 
     // React owns only this container. Video.js owns its imperative element, including fullscreen.
     const videoElement = document.createElement('video-js');
     videoElement.className = 'video-js lumora-videojs h-full w-full';
     videoElement.setAttribute('aria-label', startProps.titleName ? `Watch ${startProps.titleName}` : 'Video player');
-    videoElement.setAttribute('controlslist', 'nodownload noremoteplayback');
+    videoElement.setAttribute('controlslist', 'nodownload');
     videoElement.setAttribute('disablepictureinpicture', '');
-    videoElement.setAttribute('disableremoteplayback', '');
     container.appendChild(videoElement);
 
     const markReady = () => {
@@ -271,16 +289,10 @@ export function NativePlayer(props: NativePlayerProps) {
         const now = videoPlayer.currentTime() ?? 0;
         const candidates = new Set<TextTrackCue>();
         if (cues?.length) {
-          // HLS cues can accumulate for a whole film. Limit work to a bounded window around playback.
-          let low = 0; let high = cues.length;
-          while (low < high) {
-            const middle = (low + high) >>> 1;
-            if ((cues[middle]?.endTime ?? 0) + subtitleOffset < now - 120) low = middle + 1;
-            else high = middle;
-          }
-          for (let index = low; index < cues.length && index < low + 600; index += 1) {
+          // Loader cues can overlap and arrive out of order, so do not binary-search their native list.
+          for (let index = 0; index < cues.length && index < 20_000; index += 1) {
             const cue = cues[index] as VTTCue;
-            if (cue.startTime + subtitleOffset > now + 180) break;
+            if (cue.endTime + subtitleOffset < now - 120 || cue.startTime + subtitleOffset > now + 180) continue;
             const timing = shiftedCueTiming(cue.startTime, cue.endTime, subtitleOffset);
             if (!timing || typeof cue.text !== 'string') continue;
             candidates.add(cue);
@@ -319,21 +331,31 @@ export function NativePlayer(props: NativePlayerProps) {
           id: metadata?.id ?? 'current', url: currentUrl,
           ...(metadata?.startupLatencyMs !== undefined ? { startupLatencyMs: metadata.startupLatencyMs } : {}),
           qualities: [...(metadata?.qualities ?? []), ...entries(qualityList).map(renditionQuality)],
-          audioTracks: [...(metadata?.audioTracks ?? []), ...entries(audioList).map((track) => ({ id: track.id, label: track.label || track.language || 'Default audio', language: track.language, default: track.enabled }))],
-          subtitles: [...(metadata?.subtitles ?? []), ...realTextTracks().map((track) => ({ id: track.id, label: track.label || track.language || 'Subtitles', language: track.language, kind: track.kind as 'subtitles' | 'captions' }))],
+          audioTracks: metadata?.audioTracks.length ? metadata.audioTracks : entries(audioList).map((track) => ({ id: track.id, label: track.label || track.language || 'Default audio', language: track.language, default: track.enabled })),
+          subtitles: [...(metadata?.subtitles ?? []), ...externalSubtitles, ...realTextTracks().map((track) => ({ id: track.id, label: track.label || track.language || 'Subtitles', language: track.language, kind: track.kind as 'subtitles' | 'captions' }))],
         };
       };
       const availableStreams = () => {
         const current = runtimeStream();
-        return [...catalog.filter((stream) => stream.id !== current.id && stream.url !== currentUrl), current];
+        return [...catalog.filter((stream) => stream.id !== current.id && stream.url !== currentUrl)
+          .map((stream) => ({ ...stream, subtitles: [...stream.subtitles, ...externalSubtitles] })), current];
       };
       const updatePreferences = () => setPreferences({ ...desired });
       const installSidecars = () => {
         const stream = currentMetadata();
-        for (const track of stream?.subtitles ?? []) {
-          if (!track.url || sidecars.has(track.id) || realTextTracks().some((existing) => trackKey(existing) === trackKey(track))) continue;
+        const candidate = [...(stream?.subtitles ?? []), ...externalSubtitles]
+          .find((track) => track.url && trackKey(track) === desired.subtitle);
+        for (const [key, element] of sidecars) {
+          if (candidate && key === trackKey(candidate)) continue;
+          element.removeEventListener('load', scheduleRefresh);
+          videoPlayer.removeRemoteTextTrack(element);
+          sidecars.delete(key);
+        }
+        for (const track of candidate ? [candidate] : []) {
+          const key = trackKey(track);
+          if (!track.url || sidecars.has(key) || realTextTracks().some((existing) => trackKey(existing) === key)) continue;
           const element = videoPlayer.addRemoteTextTrack({ id: track.id, src: track.url, kind: track.kind, label: track.label, language: track.language, srclang: track.language, default: false }, true) as RemoteTrack;
-          sidecars.set(track.id, element);
+          sidecars.set(key, element);
           element.addEventListener('load', scheduleRefresh);
         }
       };
@@ -362,7 +384,7 @@ export function NativePlayer(props: NativePlayerProps) {
           clearInterval(subtitleTimer);
           clearPresentation(); selectedSubtitle = subtitleChoice;
           // Reconcile late-arriving HLS/sidecar cues even while paused, without patching loader cues.
-          if (selectedSubtitle) subtitleTimer = setInterval(reconcileCues, 250);
+          if (selectedSubtitle) subtitleTimer = setInterval(reconcileCues, 750);
         }
         if (selectedSubtitle) ensurePresentation();
         for (const track of subtitles) {
@@ -399,7 +421,7 @@ export function NativePlayer(props: NativePlayerProps) {
         sidecars.clear();
       };
       const loadStream = (stream: DirectStream) => {
-        if (stream.url === currentUrl) { applyChoices(); return; }
+        if (stream.url === currentUrl) { installSidecars(); applyChoices(); return; }
         flush();
         pendingPosition = pendingPosition ?? { position: resumed ? videoPlayer.currentTime() ?? 0 : resumePosition, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
         sourceReady = false;
@@ -450,6 +472,44 @@ export function NativePlayer(props: NativePlayerProps) {
         clearPresentation();
         if (presentation && selectedSubtitle) presentation.mode = 'showing';
         reconcileCues();
+      };
+      speedRef.current = (rate) => {
+        if (![0.5, 0.75, 1, 1.25, 1.5, 2].includes(rate)) return;
+        videoPlayer.playbackRate(rate);
+        setPlaybackRate(rate);
+      };
+      castActionRef.current = () => {
+        if (castHandle) {
+          castHandle.stop(); castHandle = null;
+          setCastStatus({ state: 'idle' });
+          return;
+        }
+        const mediaElement = videoPlayer.el().querySelector('video');
+        if (!(mediaElement instanceof HTMLVideoElement)) return;
+        setCastStatus({ state: 'connecting', message: 'Choose a device' });
+        void requestCasting(mediaElement, {
+          url: currentUrl, contentType: mimeType(source.kind),
+          ...(titleName ? { title: titleName } : {}),
+          ...(startProps.posterUrl ? { posterUrl: startProps.posterUrl } : {}),
+          positionSeconds: videoPlayer.currentTime() ?? 0, autoplay: !videoPlayer.paused(),
+        }, (remote) => {
+          setProgress({ position: remote.positionSeconds, duration: remote.durationSeconds ?? 0 });
+          const canReport = viewerKey.startsWith('account:') && Boolean(episodeId || (seasonNumber === undefined && episodeNumber === undefined));
+          const checkpoint = writePlaybackCheckpoint(viewerKey, mediaKey, remote.positionSeconds, remote.durationSeconds, canReport);
+          if (viewerKey === 'guest') {
+            updateGuestPosition(titleSlug, remote.positionSeconds, remote.durationSeconds, { episodeId, seasonNumber, episodeNumber });
+          } else if (canReport) {
+            queuedReport = { positionSeconds: remote.positionSeconds, durationSeconds: remote.durationSeconds, checkpoint };
+            void sendReports();
+          }
+        }, () => { castHandle = null; setCastStatus({ state: 'idle' }); })
+          .then((handle) => {
+            if (!handle) { setCastStatus({ state: 'idle', message: 'Device picker opened' }); return; }
+            castHandle = handle;
+            videoPlayer.pause();
+            setCastStatus({ state: 'connected', message: handle.deviceName });
+          })
+          .catch((error: unknown) => setCastStatus({ state: 'error', message: error instanceof Error ? error.message : 'Casting could not start.' }));
       };
 
       const updateProgress = () => {
@@ -543,6 +603,7 @@ export function NativePlayer(props: NativePlayerProps) {
       videoPlayer.on('loadedmetadata', handleMetadata);
       videoPlayer.on('loadeddata', scheduleRefresh);
       videoPlayer.on('durationchange', updateProgress);
+      videoPlayer.on('ratechange', () => setPlaybackRate(videoPlayer.playbackRate() ?? 1));
       videoPlayer.on('timeupdate', handleTimeUpdate);
       videoPlayer.on('seeked', handleSeeked);
       videoPlayer.on('pause', handlePause);
@@ -572,6 +633,7 @@ export function NativePlayer(props: NativePlayerProps) {
         playerElement.removeEventListener('dblclick', blockTouchClick, true);
         playerElement.removeEventListener('click', handleSkip);
         clearSidecars();
+        castHandle?.dispose(); castHandle = null;
       };
       configureMediaElement(videoPlayer);
       videoPlayer.ready(() => {
@@ -602,7 +664,9 @@ export function NativePlayer(props: NativePlayerProps) {
                 desired.quality = legacy ? qualityKey(legacy) : 'auto';
                 updatePreferences();
               }
-              choose('quality', desired.quality, false);
+              if (desired.quality !== 'auto' || catalog.some((stream) => Number.isFinite(stream.startupLatencyMs))) {
+                choose('quality', desired.quality, false);
+              }
             }
           })
           .catch(() => {
@@ -610,6 +674,17 @@ export function NativePlayer(props: NativePlayerProps) {
             catalogPending = false; setCatalogStatus('unavailable');
             if (videoPlayer.error()) handlePlaybackError();
           });
+      }
+      if (startProps.subtitleCatalogUrl) {
+        void fetch(startProps.subtitleCatalogUrl, { signal: abortController.signal, credentials: 'same-origin' })
+          .then(async (response) => response.ok ? response.json() as Promise<{ tracks?: Track[] }> : { tracks: [] })
+          .then((result) => {
+            if (cancelled) return;
+            externalSubtitles = Array.isArray(result.tracks) ? result.tracks.filter((track) => track
+              && typeof track.id === 'string' && typeof track.label === 'string' && typeof track.url === 'string'
+              && (track.kind === 'subtitles' || track.kind === 'captions')) : [];
+            refresh();
+          }).catch(() => undefined);
       }
     }).catch(reportFatal);
 
@@ -620,23 +695,25 @@ export function NativePlayer(props: NativePlayerProps) {
       detach();
       chooseRef.current = () => {};
       delayRef.current = () => {};
+      speedRef.current = () => {};
+      castActionRef.current = () => {};
       if (playerRef.current === player) playerRef.current = null;
       const disposedTarget = player?.el();
       setPortalTarget((current) => current === disposedTarget ? null : current);
       if (player && !player.isDisposed()) player.dispose();
       videoElement.remove();
     };
-  }, [source.url, source.kind, source.streamCatalogUrl, titleId, titleSlug, episodeId, seasonNumber, episodeNumber, viewerKey, mediaKey, hasCoordinates]);
+  }, [source.url, source.kind, source.streamCatalogUrl, props.subtitleCatalogUrl, titleId, titleSlug, titleName, episodeId, seasonNumber, episodeNumber, viewerKey, mediaKey, hasCoordinates]);
 
   useEffect(() => {
-    if (!settingsOpen || !portalTarget) return;
+    if (!activePanel || !portalTarget) return;
     const handleOutside = (event: PointerEvent) => {
-      if (event.target instanceof Element && !event.target.closest('[data-player-settings]')) setSettingsOpen(false);
+      if (event.target instanceof Element && !event.target.closest('[data-player-settings]')) setActivePanel(null);
     };
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault(); event.stopPropagation();
-      setSettingsOpen(false); settingsButtonRef.current?.focus();
+      setActivePanel(null); settingsButtonRef.current?.focus();
     };
     document.addEventListener('pointerdown', handleOutside);
     portalTarget.addEventListener('keydown', handleEscape as EventListener);
@@ -644,35 +721,44 @@ export function NativePlayer(props: NativePlayerProps) {
       document.removeEventListener('pointerdown', handleOutside);
       portalTarget.removeEventListener('keydown', handleEscape as EventListener);
     };
-  }, [settingsOpen, portalTarget]);
+  }, [activePanel, portalTarget]);
 
   const percentage = progress.duration > 0 ? Math.min(100, Math.max(0, progress.position / progress.duration * 100)) : null;
   const subtitlesAvailable = options.subtitles.length > 0;
   const audioAvailable = options.audioTracks.length > 0;
+  const upNextVisible = Boolean(props.upNext && progress.duration > 0 && progress.duration - progress.position <= 90);
+  const togglePanel = (panel: NonNullable<typeof activePanel>) => setActivePanel((current) => current === panel ? null : panel);
 
   return <div className="lumora-player-frame relative h-full w-full bg-black">
     <div ref={containerRef} data-vjs-player="" className="h-full w-full" onContextMenu={(event) => event.preventDefault()} />
     {portalTarget ? createPortal(<>
       <div className="lumora-player-heading" aria-hidden="true"><span className="lumora-player-eyebrow">Now Playing</span>{titleName ? <span className="lumora-player-title">{titleName}</span> : null}</div>
-      <div className={`lumora-player-tools${settingsOpen ? ' is-open' : ''}`} data-player-ui="">
+      <div className={`lumora-player-tools${activePanel ? ' is-open' : ''}`} data-player-ui="">
         <div className="lumora-player-progress" aria-label={`Watched ${formatTime(progress.position)} of ${progress.duration ? formatTime(progress.duration) : 'unknown duration'}${percentage !== null ? `, ${Math.round(percentage)} percent` : ''}`}>
           <span className="lumora-player-eyebrow">Watched</span><span className="lumora-player-clock">{formatTime(progress.position)}<span> / {progress.duration ? formatTime(progress.duration) : '--:--'}</span></span>
           <span className="lumora-player-percent">{percentage !== null ? `${Math.round(percentage)}%` : '--%'}</span>
         </div>
         <div className="lumora-player-settings-anchor" data-player-settings="">
-          <button ref={settingsButtonRef} type="button" onClick={() => { setSettingsOpen((open) => !open); playerRef.current?.userActive(true); }} aria-expanded={settingsOpen} aria-controls={settingsId} className="lumora-player-settings-button"><SettingsIcon /><span>Settings</span></button>
-          {settingsOpen ? <div id={settingsId} className="lumora-player-settings" role="region" aria-label="Playback settings">
-            <div className="lumora-player-settings-heading"><span>Playback settings</span><span className="lumora-player-eyebrow">Fine Tune</span></div>
-             <SettingsSelect label="Quality" value={preferences.quality} onChange={(id) => chooseRef.current('quality', id)}><option value="auto">{fastestAvailable ? 'Auto (fastest compatible)' : options.qualities.length ? 'Auto (adaptive)' : 'Original quality'}</option>{options.qualities.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</SettingsSelect>
-            <SettingsSelect label="Audio" value={audioAvailable ? preferences.audio : 'unavailable'} disabled={options.audioTracks.length <= 1} status={options.audioTracks.length === 1 ? 'Single track' : !audioAvailable ? 'No alternate tracks reported' : undefined} onChange={(id) => chooseRef.current('audio', id)}>{audioAvailable ? options.audioTracks.map((track) => <option key={track.id} value={track.id}>{track.label}</option>) : <option value="unavailable">Default stream audio</option>}</SettingsSelect>
-            <SettingsSelect label="Subtitles" value={preferences.subtitle} disabled={!subtitlesAvailable} status={!subtitlesAvailable ? 'No subtitles reported' : undefined} onChange={(id) => chooseRef.current('subtitle', id)}><option value="off">{subtitlesAvailable ? 'Off' : 'Unavailable'}</option>{options.subtitles.map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}</SettingsSelect>
-            <div className="lumora-subtitle-timing"><div><span>Subtitle timing</span><output aria-label="Subtitle timing offset">{timingOffset > 0 ? '+' : ''}{timingOffset.toFixed(2)}s</output></div><div className="lumora-subtitle-timing-controls"><button type="button" disabled={!subtitlesAvailable || preferences.subtitle === 'off' || timingOffset <= -10} aria-label="Advance subtitles by 0.25 seconds" onClick={() => delayRef.current(timingOffset - 0.25)}>-0.25s</button><button type="button" disabled={!subtitlesAvailable || timingOffset === 0} aria-label="Reset subtitle timing" onClick={() => delayRef.current(0)}>Reset</button><button type="button" disabled={!subtitlesAvailable || preferences.subtitle === 'off' || timingOffset >= 10} aria-label="Delay subtitles by 0.25 seconds" onClick={() => delayRef.current(timingOffset + 0.25)}>+0.25s</button></div><p>Negative: earlier. Positive: later.</p></div>
-            {!source.streamCatalogUrl && sources.length > 1 && onSelectSource ? <SettingsSelect label="Playback fallback" value={selectedSourceId ?? sources[0]?.id ?? ''} onChange={onSelectSource}>{sources.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</SettingsSelect> : null}
-             {catalogStatus !== 'ready' ? <p className="lumora-player-catalog-status" role="status">{catalogStatus === 'loading' ? 'Discovering available quality and language options...' : 'Some stream options could not be loaded. Current playback is unaffected.'}</p> : null}
-             {selectionNotice ? <p className="lumora-player-catalog-status" role="status">{selectionNotice}</p> : null}
+          <div className="lumora-player-toolbar" role="toolbar" aria-label="Playback options">
+            <ToolButton label="Quality" active={activePanel === 'quality'} onClick={() => togglePanel('quality')}><QualityIcon /></ToolButton>
+            <ToolButton label="Audio" active={activePanel === 'audio'} onClick={() => togglePanel('audio')}><AudioIcon /></ToolButton>
+            <ToolButton label="Subtitles" active={activePanel === 'subtitles'} onClick={() => togglePanel('subtitles')}><SubtitleIcon /></ToolButton>
+            <ToolButton label={castStatus.state === 'connected' ? 'Stop casting' : 'Cast'} active={castStatus.state === 'connected'} onClick={() => castActionRef.current()}><CastIcon /></ToolButton>
+            <button ref={settingsButtonRef} type="button" onClick={() => { togglePanel('settings'); playerRef.current?.userActive(true); }} aria-label="Settings" aria-expanded={activePanel === 'settings'} aria-controls={settingsId} className="lumora-player-settings-button"><SettingsIcon /></button>
+          </div>
+          {activePanel ? <div id={settingsId} className="lumora-player-settings" role="region" aria-label={`${activePanel[0]!.toUpperCase()}${activePanel.slice(1)} settings`}>
+            <div className="lumora-player-settings-heading"><span>{activePanel === 'settings' ? 'Playback' : activePanel[0]!.toUpperCase() + activePanel.slice(1)}</span><span className="lumora-player-eyebrow">{activePanel === 'settings' ? 'Settings' : 'Choose'}</span></div>
+            {activePanel === 'quality' ? <SettingsSelect label="Quality" value={preferences.quality} onChange={(id) => chooseRef.current('quality', id)}><option value="auto">{fastestAvailable ? 'Auto (fastest compatible)' : options.qualities.length ? 'Auto (adaptive)' : 'Original quality'}</option>{options.qualities.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</SettingsSelect> : null}
+            {activePanel === 'audio' ? <SettingsSelect label="Audio" value={audioAvailable ? preferences.audio : 'unavailable'} disabled={options.audioTracks.length <= 1} status={options.audioTracks.length === 1 ? 'Single track' : !audioAvailable ? 'No alternate tracks reported' : undefined} onChange={(id) => chooseRef.current('audio', id)}>{audioAvailable ? options.audioTracks.map((track) => <option key={track.id} value={track.id}>{track.label}</option>) : <option value="unavailable">Default stream audio</option>}</SettingsSelect> : null}
+            {activePanel === 'subtitles' ? <><SettingsSelect label="Subtitles" value={preferences.subtitle} disabled={!subtitlesAvailable} status={!subtitlesAvailable ? 'No subtitles reported' : undefined} onChange={(id) => chooseRef.current('subtitle', id)}><option value="off">{subtitlesAvailable ? 'Off' : 'Unavailable'}</option>{options.subtitles.map((track) => <option key={track.id} value={track.id}>{track.label}</option>)}</SettingsSelect><div className="lumora-subtitle-timing"><div><span>Subtitle timing</span><output aria-label="Subtitle timing offset">{timingOffset > 0 ? '+' : ''}{timingOffset.toFixed(2)}s</output></div><div className="lumora-subtitle-timing-controls"><button type="button" disabled={!subtitlesAvailable || preferences.subtitle === 'off' || timingOffset <= -10} aria-label="Advance subtitles by 0.25 seconds" onClick={() => delayRef.current(timingOffset - 0.25)}>-0.25s</button><button type="button" disabled={!subtitlesAvailable || timingOffset === 0} aria-label="Reset subtitle timing" onClick={() => delayRef.current(0)}>Reset</button><button type="button" disabled={!subtitlesAvailable || preferences.subtitle === 'off' || timingOffset >= 10} aria-label="Delay subtitles by 0.25 seconds" onClick={() => delayRef.current(timingOffset + 0.25)}>+0.25s</button></div><p>Negative plays captions earlier. Positive plays them later.</p></div></> : null}
+            {activePanel === 'settings' ? <><SettingsSelect label="Playback speed" value={String(playbackRate)} onChange={(value) => speedRef.current(Number(value))}>{[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => <option key={rate} value={rate}>{rate === 1 ? 'Normal' : `${rate}x`}</option>)}</SettingsSelect>{sources.length > 1 && onSelectSource ? <SettingsSelect label="Playback fallback" value={selectedSourceId ?? sources[0]?.id ?? ''} onChange={onSelectSource}>{sources.map((option) => <option key={option.id} value={option.id}>{option.label}</option>)}</SettingsSelect> : null}</> : null}
+            {catalogStatus !== 'ready' ? <p className="lumora-player-catalog-status" role="status">{catalogStatus === 'loading' ? 'Discovering available quality and language options...' : 'Some stream options could not be loaded. Current playback is unaffected.'}</p> : null}
+            {selectionNotice ? <p className="lumora-player-catalog-status" role="status">{selectionNotice}</p> : null}
           </div> : null}
         </div>
+        {castStatus.message ? <div className={`lumora-player-cast-status is-${castStatus.state}`} role="status">{castStatus.message}</div> : null}
       </div>
+      {upNextVisible && props.upNext ? <a href={props.upNext.href} className="lumora-player-up-next" data-player-ui=""><span className="lumora-player-eyebrow">Up next</span><strong>{props.upNext.name}</strong><span>Play next episode</span></a> : null}
       {switching ? <div className="lumora-player-switch-status" role="status">Updating playback<span>Your position is preserved</span></div> : null}
       {seekFeedback ? <div key={seekFeedback.sequence} className={`lumora-player-seek-feedback is-${seekFeedback.side}`} role="status"><span aria-hidden="true">{seekFeedback.side === 'left' ? '-10' : '+10'}</span><span>{seekFeedback.side === 'left' ? 'Back' : 'Forward'} 10 seconds</span></div> : null}
     </>, portalTarget) : null}
@@ -683,6 +769,15 @@ function SettingsSelect({ label, value, onChange, disabled, status, children }: 
   return <label className="lumora-player-setting"><span>{label}{status ? <small>{status}</small> : null}</span><select aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>{children}</select></label>;
 }
 
-function SettingsIcon() {
-  return <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="2.5" fill="currentColor" stroke="none" /><circle cx="15" cy="17" r="2.5" fill="currentColor" stroke="none" /></svg>;
+function ToolButton({ label, active, onClick, children }: { label: string; active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return <button type="button" className="lumora-player-tool-button" aria-label={label} title={label} aria-pressed={active} onClick={onClick}>{children}<span>{label}</span></button>;
 }
+
+function SettingsIcon() {
+  return <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.88l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.88-.34 1.7 1.7 0 0 0-1.03 1.56V21h-4v-.08A1.7 1.7 0 0 0 9 19.37a1.7 1.7 0 0 0-1.88.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.63 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.63 9a1.7 1.7 0 0 0-.34-1.88l-.06-.06 2.83-2.83.06.06A1.7 1.7 0 0 0 9 4.63 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15 4.63a1.7 1.7 0 0 0 1.88-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.37 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" /></svg>;
+}
+
+function QualityIcon() { return <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" /><path d="m8 14 2.5-3 2.2 2.4 1.7-1.8L17 14" /></svg>; }
+function AudioIcon() { return <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M5 10v4h3l4 3V7L8 10H5Z" /><path d="M15 9a4 4 0 0 1 0 6M17.5 6.5a7.5 7.5 0 0 1 0 11" /></svg>; }
+function SubtitleIcon() { return <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3" /><path d="M6.5 12h5M6.5 15h8M14 12h3.5" /></svg>; }
+function CastIcon() { return <svg viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M4 18.5a1.5 1.5 0 0 1 1.5 1.5M4 14a6 6 0 0 1 6 6M4 9.5A10.5 10.5 0 0 1 14.5 20" /><path d="M6 4h12a2 2 0 0 1 2 2v10" /></svg>; }

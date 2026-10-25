@@ -14,6 +14,75 @@ export function metadataLanguage(value: unknown): string {
   return /^[a-z]{2,3}(?:-[a-z0-9]{2,8})*$/i.test(language) ? language : '';
 }
 
+export function decodedAudioTracks(languages: string[]): DirectAudioTrack[] {
+  return languages.map((language, index) => {
+    let label = language === 'eng' ? 'English' : language === 'hin' ? 'Hindi' : language.toUpperCase();
+    try {
+      const name = new Intl.DisplayNames(['en'], { type: 'language' }).of(language);
+      if (name && name !== language) label = metadataLabel(name) || label;
+    } catch { /* Minimal server ICU builds can fall back to the decoded ISO-639 code. */ }
+    return { id: `decoded:${language}:${index}`, language, label, ...(index === 0 ? { default: true } : {}) };
+  });
+}
+
+/** fMP4 languages belong to audio trak/mdia/mdhd boxes in the bounded initialization segment. */
+export function parseMp4AudioLanguages(input: Uint8Array): { complete: boolean; audioLanguages: string[] } {
+  const bytes = input.subarray(0, 64 * 1024);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  type Box = { type: string; start: number; end: number };
+  const boxAt = (offset: number, end: number): Box | undefined => {
+    if (offset + 8 > end) return undefined;
+    let size = view.getUint32(offset);
+    let header = 8;
+    if (size === 1) {
+      if (offset + 16 > end || view.getUint32(offset + 8)) return undefined;
+      size = view.getUint32(offset + 12); header = 16;
+    }
+    if (size < header || offset + size > end) return undefined;
+    return { type: String.fromCharCode(...bytes.subarray(offset + 4, offset + 8)), start: offset + header, end: offset + size };
+  };
+  const children = (parent: Box): Box[] | undefined => {
+    const result: Box[] = [];
+    for (let offset = parent.start; offset < parent.end;) {
+      const box = boxAt(offset, parent.end);
+      if (!box) return undefined;
+      result.push(box); offset = box.end;
+    }
+    return result;
+  };
+  for (let offset = 0; offset < bytes.length;) {
+    const box = boxAt(offset, bytes.length);
+    if (!box) break;
+    offset = box.end;
+    if (box.type !== 'moov') continue;
+    const tracks = children(box);
+    if (!tracks) break;
+    const audioLanguages: string[] = [];
+    for (const track of tracks.filter((candidate) => candidate.type === 'trak')) {
+      const trackBoxes = children(track);
+      const mdia = trackBoxes?.find((candidate) => candidate.type === 'mdia');
+      if (!mdia) continue;
+      const media = children(mdia);
+      const handler = media?.find((candidate) => candidate.type === 'hdlr');
+      const header = media?.find((candidate) => candidate.type === 'mdhd');
+      if (!handler || handler.start + 12 > handler.end || !header
+        || String.fromCharCode(...bytes.subarray(handler.start + 8, handler.start + 12)) !== 'soun') continue;
+      const version = bytes[header.start];
+      const position = header.start + (version === 0 ? 20 : 32);
+      if ((version !== 0 && version !== 1) || position + 4 > header.end) continue;
+      const packed = view.getUint16(position);
+      // QuickTime's legacy mdhd language code 0 explicitly means English, not ISO-639 "und".
+      if (packed === 0) { audioLanguages.push('eng'); continue; }
+      const codes = [(packed >> 10) & 31, (packed >> 5) & 31, packed & 31];
+      if ((packed & 0x8000) || codes.some((code) => code < 1 || code > 26)) continue;
+      const language = metadataLanguage(String.fromCharCode(...codes.map((code) => code + 96))).toLowerCase();
+      if (language && !['und', 'mul', 'zxx'].includes(language)) audioLanguages.push(language);
+    }
+    return { complete: true, audioLanguages };
+  }
+  return { complete: false, audioLanguages: [] };
+}
+
 export function httpsUrl(value: unknown, base?: string): string | undefined {
   if (typeof value !== 'string' || !value.trim() || /[\r\n]/.test(value)) return undefined;
   try {

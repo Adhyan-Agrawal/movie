@@ -49,6 +49,10 @@ function validPosition(value: unknown): value is number {
     value <= Number.MAX_SAFE_INTEGER;
 }
 
+function validTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 && value <= Date.now();
+}
+
 function readStored(): StoredCheckpoint[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -96,14 +100,15 @@ export function writePlaybackCheckpoint(
   positionSeconds: number,
   durationSeconds?: number,
   pendingSync = false,
+  capturedAt = Date.now(),
 ): PlaybackCheckpoint | null {
   if (!validScope(viewerKey, mediaKey) || !validPosition(positionSeconds) ||
-      typeof pendingSync !== 'boolean' ||
+      typeof pendingSync !== 'boolean' || !validTimestamp(capturedAt) ||
       (durationSeconds !== undefined && !validPosition(durationSeconds))) return null;
   const checkpoint: PlaybackCheckpoint = {
     positionSeconds,
     ...(durationSeconds !== undefined && durationSeconds > 0 ? { durationSeconds } : {}),
-    updatedAt: Date.now(),
+    updatedAt: capturedAt,
     ...(pendingSync ? { pendingSync: true } : {}),
   };
   try {

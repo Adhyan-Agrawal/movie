@@ -1,7 +1,8 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import { NextRequest, NextResponse } from 'next/server';
-import { hasHlsPlaybackUri, hlsStartupPlan, httpsUrl, metadataLabel, metadataLanguage, parseHlsMetadata } from '@/lib/providers/hls-metadata';
+import { decodedAudioTracks, hasHlsPlaybackUri, hlsStartupPlan, httpsUrl, metadataLabel, metadataLanguage, parseHlsMetadata, parseMp4AudioLanguages } from '@/lib/providers/hls-metadata';
+import { parseMpegTsAudioLanguages } from '@/lib/providers/mpeg-ts-metadata';
 import type { DirectStream, Track } from '@/lib/providers/types';
 import { isPrivateOrLoopbackHost } from '@/lib/validation/source';
 
@@ -12,13 +13,15 @@ const TOKEN_TTL_MS = 4 * 60 * 60 * 1000;
 const PLAYLIST_PROBE_BYTES = 1024;
 const PLAYLIST_SIGNATURE = '#EXTM3U';
 const STARTUP_PROBE_BYTES = 1024;
+const STARTUP_METADATA_BYTES = 256 * 1024;
+const INIT_METADATA_BYTES = 64 * 1024;
 const TMDB_ID_RE = /^[1-9]\d{0,9}$/;
 const RESOLVER_TTL_MS = 60_000;
 const CATALOG_TTL_MS = 30_000;
 const RESOLVER_TIMEOUT_MS = 10_000;
 const MANIFEST_TIMEOUT_MS = 4_000;
 const CATALOG_BUDGET_MS = 12_000;
-const MANIFEST_MAX_BYTES = 256 * 1024;
+const MANIFEST_MAX_BYTES = 1024 * 1024;
 const RESOLVER_MAX_BYTES = 1024 * 1024;
 const PROBE_CONCURRENCY = 4;
 const MAX_CACHE_ENTRIES = 128;
@@ -98,10 +101,13 @@ async function boundedText(response: Response, maxBytes: number, signal?: AbortS
 
 async function verifyStartupBytes(
   resource: { url: string; offset: number; length?: number }, headers: StreamHeaders, signal: AbortSignal,
-): Promise<boolean> {
-  const limit = Math.min(STARTUP_PROBE_BYTES, resource.length ?? STARTUP_PROBE_BYTES);
+  options: { decodeAudio: boolean; init?: boolean },
+  useRange = true,
+): Promise<{ verified: boolean; audioLanguages: string[] }> {
+  const maxBytes = options.decodeAudio ? options.init ? INIT_METADATA_BYTES : STARTUP_METADATA_BYTES : STARTUP_PROBE_BYTES;
+  const limit = Math.min(maxBytes, resource.length ?? maxBytes);
   const response = await startupFetch(resource.url, {
-    headers: { ...headers, 'Accept-Encoding': 'identity', Range: `bytes=${resource.offset}-${resource.offset + limit - 1}` },
+    headers: { ...headers, 'Accept-Encoding': 'identity', ...(useRange ? { Range: `bytes=${resource.offset}-${resource.offset + limit - 1}` } : {}) },
     cache: 'no-store', signal,
   });
   const rangeStart = /^bytes (\d+)-\d+\/(?:\d+|\*)$/.exec(response.headers.get('content-range') ?? '');
@@ -116,6 +122,7 @@ async function verifyStartupBytes(
   signal.addEventListener('abort', cancel, { once: true });
   const bytes = new Uint8Array(limit);
   let length = 0;
+  let metadataProbeAt = options.init ? 8 : 377;
   try {
     while (length < limit) {
       if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
@@ -124,17 +131,41 @@ async function verifyStartupBytes(
       const count = Math.min(chunk.value.byteLength, limit - length);
       bytes.set(chunk.value.subarray(0, count), length);
       length += count;
+      if (options.decodeAudio && length >= metadataProbeAt) {
+        // Geometric rescans keep fragmented responses from turning bounded PSI parsing quadratic.
+        metadataProbeAt = length + Math.max(188, Math.floor(length / 8));
+        const sample = bytes.subarray(0, length);
+        const ts = length >= 377 && bytes[0] === 0x47 && bytes[188] === 0x47 && bytes[376] === 0x47;
+        const mp4 = length >= 8 && ['ftyp', 'styp', 'moof'].includes(new TextDecoder().decode(bytes.subarray(4, 8)));
+        const metadata = ts ? parseMpegTsAudioLanguages(sample) : mp4 && options.init ? parseMp4AudioLanguages(sample) : undefined;
+        if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+        if (metadata?.complete) return { verified: true, audioLanguages: metadata.audioLanguages };
+        if (mp4 && !options.init) return { verified: true, audioLanguages: [] };
+      }
     }
     if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
     const box = length >= 8 ? new TextDecoder().decode(bytes.subarray(4, 8)) : '';
     const ts = length >= 377 && bytes[0] === 0x47 && bytes[188] === 0x47 && bytes[376] === 0x47;
     const mp4 = length >= 8 && ['ftyp', 'styp', 'moof'].includes(box);
-    if (ts || mp4) return true;
+    if (ts || mp4) {
+      const metadata = options.decodeAudio
+        ? ts ? parseMpegTsAudioLanguages(bytes.subarray(0, length))
+          : options.init ? parseMp4AudioLanguages(bytes.subarray(0, length)) : undefined
+        : undefined;
+      if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+      return { verified: true, audioLanguages: metadata?.audioLanguages ?? [] };
+    }
+    // Some CDN range handlers truncate TS data despite returning 200. Read only the same bounded prefix normally.
+    if (useRange && resource.offset === 0 && response.status === 200 && length >= 189 && length < 377
+      && bytes[0] === 0x47 && bytes[188] === 0x47) {
+      await reader.cancel();
+      return verifyStartupBytes(resource, headers, signal, options, false);
+    }
     const binary = bytes.subarray(0, length).some((byte) => byte >= 127 || (byte < 32 && ![9, 10, 13].includes(byte)));
     if (!length || !binary || /^[<{\[]/.test(new TextDecoder().decode(bytes.subarray(0, 64)).trimStart())) {
       throw new Error('Startup media is not video data.');
     }
-    return false; // Valid HLS can use a media format this bounded benchmark cannot identify.
+    return { verified: false, audioLanguages: [] }; // Valid HLS can use an unsupported benchmark format.
   } finally {
     cancel(); // A server ignoring Range must never cause a full video download.
     signal.removeEventListener('abort', cancel);
@@ -291,6 +322,7 @@ async function streamCatalog(
       let startupLatencyMs: number | undefined;
       let validManifest: PlaybackManifest | undefined;
       let compatibilityFallback = false;
+      let audioLanguages: string[] = [];
       try {
         const remaining = deadline - Date.now();
         if (remaining <= 0) throw new Error('Metadata discovery deadline reached.');
@@ -327,11 +359,18 @@ async function streamCatalog(
             compatibilityFallback = true;
             return;
           }
-          if ((plan.init && !await verifyStartupBytes(plan.init, stream.headers, signal))
-            || !await verifyStartupBytes(plan.media, stream.headers, signal)) {
+          const decodeAudio = !metadata.audioTracks.length && !stream.audioLanguage;
+          if (plan.init) {
+            const init = await verifyStartupBytes(plan.init, stream.headers, signal, { decodeAudio, init: true });
+            if (!init.verified) { compatibilityFallback = true; return; }
+            audioLanguages = init.audioLanguages;
+          }
+          const media = await verifyStartupBytes(plan.media, stream.headers, signal, { decodeAudio: decodeAudio && !audioLanguages.length });
+          if (!media.verified) {
             compatibilityFallback = true;
             return;
           }
+          if (media.audioLanguages.length) audioLanguages = media.audioLanguages;
           if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
           startupLatencyMs = Math.max(0, Date.now() - start);
           onHealthy({ index, latencyMs: startupLatencyMs, playlist, sourceUrl });
@@ -341,6 +380,7 @@ async function streamCatalog(
         // A failed probe must not hide real streams or prevent initial playback.
       }
       if (validManifest && compatibilityFallback) onFallback(validManifest);
+      if (!metadata.audioTracks.length && !stream.audioLanguage) metadata.audioTracks = decodedAudioTracks(audioLanguages);
       if (!metadata.audioTracks.length && stream.audioLanguage) {
         metadata.audioTracks.push({
           id: 'muxed', label: stream.audioLanguage, language: metadataLanguage(stream.audioLanguage), default: true,

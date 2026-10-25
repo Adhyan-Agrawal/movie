@@ -241,6 +241,7 @@ export default async function WatchPage({
             name: title.name,
             slug: title.slug,
             type: title.type,
+            ...(title.tmdbId ? { tmdbId: title.tmdbId } : {}),
             ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
           }}
           source={publicSources[0] ?? resolved.source}

@@ -17,7 +17,7 @@ const sources: PlaybackSource[] = [
 
 export default function PlayerSmokeTest() {
   return <main className="mx-auto max-w-5xl p-4"><PlayerShell
-    title={{ id: '00000000-0000-4000-8000-000000000000', name: 'Player Lab', slug: 'player-smoke-test', type: 'movie' }}
+    title={{ id: '00000000-0000-4000-8000-000000000000', name: 'Player Lab', slug: 'player-smoke-test', type: 'movie', tmdbId: '27205' }}
     source={sources[0]!}
     sources={sources}
     viewerKey="guest"

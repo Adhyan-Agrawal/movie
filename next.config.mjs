@@ -39,8 +39,8 @@ const PROVIDER_FRAME_HOSTS = [
  */
 const isDev = process.env.NODE_ENV !== 'production';
 const SCRIPT_SRC = isDev
-  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.highperformanceformat.com"
-  : "script-src 'self' 'unsafe-inline' https://www.highperformanceformat.com";
+  ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.highperformanceformat.com https://www.gstatic.com"
+  : "script-src 'self' 'unsafe-inline' https://www.highperformanceformat.com https://www.gstatic.com";
 
 const CONTENT_SECURITY_POLICY = [
   "default-src 'self'",
