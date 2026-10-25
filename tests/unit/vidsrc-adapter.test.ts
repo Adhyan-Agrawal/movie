@@ -207,11 +207,11 @@ describe('registry.resolvePlayback', () => {
   it('returns direct streams followed by enabled embeds in priority order', async () => {
     const resolved = await resolvePlayback(movieTmdb);
     expect(resolved.source).not.toBeNull();
-    // VidNest offers eleven direct servers before the five embed providers.
+    // VidNest unifies direct streams while the five embed providers stay separate.
     expect(resolved.providerId).toBe('vidnest');
-    expect(resolved.sources).toHaveLength(16);
+    expect(resolved.sources).toHaveLength(6);
     expect(resolved.sources.map((s) => s.providerId)).toEqual([
-      ...Array.from({ length: 11 }, () => 'vidnest'),
+      'vidnest',
       'vidsrc-mov',
       '2embed',
       'vidsrc',

@@ -13,6 +13,8 @@
  * mismatches).
  */
 
+import { playbackMediaKey } from './playback-checkpoint';
+
 const STORAGE_KEY = 'lumora:guest-continue-watching';
 const MAX_ENTRIES = 20;
 /** Drop entries not touched for 60 days. */
@@ -38,13 +40,33 @@ function readRaw(): GuestWatchEntry[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return [];
+    if (raw.length > 256_000) return [];
     const parsed = JSON.parse(raw) as GuestWatchEntry[];
     if (!Array.isArray(parsed)) return [];
     const cutoff = Date.now() - MAX_AGE_MS;
-    return parsed.filter((e) => e && typeof e.slug === 'string' && e.updatedAt >= cutoff);
+    return parsed.filter((e) => validEntry(e) && Number.isFinite(e.updatedAt) &&
+      e.updatedAt >= cutoff && e.updatedAt <= Date.now())
+      .sort((a, b) => b.updatedAt - a.updatedAt).slice(0, MAX_ENTRIES);
   } catch {
     return [];
   }
+}
+
+function validEntry(entry: Omit<GuestWatchEntry, 'updatedAt'>): boolean {
+  return Boolean(entry) && typeof entry.slug === 'string' && entry.slug.trim().length > 0 &&
+    entry.slug.length <= 200 && (entry.type === 'movie' || entry.type === 'tv') &&
+    typeof entry.name === 'string' && entry.name.length <= 2_000 &&
+    (entry.posterUrl === undefined || (typeof entry.posterUrl === 'string' && entry.posterUrl.length <= 8_000)) &&
+    (entry.positionSeconds === undefined || (Number.isFinite(entry.positionSeconds) && entry.positionSeconds >= 0)) &&
+    (entry.progress === undefined || (Number.isFinite(entry.progress) && entry.progress >= 0 && entry.progress <= 1)) &&
+    (entry.seasonNumber === undefined || (Number.isSafeInteger(entry.seasonNumber) && entry.seasonNumber >= 0)) &&
+    (entry.episodeNumber === undefined || (Number.isSafeInteger(entry.episodeNumber) && entry.episodeNumber >= 1)) &&
+    Boolean(playbackMediaKey(entry.slug, entry.episodeId, entry.seasonNumber, entry.episodeNumber)) &&
+    (entry.type === 'tv' || (entry.episodeId === undefined && entry.seasonNumber === undefined && entry.episodeNumber === undefined));
+}
+
+function mediaKey(entry: Omit<GuestWatchEntry, 'updatedAt'>): string {
+  return playbackMediaKey(entry.slug, entry.episodeId, entry.seasonNumber, entry.episodeNumber);
 }
 
 function write(entries: GuestWatchEntry[]): void {
@@ -60,10 +82,24 @@ export function readGuestEntries(): GuestWatchEntry[] {
   return readRaw().sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-/** Record (or refresh) that this browser watched a title — cap 20, dedupe by slug. */
+/** Refresh metadata without dropping a resume point for the SAME title/episode. */
 export function recordGuestWatch(entry: Omit<GuestWatchEntry, 'updatedAt'>): void {
-  const rest = readRaw().filter((e) => e.slug !== entry.slug);
-  write([{ ...entry, updatedAt: Date.now() }, ...rest]);
+  if (!validEntry(entry)) return;
+  const entries = readRaw();
+  const previous = entries.find((e) => e.slug === entry.slug && e.type === entry.type);
+  const sameCoordinates = previous?.type === 'tv' && entry.type === 'tv'
+    && entry.seasonNumber !== undefined && entry.episodeNumber !== undefined
+    && previous.seasonNumber === entry.seasonNumber && previous.episodeNumber === entry.episodeNumber;
+  const sameMedia = previous && (mediaKey(previous) === mediaKey(entry) || sameCoordinates);
+  const rest = entries.filter((e) => e.slug !== entry.slug || e.type !== entry.type);
+  write([{
+    ...entry,
+    ...(sameMedia && entry.positionSeconds === undefined && previous.positionSeconds !== undefined
+      ? { positionSeconds: previous.positionSeconds } : {}),
+    ...(sameMedia && entry.positionSeconds === undefined && entry.progress === undefined && previous.progress !== undefined
+      ? { progress: previous.progress } : {}),
+    updatedAt: Date.now(),
+  }, ...rest]);
 }
 
 /**
@@ -77,8 +113,16 @@ export function updateGuestPosition(
   durationSeconds: number | undefined,
   episode?: { episodeId?: string; seasonNumber?: number; episodeNumber?: number },
 ): void {
+  if (!Number.isFinite(positionSeconds) || positionSeconds < 0 ||
+      (durationSeconds !== undefined && (!Number.isFinite(durationSeconds) || durationSeconds < 0))) return;
   const entries = readRaw();
-  const idx = entries.findIndex((e) => e.slug === slug);
+  const hasEpisode = episode?.episodeId !== undefined || episode?.seasonNumber !== undefined || episode?.episodeNumber !== undefined;
+  const key = playbackMediaKey(slug, episode?.episodeId, episode?.seasonNumber, episode?.episodeNumber);
+  if (!key) return;
+  const matches = entries.filter((e) => e.slug === slug && mediaKey(e) === key && (!hasEpisode || e.type === 'tv'));
+  // Ambiguous title-only updates must not transfer progress between movie/TV entries.
+  if (matches.length !== 1) return;
+  const idx = entries.indexOf(matches[0]!);
   const entry = idx >= 0 ? entries[idx] : undefined;
   if (!entry) return;
   const progress =
@@ -87,7 +131,9 @@ export function updateGuestPosition(
     ...entry,
     positionSeconds,
     progress,
-    ...(episode ? { ...episode } : {}),
+    ...(episode?.episodeId !== undefined ? { episodeId: episode.episodeId } : {}),
+    ...(episode?.seasonNumber !== undefined ? { seasonNumber: episode.seasonNumber } : {}),
+    ...(episode?.episodeNumber !== undefined ? { episodeNumber: episode.episodeNumber } : {}),
     updatedAt: Date.now(),
   };
   write(entries.sort((a, b) => b.updatedAt - a.updatedAt));

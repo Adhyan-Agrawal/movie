@@ -10,7 +10,6 @@ import { ProviderError } from './types';
 import type { ProviderConfig } from './config';
 
 const TMDB_ID_RE = /^\d{1,12}$/;
-const MAX_DIRECT_SOURCES = 11;
 
 const capabilities: Capabilities = {
   fullscreen: true,
@@ -64,23 +63,21 @@ export function createVidnestAdapter(config: ProviderConfig): ProviderAdapter {
         params.set('episode', String(request.episode));
       }
 
-      return Array.from({ length: MAX_DIRECT_SOURCES }, (_, streamIndex) => {
-        const sourceParams = new URLSearchParams(params);
-        sourceParams.set('stream', String(streamIndex));
-        const label = `Server ${streamIndex + 1}`;
-
-        return {
-          id: `${config.id}:${request.type}:${streamIndex}`,
-          label,
-          kind: 'hls' as const,
-          url: `/api/vidnest?${sourceParams}`,
-          capabilities,
-          providerId: config.id,
-          providerLabel: config.displayName,
-          external: true,
-          consentRequired: config.consentRequired,
-        };
-      });
+      const catalogParams = new URLSearchParams(params);
+      catalogParams.set('metadata', '1');
+      params.set('stream', 'auto');
+      return [{
+        id: `${config.id}:${request.type}:0`,
+        label: 'Direct',
+        kind: 'hls',
+        url: `/api/vidnest?${params}`,
+        streamCatalogUrl: `/api/vidnest?${catalogParams}`,
+        capabilities,
+        providerId: config.id,
+        providerLabel: config.displayName,
+        external: true,
+        consentRequired: config.consentRequired,
+      }];
     },
 
     async healthCheck(): Promise<HealthResult> {

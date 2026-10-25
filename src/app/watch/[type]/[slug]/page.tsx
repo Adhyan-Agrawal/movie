@@ -6,7 +6,8 @@ import { buttonClasses } from '@/components/ui/Button';
 import { Container } from '@/components/ui/Container';
 import { features } from '@/lib/env';
 import { getTitleBySlug } from '@/features/catalog/queries';
-import type { TitleType } from '@/features/catalog/types';
+import type { Season, TitleType } from '@/features/catalog/types';
+import type { ResumePosition } from '@/features/playback/progress-queries';
 import { getProviderConfig } from '@/lib/providers/config';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { getActiveProviderConfigs, resolvePlayback } from '@/lib/providers/registry';
@@ -72,6 +73,15 @@ export default async function WatchPage({
   const { season: seasonParam, episode: episodeParam } = await searchParams;
   const season = toIndex(seasonParam);
   const episode = toIndex(episodeParam);
+  let seasons: Season[] = [];
+  if (title.type === 'tv' && features.supabaseConfigured) {
+    try {
+      const { listSeasonsForTitle } = await import('@/features/catalog/queries');
+      seasons = await listSeasonsForTitle(title.id);
+    } catch {
+      // Provider playback still works from explicit season/episode numbers.
+    }
+  }
 
   // TV without a specific episode: deep-link to the first available one instead
   // of sending the provider a whole-series URL. vidup (Server 4) and 2embed
@@ -82,58 +92,29 @@ export default async function WatchPage({
   if (title.type === 'tv' && (season === undefined || episode === undefined)) {
     let firstSeason = 1;
     let firstEpisode = 1;
-    if (features.supabaseConfigured) {
-      try {
-        const { listSeasonsForTitle } = await import('@/features/catalog/queries');
-        const seasons = await listSeasonsForTitle(title.id);
-        const first = seasons.find((s) => s.episodes.length > 0);
-        if (first && first.episodes[0]) {
-          firstSeason = first.seasonNumber;
-          firstEpisode = first.episodes[0].episodeNumber;
-        }
-      } catch (err) {
-        console.warn('playback.firstEpisodeLookup failed', {
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+    const first = seasons.find((s) => s.episodes.length > 0);
+    if (first && first.episodes[0]) {
+      firstSeason = first.seasonNumber;
+      firstEpisode = first.episodes[0].episodeNumber;
     }
     redirect(`/watch/tv/${title.slug}?season=${firstSeason}&episode=${firstEpisode}`);
   }
 
   // TV: resolve the exact episode row so native sources and watch progress can
   // target it (provider embeds build URLs from season/episode numbers instead).
-  let episodeId: string | undefined;
-  if (title.type === 'tv' && season !== undefined && episode !== undefined && features.supabaseConfigured) {
+  let episodeId = seasons.find((item) => item.seasonNumber === season)?.episodes
+    .find((item) => item.episodeNumber === episode)?.id;
+  if (!episodeId && title.type === 'tv' && season !== undefined && episode !== undefined && features.supabaseConfigured) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      const { findEpisodeId } = await import('@/features/playback/native-sources');
-      episodeId = (await findEpisodeId(title.id, season, episode)) ?? undefined;
-    } catch (err) {
-      console.warn('playback.episodeLookup failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-
-    // On-demand enrichment (Spec Section 4): a series whose episodes weren't
-    // fully imported is backfilled from TMDB on first view, so a deep link to
-    // an episode resolves. Best-effort — if it still fails, the player mounts
-    // from the season/episode numbers alone.
-    if (!episodeId) {
-      try {
-        const { ensureTitleComplete } = await import('@/features/catalog/title-enrichment');
-        await ensureTitleComplete(title.id);
-      } catch (err) {
-        console.warn('playback.enrichment failed', {
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
-      try {
-        const { findEpisodeId } = await import('@/features/playback/native-sources');
-        episodeId = (await findEpisodeId(title.id, season, episode)) ?? undefined;
-      } catch (err) {
-        console.warn('playback.episodeLookup (retry) failed', {
-          message: err instanceof Error ? err.message : String(err),
-        });
-      }
+      episodeId = await Promise.race([
+        import('@/features/playback/native-sources').then(({ findEpisodeId }) => findEpisodeId(title.id, season, episode)).then((id) => id ?? undefined),
+        new Promise<undefined>((resolve) => { timer = setTimeout(() => resolve(undefined), 1500); }),
+      ]);
+    } catch {
+      // Exact-coordinate local resume and provider playback still work without an imported row.
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 
@@ -145,8 +126,6 @@ export default async function WatchPage({
     | undefined;
   if (title.type === 'tv' && season !== undefined && episode !== undefined && features.supabaseConfigured) {
     try {
-      const { listSeasonsForTitle } = await import('@/features/catalog/queries');
-      const seasons = await listSeasonsForTitle(title.id);
       const flat = seasons.flatMap((s) =>
         s.episodes.map((e) => ({
           season: s.seasonNumber,
@@ -188,38 +167,21 @@ export default async function WatchPage({
     ...(title.type === 'tv' && episode !== undefined ? { episode } : {}),
   };
 
-  const resolved = await resolvePlayback(request);
+  const [resolved, nativeSources, playbackContext] = await Promise.all([
+    resolvePlayback(request),
+    features.supabaseConfigured
+      ? import('@/features/playback/native-sources').then(({ resolveNativeSources }) => resolveNativeSources(title.id, episodeId))
+        .catch(() => [] as PlaybackSource[])
+      : Promise.resolve([] as PlaybackSource[]),
+    features.supabaseConfigured
+      ? import('@/features/playback/progress-queries').then(({ getPlaybackContext }) => getPlaybackContext(title.id, episodeId))
+        .catch(() => ({ viewerKey: 'unavailable', resumePosition: null as ResumePosition | null }))
+      : Promise.resolve({ viewerKey: 'guest', resumePosition: null as ResumePosition | null }),
+  ]);
   const providerConfig = getProviderConfig('vidsrc');
 
-  // Native media sources (Spec Section 9): Lumora-hosted mp4/hls/dash rows.
-  // `media_sources` is provider-managed (not public under RLS), so resolution
-  // runs server-side with the service client and returns sanitized sources —
-  // storage rows become 4h signed URLs. A failure degrades to embeds only.
-  let nativeSources: PlaybackSource[] = [];
-  if (features.supabaseConfigured) {
-    try {
-      const { resolveNativeSources } = await import('@/features/playback/native-sources');
-      nativeSources = await resolveNativeSources(title.id, episodeId);
-    } catch (err) {
-      console.warn('playback.nativeSources failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-
-  // Watch-resume: the signed-in viewer's saved position for this title/episode
-  // (anonymous viewers and finished/barely-started titles resume nothing).
-  let resumePos: { positionSeconds: number; progress: number } | null = null;
-  if (features.supabaseConfigured) {
-    try {
-      const { getResumePosition } = await import('@/features/playback/progress-queries');
-      resumePos = await getResumePosition(title.id, episodeId);
-    } catch (err) {
-      console.warn('playback.resumeLookup failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // Server resume is viewer-scoped; the native player also reads its latest local checkpoint.
+  const resumePos = title.type === 'tv' && !episodeId ? null : playbackContext.resumePosition;
 
   // Embed resume: providers that document a start parameter (only vidup today,
   // via ProviderConfig.startParam) get the saved position appended to their
@@ -256,20 +218,18 @@ export default async function WatchPage({
   // PUBLIC SOURCE LABELING: the public player never names the upstream
   // provider — not in labels, ids, or serialized props. Resolved providers
   // merge FIRST; storage-backed native sources remain available as fallbacks.
-  // Every source is
-  // branded "Server 1", "Server 2", … in merge order; every identifying field
+  // The unified direct source is "Direct"; fallbacks are "Server 1", "Server 2", …
+  // in merge order. Every identifying field
   // is overwritten so nothing upstream reaches the client payload. The real
   // provider identity stays in the admin console and server logs. The consent
   // copy in PlayerShell still discloses that embed playback runs via an
   // EXTERNAL service (cookies/terms apply) — just unbranded.
-  const publicSources: PlaybackSource[] = [...embedSources, ...nativeSources].map((s, i) => ({
-    ...s,
-    id: `server-${i + 1}`,
-    label: `Server ${i + 1}`,
-    providerId: `server-${i + 1}`,
-    providerLabel: `Server ${i + 1}`,
-  }));
-  const providerLabel = 'Server 1';
+  let fallbackIndex = 0;
+  const publicSources: PlaybackSource[] = [...embedSources, ...nativeSources].map((s, i) => {
+    const label = s.streamCatalogUrl ? 'Direct' : `Server ${++fallbackIndex}`;
+    return { ...s, id: `server-${i + 1}`, label, providerId: `server-${i + 1}`, providerLabel: label };
+  });
+  const providerLabel = publicSources[0]?.label ?? 'Server 1';
   const consentRequired = resolved.source?.consentRequired ?? providerConfig?.consentRequired ?? true;
 
   return (
@@ -288,11 +248,12 @@ export default async function WatchPage({
           sources={publicSources}
           providerLabel={providerLabel}
           consentRequired={consentRequired}
+          viewerKey={playbackContext.viewerKey}
           {...(episodeId ? { episodeId } : {})}
           {...(title.type === 'tv' && season !== undefined ? { seasonNumber: season } : {})}
           {...(title.type === 'tv' && episode !== undefined ? { episodeNumber: episode } : {})}
           {...(episodeNav?.next ? { nextEpisode: episodeNav.next } : {})}
-          {...(resumePos ? { initialPosition: resumePos.positionSeconds } : {})}
+          {...(resumePos ? { initialPosition: resumePos.positionSeconds, resumeUpdatedAt: resumePos.updatedAt } : {})}
           preroll={preroll}
         />
 

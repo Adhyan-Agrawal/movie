@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
-import { GET } from '@/app/api/vidnest/route';
+let GET: typeof import('@/app/api/vidnest/route').GET;
 
 const API_SECRET = 'vidnest-test-secret-that-is-at-least-32-characters';
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
@@ -54,7 +54,9 @@ function chunkedBody(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
   });
 }
 
-beforeEach(() => {
+beforeEach(async () => {
+  vi.resetModules();
+  GET = (await import('@/app/api/vidnest/route')).GET;
   vi.stubEnv('VIDNEST_API_SECRET', API_SECRET);
   vi.stubEnv('VIDNEST_API_URL', 'https://resolver.example');
 });

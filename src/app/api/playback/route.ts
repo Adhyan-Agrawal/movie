@@ -62,20 +62,13 @@ export async function GET(request: NextRequest) {
     ...(episode !== undefined ? { episode } : {}),
   };
 
-  const resolved = await resolvePlayback(playbackRequest);
-
-  // Native (Lumora-hosted) sources remain available after configured providers.
-  let nativeSources: PlaybackSource[] = [];
-  if (features.supabaseConfigured && titleId) {
-    try {
-      const { resolveNativeSources } = await import('@/features/playback/native-sources');
-      nativeSources = await resolveNativeSources(titleId, episodeId);
-    } catch (err) {
-      console.warn('api.playback: native sources failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  const [resolved, nativeSources] = await Promise.all([
+    resolvePlayback(playbackRequest),
+    features.supabaseConfigured && titleId
+      ? import('@/features/playback/native-sources').then(({ resolveNativeSources }) => resolveNativeSources(titleId, episodeId))
+        .catch(() => [] as PlaybackSource[])
+      : Promise.resolve([] as PlaybackSource[]),
+  ]);
 
   // Anything the provider documents a resume parameter for gets `start`
   // appended (the native app passes the viewer's saved position).
@@ -91,14 +84,16 @@ export async function GET(request: NextRequest) {
   const origin = request.nextUrl.origin;
   // Resume first (needs the real provider id), THEN anonymize — so the public
   // payload never carries an upstream identity.
+  let fallbackIndex = 0;
   const publicSources = [...resolved.sources.map(withResume), ...nativeSources].map((s, i) => {
     const absolute = s.url && s.url.startsWith('/') ? `${origin}${s.url}` : s.url;
     return {
       id: `server-${i + 1}`,
-      label: `Server ${i + 1}`,
+      label: s.streamCatalogUrl ? 'Direct' : `Server ${++fallbackIndex}`,
       url: absolute,
       kind: s.kind,
       consentRequired: s.consentRequired ?? true,
+      ...(s.streamCatalogUrl ? { streamCatalogUrl: new URL(s.streamCatalogUrl, origin).href } : {}),
     };
   });
 

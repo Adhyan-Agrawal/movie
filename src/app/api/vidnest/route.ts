@@ -1,5 +1,9 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { isIP } from 'node:net';
 import { NextRequest, NextResponse } from 'next/server';
+import { hasHlsPlaybackUri, hlsStartupPlan, httpsUrl, metadataLabel, metadataLanguage, parseHlsMetadata } from '@/lib/providers/hls-metadata';
+import type { DirectStream, Track } from '@/lib/providers/types';
+import { isPrivateOrLoopbackHost } from '@/lib/validation/source';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -7,11 +11,158 @@ export const dynamic = 'force-dynamic';
 const TOKEN_TTL_MS = 4 * 60 * 60 * 1000;
 const PLAYLIST_PROBE_BYTES = 1024;
 const PLAYLIST_SIGNATURE = '#EXTM3U';
+const STARTUP_PROBE_BYTES = 1024;
 const TMDB_ID_RE = /^[1-9]\d{0,9}$/;
-const MAX_STREAM_INDEX = 10;
+const RESOLVER_TTL_MS = 60_000;
+const CATALOG_TTL_MS = 30_000;
+const RESOLVER_TIMEOUT_MS = 10_000;
+const MANIFEST_TIMEOUT_MS = 4_000;
+const CATALOG_BUDGET_MS = 12_000;
+const MANIFEST_MAX_BYTES = 256 * 1024;
+const RESOLVER_MAX_BYTES = 1024 * 1024;
+const PROBE_CONCURRENCY = 4;
+const MAX_CACHE_ENTRIES = 128;
 
 type StreamHeaders = Record<string, string>;
 type ProxyPayload = { expiresAt: number; headers: StreamHeaders; url: string };
+type GatewaySubtitle = Track & { headers: StreamHeaders };
+type ResolvedStream = { url: string; headers: StreamHeaders; subtitles: GatewaySubtitle[]; audioLanguage: string };
+type CacheEntry<T> = { expiresAt: number; promise: Promise<T> };
+type PlaybackManifest = { index: number; playlist: string; sourceUrl: string; order: number };
+type HealthyStartup = Omit<PlaybackManifest, 'order'> & { latencyMs: number };
+type CatalogProbe = {
+  firstHealthy: Promise<HealthyStartup | undefined>; complete: Promise<DirectStream[]>;
+  best?: HealthyStartup; fallback?: PlaybackManifest;
+};
+const resolverCache = new Map<string, CacheEntry<ResolvedStream[]>>();
+const catalogCache = new Map<string, CacheEntry<CatalogProbe>>();
+
+function cached<T>(cache: Map<string, CacheEntry<T>>, key: string, ttl: number, load: () => Promise<T>): Promise<T> {
+  const now = Date.now();
+  for (const [entryKey, entry] of cache) if (entry.expiresAt <= now) cache.delete(entryKey);
+  const existing = cache.get(key);
+  if (existing) return existing.promise;
+  if (cache.size >= MAX_CACHE_ENTRIES) cache.delete(cache.keys().next().value!);
+  const entry: CacheEntry<T> = { expiresAt: now + ttl, promise: Promise.resolve().then(load) };
+  cache.set(key, entry);
+  void entry.promise.catch(() => { if (cache.get(key) === entry) cache.delete(key); });
+  return entry.promise;
+}
+
+async function withTimeout<T>(ms: number, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  const controller = new AbortController();
+  let timeout: ReturnType<typeof setTimeout>;
+  const expired = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      reject(new DOMException('Request timed out.', 'AbortError'));
+    }, ms);
+  });
+  try {
+    return await Promise.race([run(controller.signal), expired]);
+  } finally {
+    clearTimeout(timeout!);
+  }
+}
+
+async function boundedText(response: Response, maxBytes: number, signal?: AbortSignal): Promise<string> {
+  if (!response.body) return '';
+  if (Number(response.headers.get('content-length')) > maxBytes) {
+    void response.body.cancel();
+    throw new Error('Response exceeds size limit.');
+  }
+  const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal?.addEventListener('abort', cancel, { once: true });
+  let total = 0;
+  const decoder = new TextDecoder();
+  let text = '';
+  try {
+    while (true) {
+      if (signal?.aborted) throw new DOMException('Request timed out.', 'AbortError');
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > maxBytes) throw new Error('Response exceeds size limit.');
+      text += decoder.decode(result.value, { stream: true });
+    }
+    return text + decoder.decode();
+  } catch (error) {
+    cancel();
+    throw error;
+  } finally {
+    signal?.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
+
+async function verifyStartupBytes(
+  resource: { url: string; offset: number; length?: number }, headers: StreamHeaders, signal: AbortSignal,
+): Promise<boolean> {
+  const limit = Math.min(STARTUP_PROBE_BYTES, resource.length ?? STARTUP_PROBE_BYTES);
+  const response = await startupFetch(resource.url, {
+    headers: { ...headers, 'Accept-Encoding': 'identity', Range: `bytes=${resource.offset}-${resource.offset + limit - 1}` },
+    cache: 'no-store', signal,
+  });
+  const rangeStart = /^bytes (\d+)-\d+\/(?:\d+|\*)$/.exec(response.headers.get('content-range') ?? '');
+  if (!response.ok || !response.body || !httpsUrl(response.url || resource.url)
+    || (resource.offset > 0 && response.status !== 206)
+    || (response.status === 206 && (!rangeStart || Number(rangeStart[1]) !== resource.offset))) {
+    void response.body?.cancel();
+    throw new Error('Startup media is unavailable.');
+  }
+  const reader = response.body.getReader();
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener('abort', cancel, { once: true });
+  const bytes = new Uint8Array(limit);
+  let length = 0;
+  try {
+    while (length < limit) {
+      if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      const count = Math.min(chunk.value.byteLength, limit - length);
+      bytes.set(chunk.value.subarray(0, count), length);
+      length += count;
+    }
+    if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+    const box = length >= 8 ? new TextDecoder().decode(bytes.subarray(4, 8)) : '';
+    const ts = length >= 377 && bytes[0] === 0x47 && bytes[188] === 0x47 && bytes[376] === 0x47;
+    const mp4 = length >= 8 && ['ftyp', 'styp', 'moof'].includes(box);
+    if (ts || mp4) return true;
+    const binary = bytes.subarray(0, length).some((byte) => byte >= 127 || (byte < 32 && ![9, 10, 13].includes(byte)));
+    if (!length || !binary || /^[<{\[]/.test(new TextDecoder().decode(bytes.subarray(0, 64)).trimStart())) {
+      throw new Error('Startup media is not video data.');
+    }
+    return false; // Valid HLS can use a media format this bounded benchmark cannot identify.
+  } finally {
+    cancel(); // A server ignoring Range must never cause a full video download.
+    signal.removeEventListener('abort', cancel);
+    reader.releaseLock();
+  }
+}
+
+function isPublicStartupUrl(value: string): boolean {
+  const url = httpsUrl(value);
+  if (!url) return false;
+  const hostname = new URL(url).hostname;
+  return !isPrivateOrLoopbackHost(hostname) && !isIP(hostname.replace(/^\[|\]$/g, ''));
+}
+
+async function startupFetch(url: string, init: RequestInit): Promise<Response> {
+  for (let redirects = 0; redirects <= 3; redirects++) {
+    if (!isPublicStartupUrl(url)) throw new Error('Unsafe startup URL.');
+    if (init.signal?.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+    const response = await fetch(url, { ...init, redirect: 'manual' });
+    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
+    const location = response.headers.get('location');
+    const next = httpsUrl(location, url);
+    void response.body?.cancel();
+    if (!next || redirects === 3) throw new Error('Unsafe or excessive startup redirects.');
+    url = next;
+  }
+  throw new Error('Startup redirect limit reached.');
+}
 
 function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status, headers: { 'Cache-Control': 'private, no-store' } });
@@ -71,6 +222,160 @@ function sanitizeHeaders(input: unknown): StreamHeaders {
     }
   }
   return headers;
+}
+
+function gatewaySubtitles(input: unknown, sourceUrl: string, headers: StreamHeaders): GatewaySubtitle[] {
+  if (!Array.isArray(input)) return [];
+  return input.flatMap((candidate: unknown, index) => {
+    if (!candidate || typeof candidate !== 'object') return [];
+    const value = candidate as Record<string, unknown>;
+    const url = httpsUrl(value.url ?? value.file, sourceUrl);
+    if (!url) return [];
+    const language = metadataLanguage(value.language ?? value.lang ?? value.srclang);
+    const label = metadataLabel(value.label ?? value.name ?? value.language ?? value.lang) || language || `Subtitles ${index + 1}`;
+    const vtt = !/\.m3u8(?:$|[?#])/i.test(url)
+      && (/\.vtt(?:$|[?#])/i.test(url) || value.format === 'vtt' || value.type === 'text/vtt');
+    return [{
+      id: `sidecar-${index}`, label, language,
+      kind: value.kind === 'captions' ? 'captions' as const : 'subtitles' as const,
+      ...(vtt ? { url } : {}),
+      ...(value.default === true ? { default: true } : {}),
+      headers: { ...headers, ...sanitizeHeaders(value.headers) },
+    }];
+  });
+}
+
+async function resolvedStreams(target: URL, secret: string, key: string): Promise<ResolvedStream[]> {
+  return cached(resolverCache, key, RESOLVER_TTL_MS, () => withTimeout(RESOLVER_TIMEOUT_MS, async (signal) => {
+    // Only title identifiers and provider metadata are shared. Never forward viewer headers.
+    const response = await fetch(target, { headers: { Authorization: `Bearer ${secret}` }, cache: 'no-store', signal });
+    if (!response.ok) {
+      void response.body?.cancel();
+      throw new Error('Playback source resolution failed.');
+    }
+    const body = JSON.parse(await boundedText(response, RESOLVER_MAX_BYTES, signal)) as Record<string, unknown>;
+    if (!body || !Array.isArray(body.streams)) return [];
+    return body.streams.flatMap((candidate: unknown) => {
+      if (!candidate || typeof candidate !== 'object') return [];
+      const value = candidate as Record<string, unknown>;
+      const url = httpsUrl(value.url);
+      if (!url) return [];
+      const headers = sanitizeHeaders(value.headers);
+      return [{
+        url, headers,
+        subtitles: gatewaySubtitles(value.subtitles ?? body.subtitles, url, headers),
+        audioLanguage: metadataLabel(value.audioLanguage ?? value.language),
+      }];
+    });
+  }));
+}
+
+function proxyPath(url: string, headers: StreamHeaders, secret: string): string {
+  const token = createToken({ url, headers, expiresAt: Date.now() + TOKEN_TTL_MS }, secret);
+  return `/api/vidnest?token=${encodeURIComponent(token)}`;
+}
+
+async function streamCatalog(
+  streams: ResolvedStream[], secret: string, onHealthy: (startup: HealthyStartup) => void,
+  onFallback: (manifest: PlaybackManifest) => void,
+): Promise<DirectStream[]> {
+  const catalog: DirectStream[] = new Array(streams.length);
+  const deadline = Date.now() + CATALOG_BUDGET_MS;
+  let next = 0;
+  let manifestOrder = 0;
+  await Promise.all(Array.from({ length: Math.min(PROBE_CONCURRENCY, streams.length) }, async () => {
+    while (next < streams.length) {
+      const index = next++;
+      const stream = streams[index]!;
+      let metadata = parseHlsMetadata('');
+      let startupLatencyMs: number | undefined;
+      let validManifest: PlaybackManifest | undefined;
+      let compatibilityFallback = false;
+      try {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error('Metadata discovery deadline reached.');
+        await withTimeout(Math.min(MANIFEST_TIMEOUT_MS, remaining), async (signal) => {
+          const start = Date.now();
+          const response = await startupFetch(stream.url, {
+            headers: { ...stream.headers, 'Accept-Encoding': 'identity' }, cache: 'no-store', signal,
+          });
+          if (!response.ok || !isPublicStartupUrl(response.url || stream.url)) {
+            void response.body?.cancel();
+            throw new Error('Manifest is unavailable.');
+          }
+          const sourceUrl = response.url || stream.url;
+          const playlist = await boundedText(response, MANIFEST_MAX_BYTES, signal);
+          if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+          metadata = parseHlsMetadata(playlist);
+          if (!hasHlsPlaybackUri(playlist, sourceUrl, isPublicStartupUrl)) throw new Error('Invalid playback manifest.');
+          validManifest = { index, playlist, sourceUrl, order: manifestOrder++ };
+          let plan = hlsStartupPlan(playlist, sourceUrl);
+          if (plan?.variantUrl) {
+            const child = await startupFetch(plan.variantUrl, {
+              headers: { ...stream.headers, 'Accept-Encoding': 'identity' }, cache: 'no-store', signal,
+            });
+            if (!child.ok || !isPublicStartupUrl(child.url || plan.variantUrl)) {
+              void child.body?.cancel();
+              throw new Error('Startup rendition is unavailable.');
+            }
+            const childUrl = child.url || plan.variantUrl;
+            const childPlaylist = await boundedText(child, MANIFEST_MAX_BYTES, signal);
+            if (!hasHlsPlaybackUri(childPlaylist, childUrl, isPublicStartupUrl)) throw new Error('Invalid startup rendition.');
+            plan = hlsStartupPlan(childPlaylist, childUrl);
+          }
+          if (!plan?.media) {
+            compatibilityFallback = true;
+            return;
+          }
+          if ((plan.init && !await verifyStartupBytes(plan.init, stream.headers, signal))
+            || !await verifyStartupBytes(plan.media, stream.headers, signal)) {
+            compatibilityFallback = true;
+            return;
+          }
+          if (signal.aborted) throw new DOMException('Startup probe timed out.', 'AbortError');
+          startupLatencyMs = Math.max(0, Date.now() - start);
+          onHealthy({ index, latencyMs: startupLatencyMs, playlist, sourceUrl });
+        });
+      } catch (error) {
+        compatibilityFallback = error instanceof Error && error.name === 'AbortError';
+        // A failed probe must not hide real streams or prevent initial playback.
+      }
+      if (validManifest && compatibilityFallback) onFallback(validManifest);
+      if (!metadata.audioTracks.length && stream.audioLanguage) {
+        metadata.audioTracks.push({
+          id: 'muxed', label: stream.audioLanguage, language: metadataLanguage(stream.audioLanguage), default: true,
+        });
+      }
+      catalog[index] = {
+        id: String(index), url: proxyPath(stream.url, stream.headers, secret), ...metadata,
+        ...(startupLatencyMs !== undefined ? { startupLatencyMs } : {}),
+        subtitles: [
+          ...metadata.subtitles,
+          ...stream.subtitles.map(({ headers, url, ...track }) => ({
+            ...track, ...(url ? { url: proxyPath(url, headers, secret) } : {}),
+          })),
+        ],
+      };
+    }
+  }));
+  return catalog;
+}
+
+async function catalogProbe(streams: ResolvedStream[], secret: string, key: string): Promise<CatalogProbe> {
+  return cached(catalogCache, key, CATALOG_TTL_MS, async () => {
+    let first!: (startup: HealthyStartup | undefined) => void;
+    const probe: CatalogProbe = {
+      firstHealthy: new Promise((resolve) => { first = resolve; }), complete: Promise.resolve([]),
+    };
+    probe.complete = streamCatalog(streams, secret, (startup) => {
+      if (!probe.best || startup.latencyMs < probe.best.latencyMs) probe.best = startup;
+      first(startup);
+    }, (manifest) => {
+      if (!probe.fallback || manifest.order < probe.fallback.order) probe.fallback = manifest;
+    });
+    void probe.complete.then(() => first(undefined), () => first(undefined));
+    return probe;
+  });
 }
 
 function isPlaylist(response: Response, url: string): boolean {
@@ -144,8 +449,7 @@ function rewritePlaylist(playlist: string, sourceUrl: string, headers: StreamHea
     try {
       const url = new URL(value, sourceUrl);
       if (url.protocol !== 'https:') return value;
-      const token = createToken({ url: url.href, headers, expiresAt: Date.now() + TOKEN_TTL_MS }, secret);
-      return `/api/vidnest?token=${encodeURIComponent(token)}`;
+      return proxyPath(url.href, headers, secret);
     } catch {
       return value;
     }
@@ -227,7 +531,7 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
       sourceUrl = response.url || payload.url;
       body = response.body;
     }
-    const playlist = rewritePlaylist(await new Response(body).text(), sourceUrl, payload.headers, secret);
+    const playlist = rewritePlaylist(await boundedText(new Response(body), RESOLVER_MAX_BYTES, request.signal), sourceUrl, payload.headers, secret);
     return new NextResponse(playlist, {
       headers: { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl' },
       status: 200,
@@ -258,7 +562,7 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   if (type === 'tv' && (!season || !episode || !/^\d{1,3}$/.test(season) || !/^\d{1,3}$/.test(episode))) {
     return jsonError('TV playback requires a numeric season and episode.', 400);
   }
-  if (!Number.isInteger(streamIndex) || streamIndex < 0 || streamIndex > MAX_STREAM_INDEX) {
+  if (streamIndexRaw !== 'auto' && (!/^\d{1,6}$/.test(streamIndexRaw) || !Number.isSafeInteger(streamIndex) || streamIndex < 0)) {
     return jsonError('Invalid playback stream.', 400);
   }
 
@@ -270,22 +574,35 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
     target.searchParams.set('episode', episode!);
   }
 
-  const response = await fetch(target, {
-    headers: { Authorization: `Bearer ${config.secret}` },
-    cache: 'no-store',
-    signal: request.signal,
-  });
-  if (!response.ok) return jsonError('Playback source resolution failed.', 502);
-
-  const body = await response.json() as { streams?: Array<{ url?: unknown; headers?: unknown }> };
-  const streams = body.streams?.filter((candidate) => typeof candidate.url === 'string' && candidate.url.startsWith('https://')) ?? [];
+  const key = sign(target.href, config.secret);
+  const streams = await resolvedStreams(target, config.secret, key);
+  if (params.get('metadata') === '1' || streamIndexRaw === 'auto') {
+    const catalogKey = sign(`${key}:${JSON.stringify(streams)}`, config.secret);
+    const probe = await catalogProbe(streams, config.secret, catalogKey);
+    if (params.get('metadata') === '1') {
+      const catalog = await probe.complete;
+      return NextResponse.json({
+        streams: catalog, ...(probe.best ? { recommendedStreamId: String(probe.best.index) } : {}),
+      }, { headers: { 'Cache-Control': 'private, no-store' } });
+    }
+    const selected = probe.best ?? await probe.firstHealthy ?? probe.fallback;
+    if (!selected) return jsonError('No healthy playback source is available.', streams.length ? 502 : 404);
+    const stream = streams[selected.index]!;
+    return new NextResponse(rewritePlaylist(selected.playlist, selected.sourceUrl, stream.headers, config.secret), {
+      status: 200,
+      headers: {
+        'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl',
+        'X-Vidnest-Stream-Id': String(selected.index),
+      },
+    });
+  }
   const stream = streams[streamIndex];
   const streamUrl = stream?.url;
-  if (typeof streamUrl !== 'string') return jsonError('No playback source is available.', 404);
+  if (!stream || typeof streamUrl !== 'string') return jsonError('No playback source is available.', 404);
 
   const token = createToken({
     url: streamUrl,
-    headers: sanitizeHeaders(stream?.headers),
+    headers: stream.headers,
     expiresAt: Date.now() + TOKEN_TTL_MS,
   }, config.secret);
   return proxy(request, token, config.secret);

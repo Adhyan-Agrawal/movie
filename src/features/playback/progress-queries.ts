@@ -16,38 +16,71 @@ import { isResumable } from './progress';
 export interface ResumePosition {
   positionSeconds: number;
   progress: number;
+  /** Epoch milliseconds from watch_progress.updated_at. */
+  updatedAt: number;
 }
 
 /**
- * The viewer's latest resume position for a title/episode, or null when there
- * is nothing worth resuming (not signed in, no row, barely started, or
- * finished — finished titles restart from the beginning by design).
+ * Resolve verified viewer identity and the exact title/episode position.
+ * The catalog's minimum/completion policy is intentionally NOT applied here.
  */
-export async function getResumePosition(
+export async function getPlaybackContext(
   titleId: string,
   episodeId?: string,
-): Promise<ResumePosition | null> {
-  const db = await getSupabaseServerClient();
-  const { data: user } = await db.auth.getUser();
-  if (!user.user) return null;
+): Promise<{ viewerKey: string; resumePosition: ResumePosition | null }> {
+  let viewerKey = 'unavailable';
+  try {
+    const db = await getSupabaseServerClient();
+    const { data, error: authError } = await db.auth.getUser();
+    if (authError) {
+      // Supabase uses this specific error for a genuinely absent session.
+      if (!data.user && authError.name === 'AuthSessionMissingError') viewerKey = 'guest';
+      return { viewerKey, resumePosition: null };
+    }
+    if (!data.user) return { viewerKey: 'guest', resumePosition: null };
+    viewerKey = `account:${data.user.id}`;
 
-  const profileId = await getDefaultProfileId();
-  if (!profileId) return null;
+    // Use the same verified client/account instead of re-resolving auth elsewhere.
+    const { data: profiles, error: profileError } = await db.from('profiles').select('id')
+      .eq('account_id', data.user.id).order('created_at', { ascending: true }).limit(1);
+    if (profileError) return { viewerKey: 'unavailable', resumePosition: null };
+    const profileId = profiles?.[0]?.id;
+    if (!profileId) return { viewerKey, resumePosition: null };
+    viewerKey += `:profile:${profileId}`;
+    if (typeof titleId !== 'string' || !titleId.trim() ||
+        (episodeId !== undefined && (typeof episodeId !== 'string' || !episodeId.trim()))) {
+      return { viewerKey, resumePosition: null };
+    }
 
-  let query = db
-    .from('watch_progress')
-    .select('position_seconds, progress')
-    .eq('profile_id', profileId)
-    .eq('title_id', titleId);
-  query = episodeId ? query.eq('episode_id', episodeId) : query.is('episode_id', null);
+    let query = db.from('watch_progress').select('position_seconds, progress, updated_at')
+      .eq('account_id', data.user.id).eq('profile_id', profileId).eq('title_id', titleId);
+    query = episodeId ? query.eq('episode_id', episodeId) : query.is('episode_id', null);
 
-  const { data, error } = await query.order('updated_at', { ascending: false }).limit(1).maybeSingle();
-  if (error) {
-    console.warn('playback.getResumePosition failed', { message: error.message });
-    return null;
+    const { data: row, error } = await query.order('updated_at', { ascending: false }).limit(1).maybeSingle();
+    if (error) {
+      console.warn('playback.getPlaybackContext failed', { message: error.message });
+      return { viewerKey, resumePosition: null };
+    }
+    const updatedAt = row ? Date.parse(row.updated_at) : Number.NaN;
+    if (!row || !Number.isFinite(row.position_seconds) || row.position_seconds <= 0 ||
+        row.position_seconds > 2_147_483_647 || !Number.isFinite(row.progress) ||
+        row.progress < 0 || row.progress > 1 || !Number.isFinite(updatedAt) || updatedAt <= 0) {
+      return { viewerKey, resumePosition: null };
+    }
+    return { viewerKey, resumePosition: {
+      positionSeconds: row.position_seconds, progress: row.progress, updatedAt,
+    } };
+  } catch (error) {
+    console.warn('playback.getPlaybackContext failed', {
+      message: error instanceof Error ? error.message : String(error),
+    });
+    return { viewerKey, resumePosition: null };
   }
-  if (!data || !isResumable(data.progress)) return null;
-  return { positionSeconds: data.position_seconds, progress: data.progress };
+}
+
+/** Exact resume point; continue-watching eligibility remains a separate policy. */
+export async function getResumePosition(titleId: string, episodeId?: string): Promise<ResumePosition | null> {
+  return (await getPlaybackContext(titleId, episodeId)).resumePosition;
 }
 
 /** True when the request carries a signed-in session. */
@@ -96,6 +129,8 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
       });
     }
     const rowsList = rows ?? [];
+    const titleIds = [...new Set(rowsList.filter((row) => isResumable(row.progress)).map((row) => row.title_id))];
+    const progressTitles = Promise.all(titleIds.map(async (id) => [id, await getTitleById(id)] as const));
     // Resolve episode context (season/episode numbers + name) for TV rows so
     // the row links to the exact episode the viewer left off on.
     const episodeIds = [
@@ -126,10 +161,12 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
       }
     }
 
+    const titles = new Map(await progressTitles);
     for (const row of rowsList) {
       if (entries.length >= limit) break;
+      if (!isResumable(row.progress)) continue;
       if (seen.has(row.title_id)) continue;
-      const title = await getTitleById(row.title_id);
+      const title = titles.get(row.title_id);
       if (!title) continue;
       seen.add(row.title_id);
       const progress: WatchProgress = {
@@ -160,13 +197,17 @@ export async function getContinueWatching(limit = 12): Promise<ContinueWatchingE
         message: error.message,
       });
     }
-    for (const session of sessions ?? []) {
-      if (entries.length >= limit) break;
-      if (seen.has(session.title_id)) continue;
-      const title = await getTitleById(session.title_id);
-      if (!title) continue;
-      seen.add(session.title_id);
-      entries.push({ title });
+    const candidates = [...new Set((sessions ?? []).map((session) => session.title_id))].filter((id) => !seen.has(id));
+    const batchSize = Math.max(1, Math.min(12, limit));
+    for (let offset = 0; offset < candidates.length && entries.length < limit; offset += batchSize) {
+      const ids = candidates.slice(offset, offset + batchSize);
+      const titles = await Promise.all(ids.map((id) => getTitleById(id)));
+      for (const title of titles) {
+        if (entries.length >= limit) break;
+        if (!title) continue;
+        seen.add(title.id);
+        entries.push({ title });
+      }
     }
   }
 

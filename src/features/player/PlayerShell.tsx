@@ -71,6 +71,8 @@ export interface PlayerShellProps {
   nextEpisode?: EpisodeNavTarget;
   /** Saved resume position (seconds) forwarded to the native player. */
   initialPosition?: number;
+  resumeUpdatedAt?: number;
+  viewerKey?: string;
   /**
    * Pre-roll ad zone (Spec Section 11). Resolved server-side from env and
    * passed here — env vars are stripped from client bundles. Null = no pre-roll.
@@ -125,6 +127,8 @@ export function PlayerShell({
   seasonNumber,
   episodeNumber,
   initialPosition,
+  resumeUpdatedAt,
+  viewerKey = 'guest',
   preroll = null,
   nextEpisode,
 }: PlayerShellProps) {
@@ -142,7 +146,7 @@ export function PlayerShell({
   const gate = activeSource?.consentRequired ?? consentRequired ?? false;
   // Public label only — the upstream provider's real name never renders in the
   // public player (see the watch route's PUBLIC SOURCE LABELING note).
-  const providerName = providerLabel ?? source?.label ?? 'Server 1';
+  const providerName = activeSource?.label ?? providerLabel ?? source?.label ?? 'Server 1';
 
   const [consented, setConsented] = useState(false);
   const [state, setState] = useState<PlayerState>('loading');
@@ -234,6 +238,19 @@ export function PlayerShell({
 
   useEffect(() => {
     if (!showPlayer) return;
+    if (viewerKey === 'guest') {
+      recordGuestWatch({
+        slug: title.slug,
+        type: title.type,
+        name: title.name,
+        ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
+        ...(episodeId ? { episodeId } : {}),
+        ...(seasonNumber !== undefined ? { seasonNumber } : {}),
+        ...(episodeNumber !== undefined ? { episodeNumber } : {}),
+      });
+      return;
+    }
+    if (viewerKey === 'unavailable') return;
     // One session row per player mount (reloadKey re-mounts count as replays).
     let cancelled = false;
     sessionIdRef.current = null;
@@ -242,19 +259,6 @@ export function PlayerShell({
       if (r.ok && r.sessionId) {
         sessionIdRef.current = r.sessionId;
         setSessionReady(true);
-      } else {
-        // Guest (no session): record the watch in THIS browser's local guest
-        // store so their continue-watching row works too — never another
-        // user's data (signed-in rows live server-side under RLS).
-        recordGuestWatch({
-          slug: title.slug,
-          type: title.type,
-          name: title.name,
-          ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
-          ...(episodeId ? { episodeId } : {}),
-          ...(seasonNumber !== undefined ? { seasonNumber } : {}),
-          ...(episodeNumber !== undefined ? { episodeNumber } : {}),
-        });
       }
     });
     return () => {
@@ -264,7 +268,7 @@ export function PlayerShell({
       sessionIdRef.current = null;
       setSessionReady(false);
     };
-  }, [showPlayer, reloadKey, title.id, title.slug, title.type, title.name, title.posterUrl, episodeId, seasonNumber, episodeNumber]);
+  }, [showPlayer, reloadKey, viewerKey, title.id, title.slug, title.type, title.name, title.posterUrl, episodeId, seasonNumber, episodeNumber]);
 
   useEffect(() => {
     if (!showPlayer || !sessionReady) return;
@@ -355,12 +359,15 @@ export function PlayerShell({
                  controls, resume support, and honest position telemetry. */
               <NativePlayer
                 key={`${activeSource!.id}-${reloadKey}`}
-                source={{ url: activeSource!.url!, kind: nativeKind! }}
+                source={{ url: activeSource!.url!, kind: nativeKind!, ...(activeSource?.streamCatalogUrl ? { streamCatalogUrl: activeSource.streamCatalogUrl } : {}) }}
                 sources={sources}
                 selectedSourceId={activeSource?.id ?? null}
                 onSelectSource={handleSelectSource}
                 titleId={title.id}
                 titleSlug={title.slug}
+                titleName={title.name}
+                viewerKey={viewerKey}
+                {...(resumeUpdatedAt !== undefined ? { resumeUpdatedAt } : {})}
                 {...(title.posterUrl ? { posterUrl: title.posterUrl } : {})}
                 {...(episodeId ? { episodeId } : {})}
                 {...(seasonNumber !== undefined ? { seasonNumber } : {})}
@@ -420,10 +427,11 @@ export function PlayerShell({
         ) : null}
       </div>
 
-      <PlayerControlsBar        backHref={`/title/${title.type}/${title.slug}`}
+      <PlayerControlsBar
+        backHref={`/title/${title.type}/${title.slug}`}
         backLabel={`Back to ${title.name} details`}
-         sources={sources}
-         showSourceSelector={nativeKind === null || !showPlayer || playerFailed}
+        sources={sources}
+        showSourceSelector={Boolean(activeSource?.streamCatalogUrl) || nativeKind === null || !showPlayer || playerFailed}
         selectedSourceId={activeSource?.id ?? null}
         onSelectSource={handleSelectSource}
         onReportIssue={handleReport}

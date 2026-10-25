@@ -20,6 +20,8 @@ export interface Quality {
   label: string;
   /** Vertical resolution in pixels when known. */
   height?: number;
+  /** Horizontal resolution in pixels when known. */
+  width?: number;
   bitrateKbps?: number;
   /** True for adaptive/"Auto" streams. */
   auto?: boolean;
@@ -34,6 +36,24 @@ export interface Track {
   /** Sidecar URL when the provider exposes a real track file. */
   url?: string;
   default?: boolean;
+}
+
+export interface DirectAudioTrack {
+  id: string;
+  label: string;
+  language: string;
+  default?: boolean;
+}
+
+/** A real resolved direct stream, with client-safe proxied URLs. */
+export interface DirectStream {
+  id: string;
+  url: string;
+  /** Measured manifest-to-verified-startup-data latency, not estimated throughput. */
+  startupLatencyMs?: number;
+  qualities: Quality[];
+  audioTracks: DirectAudioTrack[];
+  subtitles: Track[];
 }
 
 /**
@@ -97,6 +117,8 @@ export interface PlaybackSource {
   kind: SourceKind;
   url?: string;
   manifestUrl?: string;
+  /** Same-origin endpoint returning the available DirectStream catalog. */
+  streamCatalogUrl?: string;
   qualities?: Quality[];
   subtitles?: Track[];
   capabilities: Capabilities;

@@ -8,7 +8,7 @@
  * template-driven embed adapter; the differences are entirely configuration.
  *
  * DB MERGE (Spec Section 10 / /admin/providers): before building sources the
- * registry reads the live `providers` rows through the SERVICE client
+ * registry refreshes the public provider configs at most once per minute through the SERVICE client
  * (`getSupabaseServiceClient`). RLS restricts `providers` to `provider.manage`
  * holders, so anonymous-viewer playback resolution cannot use the RLS-scoped
  * client — it reads with the service role and merges the rows into the built-in
@@ -51,34 +51,56 @@ const BUILTIN_ENTRIES: readonly RegistryEntry[] = PROVIDER_CONFIGS.map((config) 
 
 /**
  * The current merged registry. Starts as the static built-ins and is replaced
- * by {@link refreshProviderRegistry} whenever playback is resolved (DB rows
+ * by {@link refreshProviderRegistry} when the public config TTL expires (DB rows
  * override/add built-ins). Kept mutable so the synchronous {@link getAdapter}
  * and {@link getActiveProviderConfigs} see the same final list `resolvePlayback`
  * used, without changing their signatures.
  */
 let mergedEntries: RegistryEntry[] = [...BUILTIN_ENTRIES];
+const CONFIG_TTL_MS = 60_000;
+const FAILURE_RETRY_MS = 5000;
+const CONFIG_TIMEOUT_MS = 1500;
+let refreshAfter = 0;
+let refreshInFlight: Promise<void> | null = null;
 
 /**
  * (Re)load the `providers` rows and merge them into the built-in configs.
  *
  * Best-effort by design: playback must never fail because the providers table
- * is unreachable. On ANY error the registry falls back to the static
- * `PROVIDER_CONFIGS` and logs; the caller still gets a working (built-in-only)
- * resolution. No-ops when Supabase is not configured.
+ * is unreachable. Errors retain the last good config (initially the built-ins),
+ * including operator-disabled providers. Explicit refreshes bypass the TTL so
+ * existing admin save/probe callers still see changes immediately. Only configs
+ * are cached, never playback requests, signed URLs or resolved sources.
  */
-export async function refreshProviderRegistry(): Promise<void> {
+export async function refreshProviderRegistry(force = true): Promise<void> {
   if (!features.supabaseConfigured) return;
+  if (refreshInFlight) {
+    await refreshInFlight;
+    // An admin save may have happened after the in-flight read started.
+    if (force) return refreshProviderRegistry();
+    return;
+  }
+  if (!force && Date.now() < refreshAfter) return;
+  refreshInFlight = (async () => {
+    try {
+      const db = getSupabaseServiceClient();
+      const { data, error } = await db.from('providers').select('*')
+        .abortSignal(AbortSignal.timeout(CONFIG_TIMEOUT_MS));
+      if (error) throw new Error(error.message);
+      const configs = mergeProviderConfigs(PROVIDER_CONFIGS, (data ?? []) as ProviderDbRow[]);
+      mergedEntries = configs.map((config) => ({ config, adapter: createAdapter(config) }));
+      refreshAfter = Date.now() + CONFIG_TTL_MS;
+    } catch (error) {
+      refreshAfter = Date.now() + FAILURE_RETRY_MS;
+      console.error('providers.registry.mergeFailed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
   try {
-    const db = getSupabaseServiceClient();
-    const { data, error } = await db.from('providers').select('*');
-    if (error) throw new Error(error.message);
-    const configs = mergeProviderConfigs(PROVIDER_CONFIGS, (data ?? []) as ProviderDbRow[]);
-    mergedEntries = configs.map((config) => ({ config, adapter: createAdapter(config) }));
-  } catch (error) {
-    mergedEntries = [...BUILTIN_ENTRIES];
-    console.error('providers.registry.mergeFailed', {
-      message: error instanceof Error ? error.message : String(error),
-    });
+    await refreshInFlight;
+  } finally {
+    refreshInFlight = null;
   }
 }
 
@@ -117,34 +139,37 @@ export interface ResolvedPlayback {
  * others.
  */
 export async function resolvePlayback(request: PlaybackRequest): Promise<ResolvedPlayback> {
-  await refreshProviderRegistry();
+  await refreshProviderRegistry(false);
 
   const entries = mergedEntries
     .filter((entry) => entry.config.enabled)
     .sort((a, b) => b.config.defaultPriority - a.config.defaultPriority);
 
-  const attempted: string[] = [];
+  const attempted = entries.map((entry) => entry.config.id);
   const collected: PlaybackSource[] = [];
   let lastError: PlaybackError | null = null;
 
-  for (const entry of entries) {
-    attempted.push(entry.config.id);
+  // Providers are independent. Promise.all preserves priority/source numbering,
+  // regardless of completion order, without caching any resolved source URLs.
+  const results = await Promise.all(entries.map(async (entry) => {
     try {
       const sources = await entry.adapter.resolve(request);
-      if (sources.length > 0) {
-        collected.push(...sources);
-      } else {
-        // Provider is enabled but produced no source (e.g. unsupported request).
-        lastError = {
+      return {
+        sources,
+        error: sources.length > 0 ? null : {
           code: 'not-found',
           message: 'No authorized source is available from this provider.',
           recoverable: true,
           providerId: entry.config.id,
-        };
-      }
+        } as PlaybackError,
+      };
     } catch (error) {
-      lastError = entry.adapter.normalizeError(error);
+      return { sources: [], error: entry.adapter.normalizeError(error) };
     }
+  }));
+  for (const result of results) {
+    collected.push(...result.sources);
+    if (result.error) lastError = result.error;
   }
 
   if (collected.length > 0) {

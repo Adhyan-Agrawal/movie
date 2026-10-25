@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
 import { publicEnv, features } from '@/lib/env';
-import { getTitleBySlug } from '@/features/catalog/queries';
+import { getSimilarTitles, getTitleBySlug, listCastForTitle, listSeasonsForTitle } from '@/features/catalog/queries';
 import type { Title, TitleType } from '@/features/catalog/types';
 import { TitleDetail, type TitleAvailability } from '@/features/catalog/components/TitleDetail';
 import { truncate } from '@/features/catalog/components/title-detail-helpers';
@@ -128,21 +128,38 @@ async function resolveAvailability(title: Title): Promise<TitleAvailability> {
     ...(external.tmdbId ? { tmdbId: external.tmdbId } : {}),
     ...(external.imdbId ? { imdbId: external.imdbId } : {}),
   };
-  const resolved = await resolvePlayback(request);
-  if (resolved.source) return 'available';
-
-  // No embed resolved — a native upload still makes the title playable.
-  if (features.supabaseConfigured) {
-    try {
-      const { resolveNativeSources } = await import('@/features/playback/native-sources');
-      if ((await resolveNativeSources(title.id)).length > 0) return 'available';
-    } catch (err) {
-      console.warn('title.resolveAvailability: native source check failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
+  // First verified success wins: a slow provider must not hide a native upload,
+  // and a native lookup must not delay an already-resolved provider source.
+  const checks = Promise.any([
+    resolvePlayback(request).then((resolved) => {
+      if (resolved.source) return 'available' as const;
+      throw new Error('No provider source');
+    }),
+    (async () => {
+      if (features.supabaseConfigured) {
+        try {
+          const { resolveNativeSources } = await import('@/features/playback/native-sources');
+          if ((await resolveNativeSources(title.id)).length > 0) return 'available' as const;
+        } catch (err) {
+          console.warn('title.resolveAvailability: native source check failed', {
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      throw new Error('No native source');
+    })(),
+  ]).catch(() => 'unavailable' as const);
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      checks,
+      new Promise<TitleAvailability>((resolve) => {
+        timeout = setTimeout(() => resolve('unavailable'), 3000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
   }
-  return 'unavailable';
 }
 
 export default async function TitlePage({ params }: TitleParams) {
@@ -156,23 +173,17 @@ export default async function TitlePage({ params }: TitleParams) {
     notFound();
   }
 
-  // On-demand enrichment (Spec Section 4): series imported by the bulk sync
-  // with seasons but no episode rows are backfilled from TMDB on first view, so
-  // a viewer never hits an empty episode list. Best-effort — never blocks or
-  // breaks the page.
-  if (title.type === 'tv' && features.supabaseConfigured) {
-    try {
-      const { ensureTitleComplete } = await import('@/features/catalog/title-enrichment');
-      await ensureTitleComplete(title.id);
-    } catch (err) {
-      console.warn('title.enrichment failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  // Start the detail component's read-only catalog work alongside availability.
+  // React cache reuses these promises when TitleDetail renders. Full-series DB
+  // enrichment stays off the response path; imported season counts remain useful.
+  void getSimilarTitles(title);
+  void listCastForTitle(title.id);
+  if (title.type === 'tv') void listSeasonsForTitle(title.id);
 
-  const availability = await resolveAvailability(title);
-  const inWatchlist = await isInWatchlist(title.id);
+  const [availability, inWatchlist] = await Promise.all([
+    resolveAvailability(title),
+    isInWatchlist(title.id),
+  ]);
   const jsonLd = buildJsonLd(title, canonicalUrl(type, slug));
 
   return (

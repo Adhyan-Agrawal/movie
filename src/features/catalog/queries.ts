@@ -1,3 +1,4 @@
+import { cache } from 'react';
 import { features } from '@/lib/env';
 import type { CastMember, Season, Title, TitleType } from './types';
 
@@ -38,11 +39,29 @@ function warnFailure(fn: string, err: unknown): void {
   });
 }
 
-export async function getTitleBySlug(type: TitleType, slug: string): Promise<Title | null> {
+// Bound response latency; the read-only TMDB fetch can still finish warming its
+// existing public Next cache. No account-scoped repository data is cached here.
+async function withReadDeadline<T>(read: Promise<T>, timeoutMs = 8000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      read,
+      new Promise<never>((_, reject) => {
+        timeout = setTimeout(() => reject(new Error('Catalog read deadline exceeded')), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+// React cache is scoped to the render request, including metadata. Repository
+// reads retain their RLS context and cannot leak drafts across requests.
+export const getTitleBySlug = cache(async (type: TitleType, slug: string): Promise<Title | null> => {
   if (features.tmdbConfigured) {
     try {
       const { getTmdbTitle } = await import('./tmdb-catalog');
-      return await getTmdbTitle(type, slug);
+      return await withReadDeadline(getTmdbTitle(type, slug));
     } catch (err) {
       warnFailure('getTmdbTitle', err);
       return null;
@@ -56,9 +75,9 @@ export async function getTitleBySlug(type: TitleType, slug: string): Promise<Tit
     warnFailure('getTitleBySlug', err);
     return null;
   }
-}
+});
 
-export async function getTitleById(id: string): Promise<Title | null> {
+export const getTitleById = cache(async (id: string): Promise<Title | null> => {
   if (!features.supabaseConfigured) return null;
   try {
     const { repoGetTitleById } = await import('./repository');
@@ -67,13 +86,13 @@ export async function getTitleById(id: string): Promise<Title | null> {
     warnFailure('getTitleById', err);
     return null;
   }
-}
+});
 
-export async function listAllGenres(): Promise<string[]> {
+export const listAllGenres = cache(async (): Promise<string[]> => {
   if (features.tmdbConfigured) {
     try {
       const { listTmdbGenres } = await import('./tmdb-catalog');
-      return await listTmdbGenres();
+      return await withReadDeadline(listTmdbGenres());
     } catch (err) {
       warnFailure('listTmdbGenres', err);
       return [];
@@ -87,14 +106,14 @@ export async function listAllGenres(): Promise<string[]> {
     warnFailure('listAllGenres', err);
     return [];
   }
-}
+});
 
 export async function listTitles(filters: TitleFilters = {}): Promise<Title[]> {
   if (features.tmdbConfigured) {
     try {
       const { listTmdbTitles, searchTmdbTitles } = await import('./tmdb-catalog');
-      if (filters.query) return await searchTmdbTitles(filters.query);
-      const result = await listTmdbTitles(filters);
+      if (filters.query) return await withReadDeadline(searchTmdbTitles(filters.query));
+      const result = await withReadDeadline(listTmdbTitles(filters));
       return filters.limit ? result.titles.slice(0, filters.limit) : result.titles;
     } catch (err) {
       warnFailure('listTmdbTitles', err);
@@ -121,10 +140,10 @@ export async function listTitlesPage(filters: TitleFilters, page: number, pageSi
     try {
       const { listTmdbTitles, searchTmdbTitles } = await import('./tmdb-catalog');
       if (filters.query) {
-        const titles = await searchTmdbTitles(filters.query);
+        const titles = await withReadDeadline(searchTmdbTitles(filters.query));
         return { titles: titles.slice((page - 1) * pageSize, page * pageSize), total: titles.length };
       }
-      const result = await listTmdbTitles(filters, page);
+      const result = await withReadDeadline(listTmdbTitles(filters, page));
       return { titles: result.titles.slice(0, pageSize), total: result.total };
     } catch (err) {
       warnFailure('listTmdbTitlesPage', err);
@@ -155,7 +174,7 @@ export async function listTitleRoutes(): Promise<Array<Pick<Title, 'slug' | 'typ
 }
 
 /** Similar titles by shared-genre overlap (transparent v1 rule, Section 13). */
-export async function getSimilarTitles(title: Title, limit = 6): Promise<Title[]> {
+export const getSimilarTitles = cache(async (title: Title, limit = 6): Promise<Title[]> => {
   if (features.tmdbConfigured) {
     const candidates = await listTitles({ type: title.type, limit: 20 });
     return candidates.filter((candidate) => candidate.id !== title.id).slice(0, limit);
@@ -168,20 +187,20 @@ export async function getSimilarTitles(title: Title, limit = 6): Promise<Title[]
     warnFailure('getSimilarTitles', err);
     return [];
   }
-}
+});
 
 /**
  * Seasons (with any imported episodes) for a TV title, ordered by season
  * number. Returns [] when the title has no seasons or Supabase is not
  * configured — the UI then renders its honest empty state.
  */
-export async function listSeasonsForTitle(titleId: string): Promise<Season[]> {
+export const listSeasonsForTitle = cache(async (titleId: string): Promise<Season[]> => {
   if (features.tmdbConfigured) {
     const [, type, tmdbId] = titleId.split(':');
     if (type !== 'tv' || !tmdbId) return [];
     try {
       const { tmdbSeasons } = await import('./tmdb-catalog');
-      return await tmdbSeasons({ id: titleId, type: 'tv', slug: `tv-${tmdbId}`, name: '', synopsis: '', releaseYear: 0, maturity: 'TV-14', genres: [], tmdbId });
+      return await withReadDeadline(tmdbSeasons({ id: titleId, type: 'tv', slug: `tv-${tmdbId}`, name: '', synopsis: '', releaseYear: 0, maturity: 'TV-14', genres: [], tmdbId }), 3000);
     } catch (err) {
       warnFailure('tmdbSeasons', err);
       return [];
@@ -195,19 +214,19 @@ export async function listSeasonsForTitle(titleId: string): Promise<Season[]> {
     warnFailure('listSeasonsForTitle', err);
     return [];
   }
-}
+});
 
 /**
  * Cast credits for a title, ordered by billing. Returns [] when the title has
  * no imported cast or Supabase is not configured.
  */
-export async function listCastForTitle(titleId: string): Promise<CastMember[]> {
+export const listCastForTitle = cache(async (titleId: string): Promise<CastMember[]> => {
   if (features.tmdbConfigured) {
     const [, type, tmdbId] = titleId.split(':');
     if ((type !== 'movie' && type !== 'tv') || !tmdbId) return [];
     try {
       const { tmdbCast } = await import('./tmdb-catalog');
-      return await tmdbCast({ id: titleId, type, slug: `${type}-${tmdbId}`, name: '', synopsis: '', releaseYear: 0, maturity: type === 'tv' ? 'TV-14' : 'PG-13', genres: [], tmdbId });
+      return await withReadDeadline(tmdbCast({ id: titleId, type, slug: `${type}-${tmdbId}`, name: '', synopsis: '', releaseYear: 0, maturity: type === 'tv' ? 'TV-14' : 'PG-13', genres: [], tmdbId }), 3000);
     } catch (err) {
       warnFailure('tmdbCast', err);
       return [];
@@ -221,4 +240,4 @@ export async function listCastForTitle(titleId: string): Promise<CastMember[]> {
     warnFailure('listCastForTitle', err);
     return [];
   }
-}
+});

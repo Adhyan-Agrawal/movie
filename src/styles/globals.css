@@ -65,27 +65,554 @@ body {
   background: #000;
   container-type: size;
   font-family: inherit;
+  font-size: 12px;
+  isolation: isolate;
+}
+
+.lumora-player-frame {
+  overflow: hidden;
+}
+
+.lumora-videojs .vjs-poster {
+  background-size: cover;
 }
 
 .lumora-videojs .vjs-control-bar {
-  background: linear-gradient(transparent, rgb(0 0 0 / 92%));
-  padding: 0.25rem 0.5rem;
+  height: 4.7rem;
+  align-items: center;
+  padding: 1.2rem 0.8rem 0.45rem;
+  background: linear-gradient(transparent, rgb(8 9 12 / 85%) 45%, rgb(8 9 12 / 97%));
+  z-index: 5;
+}
+
+.lumora-videojs .vjs-control-bar .vjs-button {
+  flex-shrink: 0;
+  height: 44px;
+  width: 44px;
+  border-radius: 0.75rem;
+  transition: background 160ms ease, color 160ms ease;
+}
+
+.lumora-videojs .vjs-control-bar .vjs-button:hover {
+  background: rgb(255 255 255 / 9%);
+  color: rgb(var(--color-primary-hover));
+}
+
+.lumora-videojs .vjs-control-bar .vjs-button > .vjs-icon-placeholder::before {
+  line-height: 44px;
+}
+
+.lumora-videojs .vjs-control:focus-visible,
+.lumora-videojs .vjs-big-play-button:focus-visible {
+  outline: 2px solid rgb(var(--color-primary));
+  outline-offset: -2px;
+  box-shadow: none;
+}
+
+.lumora-videojs .vjs-progress-control {
+  position: absolute;
+  inset: 0.25rem 1.2rem auto;
+  width: auto;
+  height: 1.1rem;
+  min-width: 0;
+}
+
+.lumora-videojs .vjs-progress-holder {
+  height: 0.2rem;
+  margin: 0;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 20%);
+  transition: height 160ms ease;
+}
+
+.lumora-videojs .vjs-progress-control:hover .vjs-progress-holder,
+.lumora-videojs .vjs-progress-control:focus-within .vjs-progress-holder {
+  height: 0.35rem;
+}
+
+.lumora-videojs .vjs-play-progress,
+.lumora-videojs .vjs-volume-level {
+  background: rgb(var(--color-primary));
+  border-radius: 999px;
+}
+
+.lumora-videojs .vjs-load-progress,
+.lumora-videojs .vjs-load-progress div {
+  background: rgb(255 255 255 / 22%);
+  border-radius: 999px;
+}
+
+.lumora-videojs .vjs-play-progress::before {
+  color: rgb(var(--color-content));
+  font-size: 0.8rem;
+  top: -0.28rem;
+}
+
+.lumora-videojs .vjs-current-time,
+.lumora-videojs .vjs-duration,
+.lumora-videojs .vjs-time-divider {
+  display: block;
+  flex-shrink: 0;
+  padding: 0 0.25rem;
+  min-width: 0;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  color: rgb(240 242 248 / 82%);
+}
+
+.lumora-videojs .vjs-volume-panel {
+  margin-right: auto;
+}
+
+.lumora-videojs .vjs-menu-button-popup .vjs-menu .vjs-menu-content {
+  border: 1px solid rgb(255 255 255 / 14%);
+  border-radius: 0.75rem;
+  background: rgb(var(--color-surface) / 97%);
+  padding: 0.4rem;
+}
+
+.lumora-videojs .vjs-menu li {
+  padding: 0.55rem 0.6rem;
+  border-radius: 0.45rem;
+  text-transform: none;
+}
+
+.lumora-videojs .vjs-menu li.vjs-selected {
+  color: rgb(var(--color-primary-contrast));
+  background: rgb(var(--color-primary));
 }
 
 .lumora-videojs .vjs-big-play-button {
-  border: 0;
+  border: 1px solid rgb(255 255 255 / 22%);
   border-radius: 9999px;
-  background: rgb(var(--color-primary));
-  line-height: 2.3em;
-  height: 2.5em;
-  width: 2.5em;
+  background: linear-gradient(145deg, rgb(var(--color-primary) / 94%), rgb(var(--color-primary) / 65%));
+  height: 5.25rem;
+  width: 5.25rem;
+  line-height: 5.25rem;
+  font-size: 2.1rem;
+  color: rgb(var(--color-content));
   inset: 50% auto auto 50%;
+  margin: 0;
   transform: translate(-50%, -50%);
+  box-shadow: 0 0 0 0.55rem rgb(var(--color-primary) / 10%), 0 12px 48px rgb(0 0 0 / 45%);
+  backdrop-filter: blur(14px);
+  transition: box-shadow 220ms var(--ease-deliberate), background 220ms ease;
 }
 
 .lumora-videojs:hover .vjs-big-play-button,
 .lumora-videojs .vjs-big-play-button:focus {
-  background: rgb(var(--color-primary-hover));
+  background: rgb(var(--color-primary-hover) / 95%);
+  box-shadow: 0 0 0 0.7rem rgb(var(--color-primary) / 14%), 0 16px 54px rgb(0 0 0 / 48%);
+}
+
+.lumora-player-heading {
+  position: absolute;
+  inset: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  padding: 1.4rem 1.5rem 3rem;
+  background: linear-gradient(rgb(8 9 12 / 80%), transparent);
+  pointer-events: none;
+  z-index: 3;
+  transition: opacity 220ms ease;
+}
+
+.lumora-player-eyebrow {
+  font-size: 0.58rem;
+  font-weight: 650;
+  letter-spacing: 0.17em;
+  text-transform: uppercase;
+  color: rgb(240 242 248 / 52%);
+}
+
+.lumora-player-title {
+  max-width: 80%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: clamp(0.9rem, 2cqw, 1.2rem);
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  text-shadow: 0 1px 10px rgb(0 0 0 / 60%);
+}
+
+.lumora-player-tools {
+  position: absolute;
+  inset: auto 1.25rem 5.15rem;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.75rem;
+  z-index: 8;
+  pointer-events: none;
+  transition: opacity 220ms ease;
+}
+
+.lumora-player-progress {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 0.3rem 0.85rem;
+  align-items: center;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 0.8rem;
+  padding: 0.65rem 0.8rem;
+  background: rgb(8 9 12 / 68%);
+  backdrop-filter: blur(18px);
+  box-shadow: 0 3px 20px rgb(0 0 0 / 18%);
+}
+
+.lumora-player-progress > .lumora-player-eyebrow {
+  grid-column: 1;
+}
+
+.lumora-player-clock {
+  grid-column: 1;
+  grid-row: 2;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lumora-player-clock > span {
+  font-weight: 400;
+  color: rgb(240 242 248 / 55%);
+}
+
+.lumora-player-percent {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  border-left: 1px solid rgb(255 255 255 / 12%);
+  padding-left: 0.8rem;
+  color: rgb(var(--color-primary-hover));
+  font-size: 0.85rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.lumora-player-settings-anchor {
+  position: relative;
+  pointer-events: auto;
+}
+
+.lumora-player-settings-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.55rem;
+  min-height: 44px;
+  padding: 0.65rem 0.9rem;
+  border: 1px solid rgb(255 255 255 / 17%);
+  border-radius: 0.8rem;
+  background: rgb(16 18 24 / 78%);
+  color: rgb(var(--color-content));
+  font-size: 0.75rem;
+  font-weight: 600;
+  backdrop-filter: blur(18px);
+  box-shadow: 0 4px 24px rgb(0 0 0 / 25%);
+  cursor: pointer;
+  transition: background 150ms ease, border-color 150ms ease;
+}
+
+.lumora-player-settings-button:hover,
+.lumora-player-settings-button[aria-expanded="true"] {
+  border-color: rgb(var(--color-primary) / 60%);
+  background: rgb(var(--color-surface-raised) / 95%);
+}
+
+.lumora-player-settings {
+  position: absolute;
+  bottom: calc(100% + 0.65rem);
+  right: 0;
+  width: min(22rem, calc(100cqw - 2.5rem));
+  max-height: min(30rem, calc(100cqh - 9.25rem));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.7rem;
+  border: 1px solid rgb(255 255 255 / 15%);
+  border-radius: 1.1rem;
+  background: linear-gradient(145deg, rgb(var(--color-surface-raised) / 97%), rgb(var(--color-base) / 97%));
+  box-shadow: 0 18px 60px rgb(0 0 0 / 60%), inset 0 1px 0 rgb(255 255 255 / 4%);
+  backdrop-filter: blur(24px);
+  scrollbar-width: thin;
+}
+
+.lumora-player-settings-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.45rem 0.85rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.lumora-player-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem;
+  border-radius: 0.7rem;
+  font-size: 0.75rem;
+}
+
+.lumora-player-setting:hover {
+  background: rgb(255 255 255 / 3%);
+}
+
+.lumora-player-setting > span {
+  min-width: 0;
+  color: rgb(var(--color-content) / 85%);
+}
+
+.lumora-player-setting small {
+  display: block;
+  margin-top: 0.25rem;
+  max-width: 9rem;
+  font-size: 0.6rem;
+  line-height: 1.4;
+  color: rgb(var(--color-content-muted));
+}
+
+.lumora-player-setting select {
+  min-height: 44px;
+  max-width: 58%;
+  min-width: 7rem;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 0.6rem;
+  padding: 0.5rem 0.55rem;
+  background: rgb(var(--color-surface-overlay) / 80%);
+  color: rgb(var(--color-content));
+  font-size: 0.72rem;
+  cursor: pointer;
+}
+
+.lumora-player-setting select:disabled {
+  color: rgb(var(--color-content-muted));
+  opacity: 1;
+  cursor: default;
+}
+
+.lumora-player-setting option {
+  background: rgb(var(--color-surface));
+}
+
+.lumora-subtitle-timing {
+  margin: 0.65rem 0.45rem;
+  padding-top: 0.9rem;
+  border-top: 1px solid rgb(255 255 255 / 10%);
+  font-size: 0.72rem;
+}
+
+.lumora-subtitle-timing > div:first-child {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.65rem;
+}
+
+.lumora-subtitle-timing output {
+  color: rgb(var(--color-primary-hover));
+  font-variant-numeric: tabular-nums;
+}
+
+.lumora-subtitle-timing-controls {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.4rem;
+}
+
+.lumora-subtitle-timing-controls button {
+  min-height: 44px;
+  border: 1px solid rgb(255 255 255 / 12%);
+  border-radius: 0.6rem;
+  background: rgb(255 255 255 / 5%);
+  color: rgb(var(--color-content));
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+
+.lumora-subtitle-timing-controls button:hover:not(:disabled) {
+  background: rgb(var(--color-primary) / 15%);
+  border-color: rgb(var(--color-primary) / 50%);
+}
+
+.lumora-subtitle-timing-controls button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.lumora-subtitle-timing p,
+.lumora-player-catalog-status {
+  margin: 0.55rem 0 0;
+  color: rgb(var(--color-content-muted));
+  font-size: 0.62rem;
+  line-height: 1.6;
+}
+
+.lumora-player-catalog-status {
+  padding: 0.45rem;
+}
+
+.lumora-videojs.vjs-user-inactive.vjs-playing .lumora-player-heading,
+.lumora-videojs.vjs-user-inactive.vjs-playing .lumora-player-tools:not(.is-open) {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.lumora-videojs.vjs-user-inactive.vjs-playing .lumora-player-tools:not(.is-open) .lumora-player-settings-anchor {
+  pointer-events: none;
+}
+
+.lumora-player-switch-status {
+  position: absolute;
+  top: 1rem;
+  right: 1.25rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid rgb(var(--color-primary) / 28%);
+  border-radius: 0.8rem;
+  background: rgb(var(--color-base) / 85%);
+  font-size: 0.72rem;
+  backdrop-filter: blur(14px);
+  pointer-events: none;
+  z-index: 9;
+}
+
+.lumora-player-switch-status > span {
+  display: block;
+  margin-top: 0.3rem;
+  color: rgb(var(--color-content-muted));
+  font-size: 0.6rem;
+}
+
+.lumora-player-seek-feedback {
+  position: absolute;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 0.4rem;
+  width: 7rem;
+  height: 7rem;
+  border: 1px solid rgb(255 255 255 / 13%);
+  border-radius: 50%;
+  background: rgb(var(--color-base) / 62%);
+  color: rgb(var(--color-content));
+  backdrop-filter: blur(12px);
+  pointer-events: none;
+  z-index: 7;
+  transform: translate(-50%, -50%);
+  animation: lumora-seek-feedback 750ms var(--ease-deliberate) both;
+}
+
+.lumora-player-seek-feedback.is-left {
+  left: 22%;
+}
+
+.lumora-player-seek-feedback.is-right {
+  left: 78%;
+}
+
+.lumora-player-seek-feedback > span:first-child {
+  font-size: 1.8rem;
+  font-weight: 650;
+  letter-spacing: -0.04em;
+  color: rgb(var(--color-primary-hover));
+}
+
+.lumora-player-seek-feedback > span:last-child {
+  font-size: 0.58rem;
+}
+
+@keyframes lumora-seek-feedback {
+  0% { opacity: 0; scale: 0.92; }
+  15%, 70% { opacity: 1; scale: 1; }
+  100% { opacity: 0; scale: 1.06; }
+}
+
+@container (max-width: 520px) {
+  .lumora-videojs .vjs-control-bar {
+    height: 3.8rem;
+    padding: 0.8rem 0.3rem 0;
+  }
+  .lumora-videojs .vjs-control-bar .vjs-button {
+    width: 44px;
+  }
+  .lumora-videojs .vjs-current-time,
+  .lumora-videojs .vjs-duration,
+  .lumora-videojs .vjs-time-divider {
+    display: none;
+  }
+  .lumora-videojs .vjs-volume-panel {
+    flex-grow: 1;
+  }
+  .lumora-videojs .vjs-progress-control {
+    left: 0.8rem;
+    right: 0.8rem;
+    top: 0;
+  }
+  .lumora-player-heading {
+    padding: 0.85rem 0.9rem 2rem;
+    gap: 0.3rem;
+  }
+  .lumora-player-tools {
+    left: 0.75rem;
+    right: 0.75rem;
+    bottom: 4rem;
+    gap: 0.5rem;
+  }
+  .lumora-player-progress {
+    padding: 0.45rem 0.6rem;
+    gap: 0.2rem 0.55rem;
+    border-radius: 0.65rem;
+  }
+  .lumora-player-clock {
+    font-size: 0.65rem;
+  }
+  .lumora-player-percent {
+    font-size: 0.72rem;
+    padding-left: 0.55rem;
+  }
+  .lumora-player-settings-button {
+    padding: 0.5rem 0.65rem;
+    font-size: 0.68rem;
+  }
+  .lumora-player-settings {
+    width: min(22rem, calc(100cqw - 1.5rem));
+    max-height: calc(100cqh - 7.7rem);
+    border-radius: 0.85rem;
+    padding: 0.45rem;
+  }
+  .lumora-player-settings-heading {
+    padding-bottom: 0.5rem;
+  }
+  .lumora-player-seek-feedback {
+    width: 5rem;
+    height: 5rem;
+    gap: 0.25rem;
+  }
+  .lumora-player-seek-feedback > span:first-child {
+    font-size: 1.35rem;
+  }
+  .lumora-videojs .vjs-big-play-button {
+    height: 4rem;
+    width: 4rem;
+    line-height: 4rem;
+    font-size: 1.6rem;
+  }
+}
+
+@container (max-height: 280px) {
+  .lumora-player-heading {
+    display: none;
+  }
 }
 
 /* Visible focus for keyboard users (WCAG 2.2 AA, Section 5) */
