@@ -119,7 +119,7 @@ export function NativePlayer(props: NativePlayerProps) {
   const [playbackRate, setPlaybackRate] = useState(1);
   const [seekFeedback, setSeekFeedback] = useState<{ side: 'left' | 'right'; sequence: number } | null>(null);
   const settingsId = useId();
-  const settingsButtonRef = useRef<HTMLButtonElement | null>(null);
+  const panelButtonRef = useRef<HTMLButtonElement | null>(null);
   const speedRef = useRef<(rate: number) => void>(() => {});
   const castActionRef = useRef<() => void>(() => {});
   const castCommandRef = useRef<(command: 'play' | 'pause' | 'back' | 'forward') => void>(() => {});
@@ -261,8 +261,8 @@ export function NativePlayer(props: NativePlayerProps) {
       };
       flush = () => {
         if (videoPlayer.isDisposed() || !resumed || pendingPosition) return;
-        const position = videoPlayer.currentTime();
-        const duration = videoPlayer.duration();
+        const position = castHandle && lastRemote ? lastRemote.positionSeconds : videoPlayer.currentTime();
+        const duration = castHandle && lastRemote ? lastRemote.durationSeconds : videoPlayer.duration();
         if (typeof position !== 'number' || !Number.isFinite(position)) return;
         const durationSeconds = typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : undefined;
         const canReport = viewerKey.startsWith('account:') && Boolean(episodeId || (seasonNumber === undefined && episodeNumber === undefined));
@@ -478,38 +478,88 @@ export function NativePlayer(props: NativePlayerProps) {
         videoPlayer.playbackRate(rate);
         setPlaybackRate(rate);
       };
+      const saveRemote = (remote: CastingProgress, force = false) => {
+        lastRemote = remote;
+        setRemoteProgress(remote);
+        setProgress({ position: remote.positionSeconds, duration: remote.durationSeconds ?? 0 });
+        const now = Date.now();
+        if (!force && now - lastCastReportAt < 5_000) return;
+        lastCastReportAt = now;
+        const canReport = viewerKey.startsWith('account:') && Boolean(episodeId || (seasonNumber === undefined && episodeNumber === undefined));
+        const checkpoint = writePlaybackCheckpoint(viewerKey, mediaKey, remote.positionSeconds, remote.durationSeconds, canReport);
+        if (viewerKey === 'guest') {
+          updateGuestPosition(titleSlug, remote.positionSeconds, remote.durationSeconds, { episodeId, seasonNumber, episodeNumber });
+        } else if (canReport) {
+          queuedReport = { positionSeconds: remote.positionSeconds, durationSeconds: remote.durationSeconds, checkpoint };
+          void sendReports();
+        }
+      };
+      const restoreLocal = () => {
+        videoPlayer.controls(true);
+        if (!lastRemote) return;
+        videoPlayer.currentTime(lastRemote.positionSeconds);
+        if (lastRemote.paused) videoPlayer.pause();
+        else void videoPlayer.play()?.catch(() => {});
+        setProgress({ position: lastRemote.positionSeconds, duration: lastRemote.durationSeconds ?? 0 });
+      };
+      const disconnectCast = (stop: boolean) => {
+        if (lastRemote) saveRemote(lastRemote, true);
+        const handle = castHandle;
+        castHandle = null;
+        if (stop) handle?.stop(); else handle?.dispose();
+        restoreLocal();
+        setRemoteProgress(null);
+        setCastStatus({ state: 'idle' });
+      };
       castActionRef.current = () => {
         if (castHandle) {
-          castHandle.stop(); castHandle = null;
-          setCastStatus({ state: 'idle' });
+          disconnectCast(true);
           return;
         }
         const mediaElement = videoPlayer.el().querySelector('video');
         if (!(mediaElement instanceof HTMLVideoElement)) return;
+        const castSource = currentUrl;
         setCastStatus({ state: 'connecting', message: 'Choose a device' });
         void requestCasting(mediaElement, {
-          url: currentUrl, contentType: mimeType(source.kind),
+          url: castSource, contentType: mimeType(source.kind),
+          resolveUrl: async () => {
+            const target = new URL(castSource, window.location.href);
+            if (target.origin !== window.location.origin || target.pathname !== '/api/vidnest') return target.href;
+            target.searchParams.set('cast', '1');
+            const response = await fetch(target, { credentials: 'same-origin', cache: 'no-store' });
+            if (!response.ok) throw new Error('Cast playback is temporarily unavailable.');
+            const body = await response.json() as { url?: string };
+            if (!body.url) throw new Error('Cast playback is temporarily unavailable.');
+            const capability = new URL(body.url, window.location.href);
+            if (capability.origin !== window.location.origin || capability.pathname !== '/api/vidnest' || !capability.searchParams.has('token')) {
+              throw new Error('Invalid Cast playback capability.');
+            }
+            return capability.href;
+          },
           ...(titleName ? { title: titleName } : {}),
           ...(startProps.posterUrl ? { posterUrl: startProps.posterUrl } : {}),
           positionSeconds: videoPlayer.currentTime() ?? 0, autoplay: !videoPlayer.paused(),
-        }, (remote) => {
-          setProgress({ position: remote.positionSeconds, duration: remote.durationSeconds ?? 0 });
-          const canReport = viewerKey.startsWith('account:') && Boolean(episodeId || (seasonNumber === undefined && episodeNumber === undefined));
-          const checkpoint = writePlaybackCheckpoint(viewerKey, mediaKey, remote.positionSeconds, remote.durationSeconds, canReport);
-          if (viewerKey === 'guest') {
-            updateGuestPosition(titleSlug, remote.positionSeconds, remote.durationSeconds, { episodeId, seasonNumber, episodeNumber });
-          } else if (canReport) {
-            queuedReport = { positionSeconds: remote.positionSeconds, durationSeconds: remote.durationSeconds, checkpoint };
-            void sendReports();
-          }
-        }, () => { castHandle = null; setCastStatus({ state: 'idle' }); })
+          ...(() => {
+            const track = externalSubtitles.find((candidate) => candidate.url && trackKey(candidate) === desired.subtitle);
+            return track?.url ? { subtitle: { url: track.url, label: track.label, ...(track.language ? { language: track.language } : {}) } } : {};
+          })(),
+        }, (remote) => saveRemote(remote), () => disconnectCast(false))
           .then((handle) => {
+            if (cancelled || videoPlayer.isDisposed()) { handle?.dispose(); return; }
             if (!handle) { setCastStatus({ state: 'idle', message: 'Device picker opened' }); return; }
             castHandle = handle;
             videoPlayer.pause();
+            videoPlayer.controls(false);
+            setActivePanel(null);
             setCastStatus({ state: 'connected', message: handle.deviceName });
           })
           .catch((error: unknown) => setCastStatus({ state: 'error', message: error instanceof Error ? error.message : 'Casting could not start.' }));
+      };
+      castCommandRef.current = (command) => {
+        if (!castHandle || !lastRemote) return;
+        if (command === 'play') void castHandle.play();
+        else if (command === 'pause') void castHandle.pause();
+        else void castHandle.seek(Math.max(0, lastRemote.positionSeconds + (command === 'back' ? -10 : 10)));
       };
 
       const updateProgress = () => {
@@ -633,6 +683,7 @@ export function NativePlayer(props: NativePlayerProps) {
         playerElement.removeEventListener('dblclick', blockTouchClick, true);
         playerElement.removeEventListener('click', handleSkip);
         clearSidecars();
+        if (lastRemote) saveRemote(lastRemote, true);
         castHandle?.dispose(); castHandle = null;
       };
       configureMediaElement(videoPlayer);
@@ -697,6 +748,7 @@ export function NativePlayer(props: NativePlayerProps) {
       delayRef.current = () => {};
       speedRef.current = () => {};
       castActionRef.current = () => {};
+      castCommandRef.current = () => {};
       if (playerRef.current === player) playerRef.current = null;
       const disposedTarget = player?.el();
       setPortalTarget((current) => current === disposedTarget ? null : current);
@@ -713,7 +765,7 @@ export function NativePlayer(props: NativePlayerProps) {
     const handleEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault(); event.stopPropagation();
-      setActivePanel(null); settingsButtonRef.current?.focus();
+      setActivePanel(null); panelButtonRef.current?.focus();
     };
     document.addEventListener('pointerdown', handleOutside);
     portalTarget.addEventListener('keydown', handleEscape as EventListener);
@@ -726,7 +778,7 @@ export function NativePlayer(props: NativePlayerProps) {
   const percentage = progress.duration > 0 ? Math.min(100, Math.max(0, progress.position / progress.duration * 100)) : null;
   const subtitlesAvailable = options.subtitles.length > 0;
   const audioAvailable = options.audioTracks.length > 0;
-  const upNextVisible = Boolean(props.upNext && progress.duration > 0 && progress.duration - progress.position <= 90);
+  const upNextVisible = Boolean(props.upNext && progress.duration > 0 && progress.position >= progress.duration * 0.9 && progress.duration - progress.position <= 90);
   const togglePanel = (panel: NonNullable<typeof activePanel>) => setActivePanel((current) => current === panel ? null : panel);
 
   return <div className="lumora-player-frame relative h-full w-full bg-black">
@@ -740,11 +792,11 @@ export function NativePlayer(props: NativePlayerProps) {
         </div>
         <div className="lumora-player-settings-anchor" data-player-settings="">
           <div className="lumora-player-toolbar" role="toolbar" aria-label="Playback options">
-            <ToolButton label="Quality" active={activePanel === 'quality'} onClick={() => togglePanel('quality')}><QualityIcon /></ToolButton>
-            <ToolButton label="Audio" active={activePanel === 'audio'} onClick={() => togglePanel('audio')}><AudioIcon /></ToolButton>
-            <ToolButton label="Subtitles" active={activePanel === 'subtitles'} onClick={() => togglePanel('subtitles')}><SubtitleIcon /></ToolButton>
+            <ToolButton label="Quality" active={activePanel === 'quality'} disabled={castStatus.state === 'connected'} controls={settingsId} onClick={(event) => { panelButtonRef.current = event.currentTarget; togglePanel('quality'); }}><QualityIcon /></ToolButton>
+            <ToolButton label="Audio" active={activePanel === 'audio'} disabled={castStatus.state === 'connected'} controls={settingsId} onClick={(event) => { panelButtonRef.current = event.currentTarget; togglePanel('audio'); }}><AudioIcon /></ToolButton>
+            <ToolButton label="Subtitles" active={activePanel === 'subtitles'} disabled={castStatus.state === 'connected'} controls={settingsId} onClick={(event) => { panelButtonRef.current = event.currentTarget; togglePanel('subtitles'); }}><SubtitleIcon /></ToolButton>
             <ToolButton label={castStatus.state === 'connected' ? 'Stop casting' : 'Cast'} active={castStatus.state === 'connected'} onClick={() => castActionRef.current()}><CastIcon /></ToolButton>
-            <button ref={settingsButtonRef} type="button" onClick={() => { togglePanel('settings'); playerRef.current?.userActive(true); }} aria-label="Settings" aria-expanded={activePanel === 'settings'} aria-controls={settingsId} className="lumora-player-settings-button"><SettingsIcon /></button>
+            <button type="button" disabled={castStatus.state === 'connected'} onClick={(event) => { panelButtonRef.current = event.currentTarget; togglePanel('settings'); playerRef.current?.userActive(true); }} aria-label="Settings" aria-expanded={activePanel === 'settings'} aria-controls={settingsId} className="lumora-player-settings-button"><SettingsIcon /></button>
           </div>
           {activePanel ? <div id={settingsId} className="lumora-player-settings" role="region" aria-label={`${activePanel[0]!.toUpperCase()}${activePanel.slice(1)} settings`}>
             <div className="lumora-player-settings-heading"><span>{activePanel === 'settings' ? 'Playback' : activePanel[0]!.toUpperCase() + activePanel.slice(1)}</span><span className="lumora-player-eyebrow">{activePanel === 'settings' ? 'Settings' : 'Choose'}</span></div>
@@ -758,6 +810,13 @@ export function NativePlayer(props: NativePlayerProps) {
         </div>
         {castStatus.message ? <div className={`lumora-player-cast-status is-${castStatus.state}`} role="status">{castStatus.message}</div> : null}
       </div>
+      {castStatus.state === 'connected' && remoteProgress ? <div className="lumora-player-cast-controls" data-player-ui="" role="group" aria-label={`Casting to ${castStatus.message ?? 'device'}`}>
+        <span><strong>{castStatus.message}</strong><small>{formatTime(remoteProgress.positionSeconds)} / {remoteProgress.durationSeconds ? formatTime(remoteProgress.durationSeconds) : '--:--'}</small></span>
+        <button type="button" aria-label="Cast back 10 seconds" onClick={() => castCommandRef.current('back')}>-10</button>
+        <button type="button" aria-label={remoteProgress.paused ? 'Play on Cast device' : 'Pause Cast device'} onClick={() => castCommandRef.current(remoteProgress.paused ? 'play' : 'pause')}>{remoteProgress.paused ? 'Play' : 'Pause'}</button>
+        <button type="button" aria-label="Cast forward 10 seconds" onClick={() => castCommandRef.current('forward')}>+10</button>
+        <button type="button" aria-label="Stop casting" onClick={() => castActionRef.current()}>Stop</button>
+      </div> : null}
       {upNextVisible && props.upNext ? <a href={props.upNext.href} className="lumora-player-up-next" data-player-ui=""><span className="lumora-player-eyebrow">Up next</span><strong>{props.upNext.name}</strong><span>Play next episode</span></a> : null}
       {switching ? <div className="lumora-player-switch-status" role="status">Updating playback<span>Your position is preserved</span></div> : null}
       {seekFeedback ? <div key={seekFeedback.sequence} className={`lumora-player-seek-feedback is-${seekFeedback.side}`} role="status"><span aria-hidden="true">{seekFeedback.side === 'left' ? '-10' : '+10'}</span><span>{seekFeedback.side === 'left' ? 'Back' : 'Forward'} 10 seconds</span></div> : null}
@@ -769,8 +828,8 @@ function SettingsSelect({ label, value, onChange, disabled, status, children }: 
   return <label className="lumora-player-setting"><span>{label}{status ? <small>{status}</small> : null}</span><select aria-label={label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>{children}</select></label>;
 }
 
-function ToolButton({ label, active, onClick, children }: { label: string; active: boolean; onClick: () => void; children: React.ReactNode }) {
-  return <button type="button" className="lumora-player-tool-button" aria-label={label} title={label} aria-pressed={active} onClick={onClick}>{children}<span>{label}</span></button>;
+function ToolButton({ label, active, disabled, controls, onClick, children }: { label: string; active: boolean; disabled?: boolean; controls?: string; onClick: (event: React.MouseEvent<HTMLButtonElement>) => void; children: React.ReactNode }) {
+  return <button type="button" disabled={disabled} className="lumora-player-tool-button" aria-label={label} title={label} {...(controls ? { 'aria-controls': controls, 'aria-expanded': active } : { 'aria-pressed': active })} onClick={onClick}>{children}<span>{label}</span></button>;
 }
 
 function SettingsIcon() {

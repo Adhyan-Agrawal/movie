@@ -1,15 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
+import { createCipheriv, createHmac, randomBytes } from 'node:crypto';
 let GET: typeof import('@/app/api/vidnest/route').GET;
 
 const API_SECRET = 'vidnest-test-secret-that-is-at-least-32-characters';
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
-
-type TokenPayload = {
-  expiresAt: number;
-  headers: Record<string, string>;
-  url: string;
-};
 
 function playbackRequest(headers?: HeadersInit): NextRequest {
   return new NextRequest('http://localhost/api/vidnest?tmdbId=27205&type=movie', { headers });
@@ -34,15 +29,31 @@ function installFetch(upstreamUrl: string, upstreamResponse: Response, streamHea
   return fetchMock;
 }
 
-function decodeProxyPaths(playlist: string): TokenPayload[] {
-  const paths = playlist.match(/\/api\/vidnest\?token=[A-Za-z0-9._%-]+/g) ?? [];
-  return paths.map((path) => {
-    const token = new URL(path, 'http://localhost').searchParams.get('token');
-    if (!token) throw new Error('Expected a signed proxy token.');
-    const encoded = token.split('.')[0];
-    if (!encoded) throw new Error('Expected an encoded proxy payload.');
-    return JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as TokenPayload;
-  });
+function proxyPaths(playlist: string): string[] {
+  return playlist.match(/\/api\/vidnest\?token=[A-Za-z0-9._%-]+/g) ?? [];
+}
+
+async function followProxyPaths(playlist: string, fetchMock: ReturnType<typeof installFetch>) {
+  const requests: Array<{ url: string; headers: Headers }> = [];
+  for (const path of proxyPaths(playlist)) {
+    const request = new NextRequest(new URL(path, 'http://localhost'));
+    expect(request.nextUrl.searchParams.get('token')).toMatch(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/);
+    fetchMock.mockResolvedValueOnce(new Response(new Uint8Array([255]), { headers: { 'Content-Type': 'application/octet-stream' } }));
+    const response = await GET(request);
+    expect(response.status).toBe(200);
+    const call = fetchMock.mock.calls.at(-1)!;
+    requests.push({ url: String(call[0]), headers: new Headers((call[1] as RequestInit).headers) });
+    await response.body?.cancel();
+  }
+  return requests;
+}
+
+function encryptedFixture(value: unknown, secret = API_SECRET, context = 'vidnest-proxy:aes-256-gcm:v1'): string {
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', createHmac('sha256', secret).update(context).digest(), nonce);
+  cipher.setAAD(Buffer.from(context));
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
+  return ['v1', nonce.toString('base64url'), ciphertext.toString('base64url'), cipher.getAuthTag().toString('base64url')].join('.');
 }
 
 function chunkedBody(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
@@ -62,6 +73,7 @@ beforeEach(async () => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
@@ -82,9 +94,10 @@ describe('Vidnest proxy transport', () => {
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('application/vnd.apple.mpegurl');
     expect(response.headers.get('content-range')).toBeNull();
-    expect(decodeProxyPaths(await response.text()).map((payload) => payload.url)).toEqual(['https://cdn.example/segment.ts']);
+    const playlist = await response.text();
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(new Headers((fetchMock.mock.calls[2]![1] as RequestInit).headers).get('range')).toBeNull();
+    expect((await followProxyPaths(playlist, fetchMock)).map((request) => request.url)).toEqual(['https://cdn.example/segment.ts']);
   });
 
   it('accepts mixed-case provider headers without widening the allowlist', async () => {
@@ -162,12 +175,11 @@ describe('Vidnest proxy transport', () => {
 
     expect(response.status).toBe(200);
     expect(response.headers.get('content-range')).toBeNull();
-    expect(decodeProxyPaths(await response.text()).map((payload) => payload.url)).toEqual([
-      'https://cdn.example/segment.ts',
-    ]);
+    const playlist = await response.text();
     const fullFetchHeaders = new Headers((fetchMock.mock.calls[2]![1] as RequestInit).headers);
     expect(fullFetchHeaders.get('range')).toBeNull();
     expect(fullFetchHeaders.get('if-range')).toBeNull();
+    expect((await followProxyPaths(playlist, fetchMock)).map((request) => request.url)).toEqual(['https://cdn.example/segment.ts']);
   });
 
   it('preserves an unsatisfiable media range and its length metadata', async () => {
@@ -220,6 +232,9 @@ describe('Vidnest proxy transport', () => {
   });
 
   it('uses the redirected response URL for same-origin playlist children with four-hour tokens', async () => {
+    vi.useFakeTimers();
+    const issuedAt = new Date('2026-10-25T12:00:00Z').getTime();
+    vi.setSystemTime(issuedAt);
     const playlist = [
       '#EXTM3U',
       '#EXT-X-KEY:METHOD=AES-128,URI="keys/key.bin"',
@@ -230,31 +245,30 @@ describe('Vidnest proxy transport', () => {
     const upstream = responseAt(playlist, {
       headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
     }, 'https://redirected.example/final/master');
-    installFetch('https://origin.example/opaque', upstream, {
+    const fetchMock = installFetch('https://origin.example/opaque', upstream, {
       origin: 'https://player.example',
       referer: 'https://player.example/watch',
     });
-    const before = Date.now();
-
     const response = await GET(playbackRequest());
     const rewritten = await response.text();
-    const payloads = decodeProxyPaths(rewritten);
-    const after = Date.now();
+    const requests = await followProxyPaths(rewritten, fetchMock);
 
     expect(response.headers.get('content-type')).toContain('application/vnd.apple.mpegurl');
-    expect(payloads.map((payload) => payload.url)).toEqual([
+    expect(requests.map((request) => request.url)).toEqual([
       'https://redirected.example/final/keys/key.bin',
       'https://redirected.example/segments/one.ts',
     ]);
-    expect(payloads).toHaveLength(2);
-    for (const payload of payloads) {
-      expect(payload.expiresAt).toBeGreaterThanOrEqual(before + FOUR_HOURS_MS);
-      expect(payload.expiresAt).toBeLessThanOrEqual(after + FOUR_HOURS_MS);
-      expect(payload.headers).toEqual({
-        referer: 'https://player.example/watch',
-        origin: 'https://player.example',
-      });
+    expect(requests).toHaveLength(2);
+    for (const request of requests) {
+      expect(request.headers.get('referer')).toBe('https://player.example/watch');
+      expect(request.headers.get('origin')).toBe('https://player.example');
     }
+    vi.setSystemTime(issuedAt + FOUR_HOURS_MS - 1);
+    expect(await followProxyPaths(rewritten, fetchMock)).toHaveLength(2);
+    vi.setSystemTime(issuedAt + FOUR_HOURS_MS);
+    const before = fetchMock.mock.calls.length;
+    for (const path of proxyPaths(rewritten)) expect((await GET(new NextRequest(new URL(path, 'http://localhost')))).status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledTimes(before);
   });
 
   it('detects a chunked extensionless HLS body by its EXTM3U signature', async () => {
@@ -266,14 +280,14 @@ describe('Vidnest proxy transport', () => {
     ]), {
       headers: { 'Content-Type': 'application/octet-stream' },
     }, 'https://cdn.example/live/opaque');
-    installFetch('https://cdn.example/live/opaque', upstream);
+    const fetchMock = installFetch('https://cdn.example/live/opaque', upstream);
 
     const response = await GET(playbackRequest());
     const rewritten = await response.text();
-    const [payload] = decodeProxyPaths(rewritten);
+    const [request] = await followProxyPaths(rewritten, fetchMock);
 
     expect(response.headers.get('content-type')).toContain('application/vnd.apple.mpegurl');
-    expect(payload?.url).toBe('https://cdn.example/live/segment.ts');
+    expect(request?.url).toBe('https://cdn.example/live/segment.ts');
   });
 
   it('replays probed bytes without corrupting an extensionless non-playlist stream', async () => {
@@ -293,5 +307,115 @@ describe('Vidnest proxy transport', () => {
     expect(response.headers.get('content-type')).toBe('video/mp4');
     expect(response.headers.get('content-length')).toBe(String(expected.byteLength));
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(expected);
+  });
+});
+
+describe('VidNest authenticated encrypted capabilities', () => {
+  async function issuedCapability() {
+    const fetchMock = installFetch('https://cdn.example/master.m3u8', new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts'), {
+      referer: 'https://player.example/watch', origin: 'https://player.example',
+    });
+    const response = await GET(playbackRequest());
+    const path = proxyPaths(await response.text())[0]!;
+    return { fetchMock, path, token: new URL(path, 'http://localhost').searchParams.get('token')! };
+  }
+
+  it('uses distinct random nonces and never puts URLs or provider headers in the public payload', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-10-25T12:00:00Z'));
+    installFetch('https://cdn.example/master.m3u8', new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts\n#EXTINF:6,\nsegment.ts'), {
+      referer: 'https://player.example/watch', origin: 'https://player.example',
+    });
+    const response = await GET(playbackRequest());
+    const playlist = await response.text();
+    const tokens = proxyPaths(playlist).map((path) => new URL(path, 'http://localhost').searchParams.get('token')!);
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0] === tokens[1]).toBe(false);
+    expect(tokens[0]!.split('.')[1] === tokens[1]!.split('.')[1]).toBe(false);
+    expect(playlist).not.toMatch(/cdn\.example|player\.example|"headers"/);
+    for (const token of tokens) {
+      expect(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/.test(token)).toBe(true);
+      const ciphertext = Buffer.from(token.split('.')[2]!, 'base64url');
+      for (const privateValue of ['https://cdn.example/segment.ts', 'https://player.example/watch', '"headers"', '"expiresAt"']) {
+        expect(ciphertext.includes(Buffer.from(privateValue))).toBe(false);
+      }
+      expect(() => JSON.parse(ciphertext.toString('utf8'))).toThrow();
+    }
+  });
+
+  it.each([1, 2, 3])('rejects tampering with encrypted token component %i before contacting upstream', async (index) => {
+    const { fetchMock, token } = await issuedCapability();
+    const parts = token.split('.');
+    const changed = Buffer.from(parts[index]!, 'base64url'); changed[0] = changed[0]! ^ 1;
+    parts[index] = changed.toString('base64url');
+    const before = fetchMock.mock.calls.length;
+    const response = await GET(new NextRequest(`http://localhost/api/vidnest?token=${parts.join('.')}`));
+    expect(response.status).toBe(403);
+    expect(response.headers.has('access-control-allow-origin')).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(before);
+  });
+
+  it('rejects secret rotation and a different HMAC/AAD context without exposing a decrypt helper', async () => {
+    const { fetchMock, path } = await issuedCapability();
+    const before = fetchMock.mock.calls.length;
+    vi.stubEnv('VIDNEST_API_SECRET', 'rotated-vidnest-test-secret-at-least-32-characters');
+    expect((await GET(new NextRequest(new URL(path, 'http://localhost')))).status).toBe(403);
+    vi.stubEnv('VIDNEST_API_SECRET', API_SECRET);
+    const token = encryptedFixture({ expiresAt: Date.now() + 60_000, url: 'https://cdn.example/segment.ts', headers: {} }, API_SECRET, 'another-capability-context');
+    expect((await GET(new NextRequest(`http://localhost/api/vidnest?token=${token}`))).status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledTimes(before);
+  });
+
+  it('rejects unknown versions, malformed encodings, wrong nonce/tag sizes, and legacy signed plaintext', async () => {
+    const value = { expiresAt: Date.now() + 60_000, url: 'https://cdn.example/segment.ts', headers: {} };
+    const token = encryptedFixture(value);
+    const parts = token.split('.');
+    const replace = (index: number, value: string) => parts.map((part, position) => position === index ? value : part).join('.');
+    const tag = parts[3]!;
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const noncanonicalTag = tag.slice(0, -1) + alphabet[(alphabet.indexOf(tag.at(-1)!) + 1) % 64];
+    const plaintext = Buffer.from(JSON.stringify(value)).toString('base64url');
+    const oldKey = createHmac('sha256', API_SECRET).update('vidnest-proxy').digest();
+    const legacy = `${plaintext}.${createHmac('sha256', oldKey).update(plaintext).digest('base64url')}`;
+    const invalid = [replace(0, 'v2'), `${token}.extra`, parts.slice(0, 3).join('.'), replace(1, '*'),
+      replace(1, Buffer.alloc(11).toString('base64url')), replace(2, ''), replace(3, Buffer.alloc(15).toString('base64url')),
+      replace(3, noncanonicalTag), legacy];
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    for (const token of invalid) expect((await GET(new NextRequest(`http://localhost/api/vidnest?token=${encodeURIComponent(token)}`))).status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: 'HTTP URL', patch: { url: 'http://cdn.example/segment.ts' } },
+    { name: 'embedded URL credentials', patch: { url: 'https://user:password@cdn.example/segment.ts' } },
+    { name: 'newline URL', patch: { url: 'https://cdn.example/segment.ts\n' } },
+    { name: 'expired', patch: { expiresAt: 0 } },
+    { name: 'non-numeric expiry', patch: { expiresAt: 'tomorrow' } },
+    { name: 'fractional expiry', patch: { expiresAt: 1.5 } },
+    { name: 'absent headers', patch: { headers: null } },
+    { name: 'array headers', patch: { headers: [] } },
+    { name: 'cookie header', patch: { headers: { cookie: 'private=1' } } },
+    { name: 'HTTP referer', patch: { headers: { referer: 'http://player.example' } } },
+    { name: 'newline origin', patch: { headers: { origin: 'https://player.example\r\nCookie: private' } } },
+    { name: 'object header', patch: { headers: { referer: {} } } },
+    { name: 'header URL credentials', patch: { headers: { origin: 'https://user:password@player.example' } } },
+  ])('rejects authenticated but invalid decrypted payload: $name', async ({ patch }) => {
+    const token = encryptedFixture({ expiresAt: Date.now() + 60_000, url: 'https://cdn.example/segment.ts', headers: {}, ...patch });
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    const response = await GET(new NextRequest(`http://localhost/api/vidnest?token=${token}`));
+    expect(response.status).toBe(403);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects lifetimes longer than four hours and non-object authenticated payloads', async () => {
+    const fetchMock = vi.fn(); vi.stubGlobal('fetch', fetchMock);
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-10-25T12:00:00Z'));
+    for (const value of [null, [], 'not-a-capability', {
+      expiresAt: Date.now() + FOUR_HOURS_MS + 1, url: 'https://cdn.example/segment.ts', headers: {},
+    }]) {
+      const response = await GET(new NextRequest(`http://localhost/api/vidnest?token=${encryptedFixture(value)}`));
+      expect(response.status).toBe(403);
+    }
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

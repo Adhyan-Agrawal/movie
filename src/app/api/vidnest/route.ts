@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { NextRequest, NextResponse } from 'next/server';
 import { decodedAudioTracks, hasHlsPlaybackUri, hlsStartupPlan, httpsUrl, metadataLabel, metadataLanguage, parseHlsMetadata, parseMp4AudioLanguages } from '@/lib/providers/hls-metadata';
@@ -10,6 +10,8 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const TOKEN_TTL_MS = 4 * 60 * 60 * 1000;
+const TOKEN_VERSION = 'v1';
+const TOKEN_CONTEXT = 'vidnest-proxy:aes-256-gcm:v1';
 const PLAYLIST_PROBE_BYTES = 1024;
 const PLAYLIST_SIGNATURE = '#EXTM3U';
 const STARTUP_PROBE_BYTES = 1024;
@@ -25,6 +27,12 @@ const MANIFEST_MAX_BYTES = 1024 * 1024;
 const RESOLVER_MAX_BYTES = 1024 * 1024;
 const PROBE_CONCURRENCY = 4;
 const MAX_CACHE_ENTRIES = 128;
+const RECEIVER_CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': 'Range',
+  'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Range, Content-Length, Content-Type, ETag, X-Vidnest-Stream-Id',
+};
 
 type StreamHeaders = Record<string, string>;
 type ProxyPayload = { expiresAt: number; headers: StreamHeaders; url: string };
@@ -217,22 +225,42 @@ function sign(value: string, secret: string): string {
 }
 
 function createToken(payload: ProxyPayload, secret: string): string {
-  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return `${encoded}.${sign(encoded, secret)}`;
+  const key = createHmac('sha256', secret).update(TOKEN_CONTEXT).digest();
+  const nonce = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
+  cipher.setAAD(Buffer.from(TOKEN_CONTEXT));
+  const encrypted = Buffer.concat([cipher.update(JSON.stringify(payload), 'utf8'), cipher.final()]);
+  return [TOKEN_VERSION, nonce.toString('base64url'), encrypted.toString('base64url'), cipher.getAuthTag().toString('base64url')].join('.');
 }
 
 function readToken(token: string, secret: string): ProxyPayload | null {
-  const [encoded, signature] = token.split('.');
-  if (!encoded || !signature) return null;
-  const expected = Buffer.from(sign(encoded, secret));
-  const received = Buffer.from(signature);
-  if (received.length !== expected.length || !timingSafeEqual(received, expected)) return null;
-
   try {
-    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8')) as ProxyPayload;
-    const url = new URL(payload.url);
-    if (url.protocol !== 'https:' || payload.expiresAt < Date.now() || !payload.headers) return null;
-    return payload;
+    if (token.length > RESOLVER_MAX_BYTES * 2) return null;
+    const parts = token.split('.');
+    if (parts.length !== 4 || parts[0] !== TOKEN_VERSION) return null;
+    const encoded = parts.slice(1);
+    if (encoded.some((part) => !/^[A-Za-z0-9_-]+$/.test(part))) return null;
+    const buffers = encoded.map((part) => Buffer.from(part, 'base64url'));
+    if (buffers.some((part, index) => part.toString('base64url') !== encoded[index])) return null;
+    const [nonce, encrypted, tag] = buffers;
+    if (!nonce || nonce.length !== 12 || !encrypted?.length || !tag || tag.length !== 16) return null;
+    const key = createHmac('sha256', secret).update(TOKEN_CONTEXT).digest();
+    const cipher = createDecipheriv('aes-256-gcm', key, nonce, { authTagLength: 16 });
+    cipher.setAAD(Buffer.from(TOKEN_CONTEXT));
+    cipher.setAuthTag(tag);
+    const value: unknown = JSON.parse(Buffer.concat([cipher.update(encrypted), cipher.final()]).toString('utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const payload = value as Record<string, unknown>;
+    const url = httpsUrl(payload.url);
+    const now = Date.now();
+    if (!url || typeof payload.expiresAt !== 'number' || !Number.isSafeInteger(payload.expiresAt)
+      || payload.expiresAt <= now || payload.expiresAt > now + TOKEN_TTL_MS
+      || !payload.headers || typeof payload.headers !== 'object' || Array.isArray(payload.headers)) return null;
+    const headers = sanitizeHeaders(payload.headers);
+    const entries = Object.entries(payload.headers);
+    if (entries.length !== Object.keys(headers).length
+      || entries.some(([name, header]) => headers[name] !== header || !httpsUrl(header))) return null;
+    return { url, expiresAt: payload.expiresAt, headers };
   } catch {
     return null;
   }
@@ -590,6 +618,13 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
   return new NextResponse(inspected.body, { headers, status: response.status });
 }
 
+function castCapability(payload: ProxyPayload, secret: string): NextResponse {
+  const token = createToken({ ...payload, expiresAt: Math.min(payload.expiresAt, Date.now() + 15 * 60 * 1000) }, secret);
+  return NextResponse.json({ url: `/api/vidnest?token=${encodeURIComponent(token)}` }, {
+    headers: { 'Cache-Control': 'private, no-store' },
+  });
+}
+
 async function resolve(request: NextRequest, config: { baseUrl: URL; secret: string }): Promise<NextResponse> {
   const params = request.nextUrl.searchParams;
   const tmdbId = params.get('tmdbId');
@@ -628,6 +663,7 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
     const selected = probe.best ?? await probe.firstHealthy ?? probe.fallback;
     if (!selected) return jsonError('No healthy playback source is available.', streams.length ? 502 : 404);
     const stream = streams[selected.index]!;
+    if (params.get('cast') === '1') return castCapability({ url: stream.url, headers: stream.headers, expiresAt: Date.now() + TOKEN_TTL_MS }, config.secret);
     return new NextResponse(rewritePlaylist(selected.playlist, selected.sourceUrl, stream.headers, config.secret), {
       status: 200,
       headers: {
@@ -639,6 +675,7 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   const stream = streams[streamIndex];
   const streamUrl = stream?.url;
   if (!stream || typeof streamUrl !== 'string') return jsonError('No playback source is available.', 404);
+  if (params.get('cast') === '1') return castCapability({ url: streamUrl, headers: stream.headers, expiresAt: Date.now() + TOKEN_TTL_MS }, config.secret);
 
   const token = createToken({
     url: streamUrl,
@@ -648,13 +685,26 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   return proxy(request, token, config.secret);
 }
 
+export function OPTIONS() {
+  return new NextResponse(null, { status: 204, headers: { ...RECEIVER_CORS_HEADERS, 'Cache-Control': 'private, no-store' } });
+}
+
 export async function GET(request: NextRequest) {
   const config = getApiConfig();
   if (!config) return jsonError('VidNest playback is not configured.', 503);
 
   try {
     const token = request.nextUrl.searchParams.get('token');
-    return token ? await proxy(request, token, config.secret) : await resolve(request, config);
+    if (token && request.nextUrl.searchParams.get('cast') === '1') {
+      const payload = readToken(token, config.secret);
+      return payload ? castCapability(payload, config.secret) : jsonError('Invalid playback token.', 403);
+    }
+    const response = token ? await proxy(request, token, config.secret) : await resolve(request, config);
+    // Only holders of encrypted capabilities can read media from a receiver origin.
+    if ((response.ok || response.status === 416) && token) {
+      for (const [name, value] of Object.entries(RECEIVER_CORS_HEADERS)) response.headers.set(name, value);
+    }
+    return response;
   } catch (error) {
     if (error instanceof Error && error.name === 'AbortError') return jsonError('Playback request timed out.', 504);
     return jsonError('Playback is temporarily unavailable.', 502);

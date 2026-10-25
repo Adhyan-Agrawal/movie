@@ -39,10 +39,12 @@ function fakeSdk() {
   class PlayRequest {}
   class PauseRequest {}
   class SeekRequest { currentTime = 0 }
+  class Track { constructor(public trackId: number, public type: string) {} }
   return {
     receiver, session, context, mediaListeners, sessionListeners,
     chrome: { cast: { isAvailable: true, AutoJoinPolicy: { ORIGIN_SCOPED: 'origin_scoped' }, media: {
       MediaInfo, LoadRequest, GenericMediaMetadata, PlayRequest, PauseRequest, SeekRequest,
+      Track, TrackType: { TEXT: 'TEXT' }, TextTrackType: { SUBTITLES: 'SUBTITLES' },
     } } },
     cast: { framework: { CastContext: { getInstance: () => context }, CastContextEventType: { SESSION_STATE_CHANGED: 'session_state_changed' } } },
   };
@@ -162,6 +164,29 @@ describe('Google Cast URL guard', () => {
     const handle = await requestCasting(video, { ...MEDIA, posterUrl: 'https://user:password@images.example.com/poster' }, vi.fn(), vi.fn());
     expect(sdk.session.loadMedia.mock.calls[0]?.[0]).toMatchObject({ media: { metadata: { title: MEDIA.title } } });
     expect(JSON.stringify(sdk.session.loadMedia.mock.calls)).not.toContain('password');
+    handle?.dispose();
+  });
+
+  it('loads only the selected receiver-accessible WebVTT subtitle and activates it', async () => {
+    installSdk();
+    const handle = await requestCasting(video, {
+      ...MEDIA, subtitle: { url: '/api/subtitles?token=selected', label: 'English', language: 'en' },
+    }, vi.fn(), vi.fn());
+    expect(sdk.session.loadMedia.mock.calls[0]?.[0]).toMatchObject({
+      media: { tracks: [{ trackId: 1, type: 'TEXT', trackContentId: 'https://movies.example.com/api/subtitles?token=selected', trackContentType: 'text/vtt', name: 'English', language: 'en', subtype: 'SUBTITLES' }] },
+      activeTrackIds: [1],
+    });
+    handle?.dispose();
+  });
+
+  it('resolves a bounded capability URL before sending media to the receiver', async () => {
+    installSdk();
+    const resolveUrl = vi.fn(async () => 'https://movies.example.com/api/vidnest?token=short-cast-capability');
+    const handle = await requestCasting(video, { ...MEDIA, resolveUrl }, vi.fn(), vi.fn());
+    expect(resolveUrl).toHaveBeenCalledOnce();
+    expect(sdk.session.loadMedia.mock.calls[0]?.[0]).toMatchObject({
+      media: { contentId: 'https://movies.example.com/api/vidnest?token=short-cast-capability' },
+    });
     handle?.dispose();
   });
 

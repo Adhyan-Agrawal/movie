@@ -5,6 +5,8 @@ export interface CastingMedia {
   posterUrl?: string;
   positionSeconds: number;
   autoplay: boolean;
+  subtitle?: { url: string; label: string; language?: string };
+  resolveUrl?: () => Promise<string>;
 }
 
 export interface CastingProgress {
@@ -23,8 +25,9 @@ export interface CastingHandle {
 }
 
 interface CastMetadata { title?: string; images?: Array<{ url: string }> }
-interface CastMediaInfo { duration?: number; metadata?: CastMetadata }
-interface CastLoadRequest { currentTime: number; autoplay: boolean }
+interface CastTextTrack { trackContentId?: string; trackContentType?: string; name?: string; language?: string; subtype?: string }
+interface CastMediaInfo { duration?: number; metadata?: CastMetadata; tracks?: CastTextTrack[] }
+interface CastLoadRequest { currentTime: number; autoplay: boolean; activeTrackIds?: number[] }
 interface CastSeekRequest { currentTime: number }
 type CastSuccess = () => void;
 type CastFailure = (error: unknown) => void;
@@ -64,6 +67,9 @@ interface CastApi {
     PlayRequest: new () => object;
     PauseRequest: new () => object;
     SeekRequest: new () => CastSeekRequest;
+    Track?: new (id: number, type: string) => CastTextTrack;
+    TrackType?: { TEXT: string };
+    TextTrackType?: { SUBTITLES: string };
   };
 }
 interface CastFramework {
@@ -181,7 +187,8 @@ export async function requestCasting(
     }
   }
 
-  const url = publicMediaUrl(media.url);
+  const originalUrl = publicMediaUrl(media.url);
+  const url = media.resolveUrl ? publicMediaUrl(await media.resolveUrl()) : originalUrl;
   if (!media.contentType.trim() || !Number.isFinite(media.positionSeconds) || media.positionSeconds < 0) {
     throw castingError('This video is not ready to cast. Start playback and try again.');
   }
@@ -209,6 +216,16 @@ export async function requestCasting(
     const request = new sdk.api.media.LoadRequest(info);
     request.currentTime = media.positionSeconds;
     request.autoplay = media.autoplay;
+    if (media.subtitle && sdk.api.media.Track && sdk.api.media.TrackType?.TEXT) {
+      const track = new sdk.api.media.Track(1, sdk.api.media.TrackType.TEXT);
+      track.trackContentId = publicMediaUrl(media.subtitle.url);
+      track.trackContentType = 'text/vtt';
+      track.name = media.subtitle.label;
+      if (media.subtitle.language) track.language = media.subtitle.language;
+      if (sdk.api.media.TextTrackType?.SUBTITLES) track.subtype = sdk.api.media.TextTrackType.SUBTITLES;
+      info.tracks = [track];
+      request.activeTrackIds = [1];
+    }
     await session.loadMedia(request);
     const receiver = session.getMediaSession();
     if (!receiver || context.getCurrentSession() !== session) throw castingError('The TV could not load this video.');

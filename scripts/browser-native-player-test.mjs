@@ -768,6 +768,7 @@ try {
 
   await check('Subtitle API Loads Real Same Asset VTT', async () => {
     const count = requests.length;
+    assert(sidecarRequests.length === 0, 'unselected subtitle sidecars must not be eagerly fetched');
     await choose(page, 'Subtitles', 'el::');
     await seek(video, 12.5);
     await until(async () => video.evaluate((element) => {
@@ -788,6 +789,11 @@ try {
     await page.getByRole('button', { name: 'Reset subtitle timing', exact: true }).click();
     await assertSubtitleOffset(video, 0);
     await choose(page, 'Subtitles', 'off');
+    assert(await video.evaluate((element) => {
+      const player = element.player ?? element.closest('.video-js')?.player;
+      const tracks = player?.textTracks?.();
+      return Array.from({ length: tracks?.length ?? 0 }, (_, index) => tracks[index]).every((track) => track.label !== 'Greek');
+    }), 'unselected sidecar remains installed after Subtitles Off');
   });
 
   await check('Gear Playback Speed And Normal Reset', async () => {
@@ -915,6 +921,7 @@ try {
     const message = await page.locator('.lumora-player-cast-status').innerText();
     assert(/public HTTPS|local|could not start/i.test(message), 'Cast did not expose a controlled safe availability/rejection message');
     assert(!(await snapshot(video)).paused && await handle.evaluate((element) => element.isConnected), 'Cast rejection paused or remounted local playback');
+    assert(await page.locator('.lumora-player-cast-controls').count() === 0, 'Cast rejection must not display a connected remote overlay');
     await decode(video, 0.7);
     await video.evaluate((element) => { Object.defineProperty(element, 'remote', { configurable: true, value: { prompt: () => Promise.resolve() } }); });
     await page.locator('.video-js').first().hover();
@@ -922,6 +929,10 @@ try {
     await until(async () => /Device picker opened/.test(await page.locator('.lumora-player-cast-status').innerText()),
       'successful native picker did not return the controlled null-handle state');
     assert(!(await snapshot(video)).paused && await handle.evaluate((element) => element.isConnected), 'null native Cast handle paused or replaced local playback');
+    assert(await page.locator('.lumora-player-cast-controls').count() === 0 && await video.evaluate((element) => {
+      const player = element.player ?? element.closest('.video-js')?.player;
+      return player?.controls?.() === true;
+    }), 'null Cast handle displayed a connected overlay or disabled local controls');
     await decode(video, 0.7);
     assert(castSdkRequests.length === 0, 'local rejection/native picker should not request any real Google SDK');
     await handle.dispose();

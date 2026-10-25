@@ -58,15 +58,17 @@ function isResolver(url: unknown): boolean {
 async function catalog(response: Response): Promise<DirectStream[]> {
   expect(response.status).toBe(200);
   expect(response.headers.get('cache-control')).toBe('private, no-store');
+  expect(response.headers.has('access-control-allow-origin')).toBe(false);
+  expect(response.headers.has('access-control-allow-credentials')).toBe(false);
   return (await response.json() as { streams: DirectStream[] }).streams;
 }
 
-function payload(path: string): { url: string; headers: Record<string, string> } {
+function proxyRequest(path: string): NextRequest {
   const url = new URL(path, 'https://app.example');
   expect(url.origin).toBe('https://app.example');
   expect(url.pathname).toBe('/api/vidnest');
-  const token = url.searchParams.get('token')!;
-  return JSON.parse(Buffer.from(token.split('.')[0]!, 'base64url').toString('utf8')) as { url: string; headers: Record<string, string> };
+  expect(url.searchParams.get('token')).toMatch(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/);
+  return new NextRequest(url);
 }
 
 beforeEach(async () => {
@@ -113,12 +115,20 @@ describe('VidNest stream catalog', () => {
     expect(streams[0]!.subtitles[0]).toEqual({ id: '0', label: 'French', language: 'fr', kind: 'subtitles' });
     expect(streams[0]!.subtitles).toHaveLength(3);
     expect(streams[0]!.subtitles[2]!.url).toBeUndefined();
-    expect(payload(streams[0]!.url)).toEqual({
-      url: 'https://cdn.example/master.m3u8?key=private',
-      headers: { referer: 'https://player.example/watch', origin: 'https://player.example' },
-      expiresAt: expect.any(Number),
-    });
-    expect(payload(streams[0]!.subtitles[1]!.url!).headers).toEqual({ referer: 'https://subs.example/watch', origin: 'https://player.example' });
+    const playback = await GET(proxyRequest(streams[0]!.url));
+    expect(playback.status).toBe(200);
+    expect(fetchMock.mock.calls.at(-1)![0]).toBe('https://cdn.example/master.m3u8?key=private');
+    const playbackHeaders = new Headers(fetchMock.mock.calls.at(-1)![1]?.headers);
+    expect(playbackHeaders.get('referer')).toBe('https://player.example/watch');
+    expect(playbackHeaders.get('origin')).toBe('https://player.example');
+    await playback.body?.cancel();
+    const subtitle = await GET(proxyRequest(streams[0]!.subtitles[1]!.url!));
+    expect(subtitle.status).toBe(200);
+    expect(fetchMock.mock.calls.at(-1)![0]).toBe('https://subs.example/en.vtt?key=private');
+    const subtitleHeaders = new Headers(fetchMock.mock.calls.at(-1)![1]?.headers);
+    expect(subtitleHeaders.get('referer')).toBe('https://subs.example/watch');
+    expect(subtitleHeaders.get('origin')).toBe('https://player.example');
+    await subtitle.body?.cancel();
     expect(JSON.stringify(streams)).not.toMatch(/cdn\.example|subs\.example|personal-data|"headers"|key=private/);
     for (const call of fetchMock.mock.calls.filter(([url]) => !isResolver(url))) {
       const headers = new Headers((call[1] as RequestInit).headers);

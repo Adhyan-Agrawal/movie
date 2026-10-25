@@ -95,7 +95,7 @@ async function fetchVtt(wyzie: WyzieModule, sourceUrl: string): Promise<string> 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+    const response = await fetch(url, { signal: controller.signal, cache: 'no-store', redirect: 'error' });
     if (!response.ok || !response.body || Number(response.headers.get('content-length')) > MAX_VTT_BYTES) {
       void response.body?.cancel();
       throw new Error('Subtitle download failed.');
