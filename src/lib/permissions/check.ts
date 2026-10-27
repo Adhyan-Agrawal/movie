@@ -1,3 +1,4 @@
+import { cache } from 'react';
 import { features } from '@/lib/env';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import type { Permission } from './permissions';
@@ -36,42 +37,31 @@ export class PermissionDeniedError extends Error {
  * Returns true when the current signed-in user holds `perm`. Never throws for
  * an unauthenticated/unconfigured/denied case — it simply returns false.
  */
+const currentPermissionKeys = cache(async (): Promise<Set<string>> => {
+  if (!features.supabaseConfigured) return new Set();
+  try {
+    const supabase = await getSupabaseServerClient();
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data.user) return new Set();
+    const { data: account, error: accountError } = await supabase.from('accounts')
+      .select('is_suspended').eq('id', data.user.id).maybeSingle();
+    if (accountError || !account || account.is_suspended) return new Set();
+    const { data: memberships, error: memberError } = await supabase.from('account_members')
+      .select('role_id').eq('account_id', data.user.id);
+    if (memberError || !memberships?.length) return new Set();
+    const { data: grants, error: grantError } = await supabase.from('role_permissions')
+      .select('permission_id').in('role_id', memberships.map((row) => row.role_id));
+    if (grantError || !grants?.length) return new Set();
+    const { data: permissions, error: permissionError } = await supabase.from('permissions')
+      .select('key').in('id', [...new Set(grants.map((row) => row.permission_id))]);
+    return permissionError ? new Set() : new Set((permissions ?? []).map((row) => row.key));
+  } catch {
+    return new Set();
+  }
+});
+
 export async function hasPermission(perm: Permission): Promise<boolean> {
-  if (!features.supabaseConfigured) return false;
-
-  const supabase = await getSupabaseServerClient();
-
-  const { data: userResult, error: userError } = await supabase.auth.getUser();
-  if (userError || !userResult.user) return false;
-  const accountId = userResult.user.id;
-
-  // 1. Roles assigned to this account.
-  const { data: memberships, error: membershipError } = await supabase
-    .from('account_members')
-    .select('role_id')
-    .eq('account_id', accountId);
-  if (membershipError || !memberships || memberships.length === 0) return false;
-  const roleIds = memberships.map((row) => row.role_id);
-
-  // 2. Resolve the permission key to its id.
-  const { data: permissionRow, error: permissionError } = await supabase
-    .from('permissions')
-    .select('id')
-    .eq('key', perm)
-    .maybeSingle();
-  if (permissionError || !permissionRow) return false;
-
-  // 3. Does any of the user's roles grant that permission?
-  const { data: grant, error: grantError } = await supabase
-    .from('role_permissions')
-    .select('role_id')
-    .eq('permission_id', permissionRow.id)
-    .in('role_id', roleIds)
-    .limit(1)
-    .maybeSingle();
-  if (grantError) return false;
-
-  return grant !== null;
+  return (await currentPermissionKeys()).has(perm);
 }
 
 /**
@@ -85,8 +75,6 @@ export async function requirePermission(perm: Permission): Promise<void> {
 
 /** True when the user holds at least one of the supplied permissions. */
 export async function hasAnyPermission(perms: readonly Permission[]): Promise<boolean> {
-  for (const perm of perms) {
-    if (await hasPermission(perm)) return true;
-  }
-  return false;
+  const keys = await currentPermissionKeys();
+  return perms.some((perm) => keys.has(perm));
 }

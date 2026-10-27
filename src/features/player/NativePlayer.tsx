@@ -8,6 +8,12 @@ import { reportProgressAction } from '@/features/playback/progress-actions';
 import { readGuestEntries, updateGuestPosition } from '@/features/playback/guest-watch';
 import { markPlaybackCheckpointSynced, playbackMediaKey, readPlaybackCheckpoint, writePlaybackCheckpoint, type PlaybackCheckpoint } from '@/features/playback/playback-checkpoint';
 import { shiftedCueTiming } from './subtitle-timing';
+import { createFullscreenOrientation, type PlayerOrientation } from './fullscreen-orientation';
+import { readConsent } from '@/components/consent/ConsentBanner';
+import { DEFAULT_VAST_CONFIGURATION, type PlaybackAdPolicy } from '@/features/commerce/types';
+import { createVastSchedule } from '@/features/ads/vast/scheduler';
+import { VastAdBreak, type VastBreakResult } from '@/features/ads/vast/VastAdBreak';
+import type { VastCreative } from '@/features/ads/vast/types';
 import { requestCasting, type CastingHandle, type CastingProgress } from './casting';
 import { aggregateStreamOptions, chooseStream, preferencesForStream, qualityKey, trackKey, type StreamPreferences, type StreamOption } from './stream-options';
 
@@ -15,6 +21,7 @@ export interface NativePlayerProps {
   source: { url: string; kind: 'mp4' | 'hls' | 'dash'; streamCatalogUrl?: string };
   subtitleCatalogUrl?: string;
   upNext?: { name: string; href: string; posterUrl?: string };
+  adPolicy?: PlaybackAdPolicy;
   titleId: string;
   titleSlug: string;
   titleName?: string;
@@ -51,7 +58,6 @@ type RemoteTrack = ReturnType<Player['addRemoteTextTrack']> & { track: SubtitleT
 interface PendingPosition { position: number; playing: boolean; rate: number }
 
 const REPORT_INTERVAL_MS = 5000;
-const QUALITY_PREF_PREFIX = 'lumora:pref:quality:';
 const INITIAL_PREFERENCES: StreamPreferences = { quality: 'auto', audio: '', subtitle: 'off' };
 const CONTROL_TARGETS = 'button, select, input, textarea, a, [role="button"], [role="slider"], .vjs-control-bar, .vjs-modal-dialog, [data-player-ui]';
 
@@ -59,20 +65,6 @@ function entries<T>(list: EventList<T>): T[] {
   const result: T[] = [];
   for (let index = 0; index < list.length; index += 1) if (list[index]) result.push(list[index]!);
   return result;
-}
-
-function readQualityPref(titleSlug: string): string {
-  try {
-    const height = Number(localStorage.getItem(`${QUALITY_PREF_PREFIX}${titleSlug}`));
-    return Number.isInteger(height) && height > 0 ? `quality:${height}` : 'auto';
-  } catch { return 'auto'; }
-}
-
-function storeQualityPref(titleSlug: string, id: string): void {
-  try {
-    if (id.startsWith('quality:')) localStorage.setItem(`${QUALITY_PREF_PREFIX}${titleSlug}`, id.slice(8));
-    else localStorage.removeItem(`${QUALITY_PREF_PREFIX}${titleSlug}`);
-  } catch { /* Preferences remain optional when storage is unavailable. */ }
 }
 
 function mimeType(kind: NativePlayerProps['source']['kind']): string {
@@ -125,6 +117,9 @@ export function NativePlayer(props: NativePlayerProps) {
   const castCommandRef = useRef<(command: 'play' | 'pause' | 'back' | 'forward') => void>(() => {});
   const [castStatus, setCastStatus] = useState<{ state: 'idle' | 'connecting' | 'connected' | 'error'; message?: string }>({ state: 'idle' });
   const [remoteProgress, setRemoteProgress] = useState<CastingProgress | null>(null);
+  const [adBreak, setAdBreak] = useState<{ creative: VastCreative; policy: PlaybackAdPolicy; volume: number; muted: boolean } | null>(null);
+  const [adLoading, setAdLoading] = useState(false);
+  const adDoneRef = useRef<(result: VastBreakResult) => void>(() => {});
   const hasCoordinates = seasonNumber !== undefined && episodeNumber !== undefined;
   const mediaKey = playbackMediaKey(titleId, hasCoordinates ? undefined : episodeId, seasonNumber, episodeNumber);
 
@@ -168,7 +163,7 @@ export function NativePlayer(props: NativePlayerProps) {
     let catalogPending = Boolean(source.streamCatalogUrl);
     let userSelected = false;
     let explicitAudio = false;
-    let desired: StreamPreferences = { ...INITIAL_PREFERENCES, quality: readQualityPref(titleSlug) };
+    let desired: StreamPreferences = { ...INITIAL_PREFERENCES };
     let subtitleOffset = 0;
     let selectedSubtitle: SubtitleTrack | null = null;
     let presentation: SubtitleTrack | null = null;
@@ -184,11 +179,16 @@ export function NativePlayer(props: NativePlayerProps) {
     let castHandle: CastingHandle | null = null;
     let lastRemote: CastingProgress | null = null;
     let lastCastReportAt = 0;
+    let adActive = false;
+    let adResume: PendingPosition | null = null;
+    let adRequest: AbortController | undefined;
+    let adClock = performance.now();
+    const adSchedule = createVastSchedule(startProps.adPolicy ?? DEFAULT_VAST_CONFIGURATION);
     const failedStreams = new Set<string>();
     setOptions({ qualities: [], audioTracks: [], subtitles: [] });
     setPreferences(desired); setActivePanel(null); setTimingOffset(0); setPlaybackRate(1);
     setProgress({ position: resumePosition, duration: local?.durationSeconds ?? 0 });
-    setSwitching(false); setSeekFeedback(null); setSelectionNotice(null); setFastestAvailable(false); setCastStatus({ state: 'idle' }); setRemoteProgress(null);
+    setSwitching(false); setSeekFeedback(null); setSelectionNotice(null); setFastestAvailable(false); setCastStatus({ state: 'idle' }); setRemoteProgress(null); setAdBreak(null); setAdLoading(false);
     setCatalogStatus(source.streamCatalogUrl ? 'loading' : 'ready');
 
     // React owns only this container. Video.js owns its imperative element, including fullscreen.
@@ -454,15 +454,13 @@ export function NativePlayer(props: NativePlayerProps) {
         if (cancelled || videoPlayer.isDisposed()) return;
         if (manual) { userSelected = true; if (field === 'audio') explicitAudio = true; }
         let next = { ...desired, [field]: id };
-        if (field === 'quality' && id === 'auto' && !explicitAudio
-          && !catalog.some((stream) => stream.audioTracks.some((track) => trackKey(track) === next.audio))) next = { ...next, audio: '' };
+        if (field === 'quality' && id === 'auto' && !explicitAudio) next = { ...next, audio: '' };
         const stream = chooseStream(availableStreams(), next, field, runtimeStream().id);
         if (!stream) return;
         desired = preferencesForStream(stream, next);
         setSelectionNotice((['quality', 'audio', 'subtitle'] as const).some((key) => key !== field && next[key] && next[key] !== desired[key])
           ? 'Some previous settings are unavailable with this option and were adjusted.' : null);
         updatePreferences();
-        if (field === 'quality') storeQualityPref(titleSlug, desired.quality);
         loadStream(stream);
       };
       chooseRef.current = (field, id) => choose(field, id, true);
@@ -561,6 +559,39 @@ export function NativePlayer(props: NativePlayerProps) {
         else if (command === 'pause') void castHandle.pause();
         else void castHandle.seek(Math.max(0, lastRemote.positionSeconds + (command === 'back' ? -10 : 10)));
       };
+      const finishAd = () => {
+        if (!adActive || cancelled || videoPlayer.isDisposed()) return;
+        adActive = false;
+        adSchedule.finish();
+        setAdBreak(null); setAdLoading(false);
+        videoPlayer.controls(true);
+        if (adResume) {
+          videoPlayer.currentTime(adResume.position);
+          videoPlayer.playbackRate(adResume.rate);
+          if (adResume.playing) void videoPlayer.play()?.catch(() => {});
+        }
+        adResume = null;
+        adClock = performance.now();
+      };
+      adDoneRef.current = finishAd;
+      const beginAd = () => {
+        const policy = latestProps.current.adPolicy;
+        if (!policy?.enabled || !readConsent()?.ads || adActive || cancelled || castHandle) { adSchedule.finish(); return; }
+        adActive = true;
+        flush();
+        adResume = { position: videoPlayer.currentTime() ?? 0, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
+        videoPlayer.pause(); videoPlayer.controls(false); setActivePanel(null); setAdLoading(true);
+        adRequest = new AbortController();
+        const timer = setTimeout(() => adRequest?.abort(), 10_000);
+        void fetch('/api/vast?consent=1', { signal: adRequest.signal, credentials: 'same-origin', cache: 'no-store' })
+          .then(async (response): Promise<{ creative?: VastCreative }> => response.ok && response.status !== 204 ? response.json() as Promise<{ creative?: VastCreative }> : {})
+          .then((result) => {
+            if (cancelled) return;
+            if (!result.creative || typeof result.creative.mediaUrl !== 'string' || !Number.isFinite(result.creative.durationSeconds)) { finishAd(); return; }
+            setAdLoading(false);
+            setAdBreak({ creative: result.creative, policy, volume: videoPlayer.volume() ?? 1, muted: videoPlayer.muted() ?? false });
+          }).catch(() => finishAd()).finally(() => clearTimeout(timer));
+      };
 
       const updateProgress = () => {
         const position = pendingPosition?.position ?? videoPlayer.currentTime() ?? 0;
@@ -594,14 +625,23 @@ export function NativePlayer(props: NativePlayerProps) {
         resumed = true;
         refresh(); updateProgress(); markReady();
       };
+      const orientation = createFullscreenOrientation(navigator.maxTouchPoints > 0
+        ? screen.orientation as unknown as PlayerOrientation : undefined);
+      const handleFullscreen = () => { void orientation.setFullscreen(Boolean(videoPlayer.isFullscreen())); };
       const handleTimeUpdate = () => {
         if (cancelled) return;
         updateProgress();
         const now = Date.now();
         if (!videoPlayer.paused() && now - lastFlushAt >= REPORT_INTERVAL_MS) flush();
+        const clock = performance.now();
+        const elapsed = (clock - adClock) / 1000;
+        adClock = clock;
+        if (!videoPlayer.paused() && !videoPlayer.seeking() && document.visibilityState !== 'hidden'
+          && !adActive && !castHandle && !pendingPosition && latestProps.current.adPolicy?.enabled
+          && readConsent()?.ads && adSchedule.advance(elapsed)) beginAd();
       };
       const handleSeeked = () => { reconcileCues(); updateProgress(); flush(); };
-      const handleHidden = () => { if (document.visibilityState === 'hidden') flush(); };
+      const handleHidden = () => { adClock = performance.now(); if (document.visibilityState === 'hidden') flush(); };
       const handlePause = () => { if (!cancelled) flush(); };
       const handleSkip = (event: Event) => {
         const target = event.target as Element;
@@ -654,9 +694,11 @@ export function NativePlayer(props: NativePlayerProps) {
       videoPlayer.on('loadeddata', scheduleRefresh);
       videoPlayer.on('durationchange', updateProgress);
       videoPlayer.on('ratechange', () => setPlaybackRate(videoPlayer.playbackRate() ?? 1));
+      videoPlayer.on('fullscreenchange', handleFullscreen);
       videoPlayer.on('timeupdate', handleTimeUpdate);
       videoPlayer.on('seeked', handleSeeked);
       videoPlayer.on('pause', handlePause);
+      videoPlayer.on('play', () => { adClock = performance.now(); });
       videoPlayer.on('ended', flush);
       videoPlayer.on('error', handlePlaybackError);
       document.addEventListener('visibilitychange', handleHidden);
@@ -669,6 +711,8 @@ export function NativePlayer(props: NativePlayerProps) {
       playerElement.addEventListener('dblclick', blockTouchClick, true);
       playerElement.addEventListener('click', handleSkip);
       detach = () => {
+        orientation.dispose();
+        adRequest?.abort();
         clearTimeout(feedbackTimer);
         clearTimeout(switchTimer);
         for (const event of ['addqualitylevel', 'removequalitylevel', 'change']) qualityList.off(event, scheduleRefresh);
@@ -709,12 +753,6 @@ export function NativePlayer(props: NativePlayerProps) {
             refresh();
             if (videoPlayer.error()) { handlePlaybackError(); return; }
             if (!userSelected) {
-              if (desired.quality !== 'auto' && !aggregateStreamOptions(catalog).qualities.some((quality) => quality.id === desired.quality)) {
-                const savedHeight = Number(desired.quality.slice('quality:'.length));
-                const legacy = catalog.flatMap((stream) => stream.qualities).find((quality) => quality.height === savedHeight);
-                desired.quality = legacy ? qualityKey(legacy) : 'auto';
-                updatePreferences();
-              }
               if (desired.quality !== 'auto' || catalog.some((stream) => Number.isFinite(stream.startupLatencyMs))) {
                 choose('quality', desired.quality, false);
               }
@@ -749,6 +787,7 @@ export function NativePlayer(props: NativePlayerProps) {
       speedRef.current = () => {};
       castActionRef.current = () => {};
       castCommandRef.current = () => {};
+      adDoneRef.current = () => {};
       if (playerRef.current === player) playerRef.current = null;
       const disposedTarget = player?.el();
       setPortalTarget((current) => current === disposedTarget ? null : current);
@@ -775,6 +814,10 @@ export function NativePlayer(props: NativePlayerProps) {
     };
   }, [activePanel, portalTarget]);
 
+  useEffect(() => {
+    if (!props.adPolicy?.enabled) adDoneRef.current('skip');
+  }, [props.adPolicy?.enabled]);
+
   const percentage = progress.duration > 0 ? Math.min(100, Math.max(0, progress.position / progress.duration * 100)) : null;
   const subtitlesAvailable = options.subtitles.length > 0;
   const audioAvailable = options.audioTracks.length > 0;
@@ -785,7 +828,7 @@ export function NativePlayer(props: NativePlayerProps) {
     <div ref={containerRef} data-vjs-player="" className="h-full w-full" onContextMenu={(event) => event.preventDefault()} />
     {portalTarget ? createPortal(<>
       <div className="lumora-player-heading" aria-hidden="true"><span className="lumora-player-eyebrow">Now Playing</span>{titleName ? <span className="lumora-player-title">{titleName}</span> : null}</div>
-      <div className={`lumora-player-tools${activePanel ? ' is-open' : ''}`} data-player-ui="">
+      <div className={`lumora-player-tools${activePanel ? ' is-open' : ''}${adBreak || adLoading ? ' has-ad-break' : ''}`} data-player-ui="">
         <div className="lumora-player-progress" aria-label={`Watched ${formatTime(progress.position)} of ${progress.duration ? formatTime(progress.duration) : 'unknown duration'}${percentage !== null ? `, ${Math.round(percentage)} percent` : ''}`}>
           <span className="lumora-player-eyebrow">Watched</span><span className="lumora-player-clock">{formatTime(progress.position)}<span> / {progress.duration ? formatTime(progress.duration) : '--:--'}</span></span>
           <span className="lumora-player-percent">{percentage !== null ? `${Math.round(percentage)}%` : '--%'}</span>
@@ -819,6 +862,8 @@ export function NativePlayer(props: NativePlayerProps) {
       </div> : null}
       {upNextVisible && props.upNext ? <a href={props.upNext.href} className="lumora-player-up-next" data-player-ui=""><span className="lumora-player-eyebrow">Up next</span><strong>{props.upNext.name}</strong><span>Play next episode</span></a> : null}
       {switching ? <div className="lumora-player-switch-status" role="status">Updating playback<span>Your position is preserved</span></div> : null}
+      {adLoading ? <div className="lumora-vast-loading" role="status">Loading advertisement</div> : null}
+      {adBreak ? <VastAdBreak key={adBreak.creative.id} {...adBreak} onDone={(result) => adDoneRef.current(result)} /> : null}
       {seekFeedback ? <div key={seekFeedback.sequence} className={`lumora-player-seek-feedback is-${seekFeedback.side}`} role="status"><span aria-hidden="true">{seekFeedback.side === 'left' ? '-10' : '+10'}</span><span>{seekFeedback.side === 'left' ? 'Back' : 'Forward'} 10 seconds</span></div> : null}
     </>, portalTarget) : null}
   </div>;

@@ -38,7 +38,7 @@ export function MediaCard({
     <Link
       href={cardHref}
       className={cn(
-        'group relative flex w-40 shrink-0 flex-col gap-2 rounded-md sm:w-44 md:w-48',
+        'discovery-card group relative flex w-36 shrink-0 flex-col gap-2 rounded-md sm:w-44 md:w-48',
         'focus-visible:outline-none',
         className,
       )}
@@ -48,7 +48,7 @@ export function MediaCard({
         className={cn(
           'relative aspect-[2/3] w-full overflow-hidden rounded-md border border-border',
           'bg-surface-raised shadow-soft transition-transform duration-200 ease-deliberate',
-          'group-hover:-translate-y-1 group-hover:border-border-strong',
+          'motion-safe:group-hover:-translate-y-1 group-hover:border-border-strong motion-reduce:transition-none',
           'group-focus-visible:ring-2 group-focus-visible:ring-primary',
         )}
         style={title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined}
@@ -86,7 +86,7 @@ export function MediaCard({
       </div>
 
       <div className="flex items-center gap-1.5 px-0.5 text-xs text-content-muted">
-        <span>{title.releaseYear}</span>
+        {title.releaseYear > 0 ? <span>{title.releaseYear}</span> : null}
         {runtime ? (
           <>
             <span aria-hidden="true">·</span>
@@ -96,7 +96,7 @@ export function MediaCard({
         {typeof title.score === 'number' ? (
           <>
             <span aria-hidden="true">·</span>
-            <span className="text-success">{title.score}%</span>
+            <span className="text-success">{(title.score / 10).toFixed(1)}/10</span>
           </>
         ) : null}
       </div>

@@ -17,6 +17,7 @@ import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { getAdSlot } from '@/features/ads/config';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
+import { getPlaybackCommerceContext } from '@/features/commerce/queries';
 
 /**
  * Watch route (Spec Section 3 & 9). Server component: loads the title, resolves
@@ -167,7 +168,7 @@ export default async function WatchPage({
     ...(title.type === 'tv' && episode !== undefined ? { episode } : {}),
   };
 
-  const [resolved, nativeSources, playbackContext] = await Promise.all([
+  const [resolved, nativeSources, playbackContext, commerceContext] = await Promise.all([
     resolvePlayback(request),
     features.supabaseConfigured
       ? import('@/features/playback/native-sources').then(({ resolveNativeSources }) => resolveNativeSources(title.id, episodeId))
@@ -177,6 +178,7 @@ export default async function WatchPage({
       ? import('@/features/playback/progress-queries').then(({ getPlaybackContext }) => getPlaybackContext(title.id, episodeId))
         .catch(() => ({ viewerKey: 'unavailable', resumePosition: null as ResumePosition | null }))
       : Promise.resolve({ viewerKey: 'guest', resumePosition: null as ResumePosition | null }),
+    getPlaybackCommerceContext(),
   ]);
   const providerConfig = getProviderConfig('vidsrc');
 
@@ -201,7 +203,7 @@ export default async function WatchPage({
   // Pre-roll ad zone (Spec Section 11): resolved server-side so the key never
   // ships to the client except inside Adsterra's public embed pattern.
   const prerollSlot = getAdSlot('watchPreroll');
-  const preroll = prerollSlot.adsterraKey
+  const preroll = commerceContext.entitlements.resolved && !commerceContext.entitlements.adFree && prerollSlot.adsterraKey
     ? { adsterraKey: prerollSlot.adsterraKey, width: prerollSlot.width, height: prerollSlot.height }
     : null;
 
@@ -250,6 +252,7 @@ export default async function WatchPage({
           providerLabel={providerLabel}
           consentRequired={consentRequired}
           viewerKey={playbackContext.viewerKey}
+          adPolicy={commerceContext.ads}
           {...(episodeId ? { episodeId } : {})}
           {...(title.type === 'tv' && season !== undefined ? { seasonNumber: season } : {})}
           {...(title.type === 'tv' && episode !== undefined ? { episodeNumber: episode } : {})}

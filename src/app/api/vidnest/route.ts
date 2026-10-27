@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
 import { NextRequest, NextResponse } from 'next/server';
+import { selectHlsRendition } from '@/lib/providers/hls-rendition';
 import { decodedAudioTracks, hasHlsPlaybackUri, hlsStartupPlan, httpsUrl, metadataLabel, metadataLanguage, parseHlsMetadata, parseMp4AudioLanguages } from '@/lib/providers/hls-metadata';
 import { parseMpegTsAudioLanguages } from '@/lib/providers/mpeg-ts-metadata';
 import type { DirectStream, Track } from '@/lib/providers/types';
@@ -599,7 +600,14 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
       sourceUrl = response.url || payload.url;
       body = response.body;
     }
-    const playlist = rewritePlaylist(await boundedText(new Response(body), RESOLVER_MAX_BYTES, request.signal), sourceUrl, payload.headers, secret);
+    let rawPlaylist = await boundedText(new Response(body), RESOLVER_MAX_BYTES, request.signal);
+    const rendition = request.nextUrl.searchParams.get('rendition');
+    if (rendition !== null) {
+      const filtered = selectHlsRendition(rawPlaylist, rendition);
+      if (!filtered) return jsonError('The requested quality is unavailable.', 404);
+      rawPlaylist = filtered;
+    }
+    const playlist = rewritePlaylist(rawPlaylist, sourceUrl, payload.headers, secret);
     return new NextResponse(playlist, {
       headers: { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl' },
       status: 200,
@@ -695,6 +703,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const token = request.nextUrl.searchParams.get('token');
+    if (request.nextUrl.searchParams.has('rendition') && !token) return jsonError('Quality selection requires a playback capability.', 400);
     if (token && request.nextUrl.searchParams.get('cast') === '1') {
       const payload = readToken(token, config.secret);
       return payload ? castCapability(payload, config.secret) : jsonError('Invalid playback token.', 403);

@@ -79,6 +79,24 @@ afterEach(() => {
 });
 
 describe('Vidnest proxy transport', () => {
+  it('serves one fixed rendition to native clients while preserving alternate audio', async () => {
+    const master = [
+      '#EXTM3U', '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="audio.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=1280x720,AUDIO="a"', 'hd.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=8000000,RESOLUTION=3840x2160,AUDIO="a"', 'uhd.m3u8',
+    ].join('\n');
+    const token = encryptedFixture({ expiresAt: Date.now() + 60_000, url: 'https://cdn.example/master.m3u8', headers: {} });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(master, { headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } })));
+    const response = await GET(new NextRequest(`https://app.example/api/vidnest?token=${token}&rendition=1`));
+    expect(response.status).toBe(200);
+    const playlist = await response.text();
+    expect(playlist.match(/#EXT-X-STREAM-INF:/g)).toHaveLength(1);
+    expect(playlist).toContain('RESOLUTION=3840x2160');
+    expect(playlist).toContain('TYPE=AUDIO');
+    expect(playlist).not.toContain('RESOLUTION=1280x720');
+    expect((await GET(new NextRequest('https://app.example/api/vidnest?tmdbId=27205&type=movie&rendition=1'))).status).toBe(400);
+  });
+
   it.each(['bytes=0-1', 'bytes=12-13'])('classifies opaque ranged HLS from a complete response (%s)', async (range) => {
     const upstreamUrl = 'https://cdn.example/opaque';
     const fetchMock = installFetch(upstreamUrl, responseAt(range === 'bytes=0-1' ? '#E' : 'F:', {

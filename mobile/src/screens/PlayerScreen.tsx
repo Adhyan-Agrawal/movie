@@ -1,653 +1,212 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import {
-  Pressable,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-  type StyleProp,
-  type ViewStyle,
-} from 'react-native';
+import { useEffect, useRef, useState } from 'react';
+import { AppState, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { useNavigation, useRoute, type RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import * as ScreenOrientation from 'expo-screen-orientation';
-import { useVideoPlayer, VideoView } from 'expo-video';
-import type { VideoSource } from 'expo-video';
-
-import { Button, Loading } from '../components/ui';
-import { currentUser, getResumePosition, listSeasons, recordPlaybackSession, reportProgress, resolvePlayback } from '../lib/api';
-import { recordGuestWatch, updateGuestPosition } from '../lib/guest';
-import type { PlaybackSource } from '../lib/types';
+import { Button } from '../components/ui';
+import { getPlaybackContext, listSeasons, recordPlaybackSession, reportProgress, resolvePlaybackDetails } from '../lib/api';
+import { getGuestResume, recordGuestWatch, updateGuestPosition } from '../lib/guest';
+import type { PlaybackResponse } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
-import { colors, radius, spacing, type } from '../theme';
-
-/**
- * The player — the one screen that actually has to work.
- *
- * Design notes, in the order the screen reasons about them:
- *
- * Sources. Providers are resolved server-side by the web app's /api/playback
- * bridge and arrive already anonymized ("Server 1", "Server 2", …). The native
- * app NEVER sees a real provider identity, so the label from the bridge is the
- * only thing we are allowed to render. Resolution happens once per mount (and
- * per Retry) AFTER reading the saved resume position, because providers that
- * support it take a `start` parameter at resolve time — we cannot seek an embed
- * after the fact.
- *
- * Consent. Some providers must be loaded in a frame that sets their own cookies,
- * so a source flagged `consentRequired` is gated: we render a prompt and load
- * nothing until the viewer taps "Load player". Consent is remembered per source
- * id for the life of the screen, so flipping between servers does not re-nag for
- * one already accepted — but a *different* gated server still prompts. Embeds are
- * deliberately not sandboxed; the providers reject restricted frames (the gate is
- * the privacy control, not an attribute).
- *
- * Rendering. `embed` sources are a full-bleed WebView (the provider renders its
- * own player). `hls`/`mp4`/`dash` sources play through expo-video. A native
- * surface sits under overlaid chrome, which is why it uses `textureView` on
- * Android — a SurfaceView punches through overlapping views.
- *
- * Telemetry. Embeds expose no position, so the most we can honestly do is record
- * that this device watched the title (guest store) and let the provider keep its
- * own progress. Native playback reports the *observed* `timeUpdate` position
- * every ~5s, and once more on unmount/source change, to `reportProgress` when
- * signed in and to the device-local guest store when signed out. A position we
- * never observed is never reported — no zeroes, no guesses.
- *
- * Up next. When the catalog knows the following episode we surface it as a pill;
- * replacing (not pushing) keeps the back stack from filling with episodes.
- */
+import NativePlayer, { type Snapshot } from '../player/NativePlayer';
+import { markCheckpointSynced, mediaKey, readCheckpoint, selectResume, writeCheckpoint } from '../player/checkpoint';
+import { acquireOrientation } from '../player/orientation';
+import { notifyAdBreak } from '../player/policy';
+import { colors } from '../theme';
 
 type PlayerRoute = RouteProp<RootStackParamList, 'Player'>;
 type Nav = NativeStackNavigationProp<RootStackParamList>;
-
-/** Cadence for native progress reports (the player's timeUpdate interval matches). */
-const PROGRESS_INTERVAL_MS = 5000;
-
-/**
- * Browser User-Agent for the embed WebView.
- *
- * A stock Android WebView advertises a `wv` token, which Cloudflare reads as a
- * bot — vidup.to (Server 4) responds with "Sorry, you have been blocked". An
- * ordinary mobile-browser UA lets the provider's own player load, exactly as it
- * does in the web app (where the iframe runs under a normal browser UA).
- */
-const BROWSER_USER_AGENT =
-  'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
-
-/** Sources that play through expo-video (everything except the embed frame). */
-function isNativeSource(kind: PlaybackSource['kind']): boolean {
-  return kind === 'hls' || kind === 'mp4' || kind === 'dash';
-}
-
-/**
- * The expo-video surface for a native source.
- *
- * Split into its own component so `useVideoPlayer` is called unconditionally
- * (hooks rule) while the parent stays free to render nothing at all — no player
- * is ever constructed for a gated source the viewer has not accepted. The parent
- * keys this by source id, so switching servers tears the old player down and
- * builds a fresh one for the new URL.
- */
-function NativeSourcePlayer({
-  source,
-  onTime,
-  onError,
-  style,
-}: {
-  source: PlaybackSource;
-  /** Real observed position (seconds) plus duration, or null when unknown. */
-  onTime: (positionSeconds: number, durationSeconds: number | null) => void;
-  onError: () => void;
-  style?: StyleProp<ViewStyle>;
-}) {
-  // DASH streams usually have no file extension in the URL, so the type has to
-  // be declared (hls/mp4 URLs are self-describing and pass through as strings).
-  const videoSource: VideoSource = useMemo(
-    () =>
-      source.kind === 'dash'
-        ? { uri: source.url, contentType: 'dash' as const }
-        : source.url,
-    [source.kind, source.url],
-  );
-
-  const player = useVideoPlayer(videoSource, (p) => {
-    p.timeUpdateEventInterval = PROGRESS_INTERVAL_MS / 1000;
-    p.play();
-  });
-
-  // Latest-value refs: the listeners below are attached once per player, so they
-  // must not close over stale callbacks.
-  const onTimeRef = useRef(onTime);
-  const onErrorRef = useRef(onError);
-  onTimeRef.current = onTime;
-  onErrorRef.current = onError;
-
-  useEffect(() => {
-    const timeSub = player.addListener('timeUpdate', ({ currentTime }) => {
-      const duration = player.duration;
-      onTimeRef.current(currentTime, Number.isFinite(duration) && duration > 0 ? duration : null);
-    });
-    const statusSub = player.addListener('statusChange', ({ status }) => {
-      if (status === 'error') onErrorRef.current();
-    });
-    return () => {
-      timeSub.remove();
-      statusSub.remove();
-    };
-  }, [player]);
-
-  return (
-    <VideoView
-      player={player}
-      style={style}
-      contentFit="contain"
-      nativeControls
-      fullscreenOptions={{ enable: true }}
-      // Overlaid chrome requires a texture-backed surface on Android; a
-      // SurfaceView would render above (and hide) every control we draw.
-      surfaceType="textureView"
-    />
-  );
-}
+const BROWSER_USER_AGENT = 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
 export default function PlayerScreen() {
   const route = useRoute<PlayerRoute>();
   const navigation = useNavigation<Nav>();
   const insets = useSafeAreaInsets();
-
-  const {
-    titleId,
-    type: titleType,
-    slug,
-    name,
-    posterUrl,
-    backdropUrl,
-    tmdbId,
-    imdbId,
-    season,
-    episode,
-    episodeId,
-    episodeName,
-    nextSeason,
-    nextEpisode,
-    nextEpisodeName,
-  } = route.params;
-
+  const params = route.params;
+  const { titleId, type, slug, name, season, episode } = params;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
-  const [sources, setSources] = useState<PlaybackSource[]>([]);
+  const [bridge, setBridge] = useState<PlaybackResponse>({ sources: [] });
   const [activeId, setActiveId] = useState<string | null>(null);
-  const [consentedIds, setConsentedIds] = useState<string[]>([]);
-  const [failedSourceId, setFailedSourceId] = useState<string | null>(null);
-  const [signedIn, setSignedIn] = useState(false);
+  const [consented, setConsented] = useState<string[]>([]);
+  const [failedId, setFailedId] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
-  /** Dedupes the per-play session row across retries (see below). */
-  const sessionRecordedRef = useRef<string | null>(null);
+  const [initial, setInitial] = useState<Snapshot>({ positionSeconds: 0, playing: true });
+  const [context, setContext] = useState<{ viewerKey: string; episodeId?: string }>({ viewerKey: 'unavailable' });
+  const [catalogNext, setCatalogNext] = useState<{ season: number; episode: number; id?: string; name?: string } | null>(null);
+  const sessionRecorded = useRef<string | null>(null);
+  const lastSnapshot = useRef<Snapshot | null>(null);
+  const reports = useRef<Promise<unknown>>(Promise.resolve());
+  const checkpointKey = mediaKey({ titleId, type, season, episode, episodeId: params.episodeId });
+  const active = bridge.sources.find((s) => s.id === activeId) ?? bridge.sources[0];
+  const needsConsent = !!active && active.consentRequired && !consented.includes(active.id);
+  const failed = !!active && active.id === failedId;
 
-  // Rotation: follow the phone while a player is open (so tilting to landscape
-  // works), then restore portrait when leaving. The rest of the app is
-  // portrait-locked in App.tsx.
   useEffect(() => {
-    void ScreenOrientation.unlockAsync().catch(() => {});
-    return () => {
-      void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
-    };
+    return acquireOrientation(ScreenOrientation.OrientationLock.DEFAULT);
   }, []);
-
-  const activeSource = useMemo(
-    () => sources.find((s) => s.id === activeId) ?? sources[0] ?? null,
-    [sources, activeId],
-  );
-  const isNative = !!activeSource && isNativeSource(activeSource.kind);
-  const needsConsent =
-    !!activeSource && activeSource.consentRequired && !consentedIds.includes(activeSource.id);
-  const failed = !!activeSource && failedSourceId === activeSource.id;
-
-  // -------------------------------------------------------------------------
-  // Resolve sources (once per mount / retry)
-  // -------------------------------------------------------------------------
 
   useEffect(() => {
     let cancelled = false;
     setPhase('loading');
-    setFailedSourceId(null);
-
-    (async () => {
-      const user = await currentUser();
-      // Resume first: providers that support `start` need it at resolve time.
-      const resume = await getResumePosition(titleId, episodeId);
-      const resolved = await resolvePlayback({
-        type: titleType,
-        // Catalog ids let the bridge also return Lumora-hosted (native HLS/mp4)
-        // sources. resolvePlayback UUID-guards these, so a guest's slug is safe.
-        ...(titleId ? { titleId } : {}),
-        ...(episodeId ? { episodeId } : {}),
-        ...(tmdbId ? { tmdbId } : {}),
-        ...(imdbId ? { imdbId } : {}),
-        ...(season !== undefined ? { season } : {}),
-        ...(episode !== undefined ? { episode } : {}),
-        ...(resume && resume.positionSeconds > 0 ? { start: resume.positionSeconds } : {}),
+    setFailedId(null);
+    lastSnapshot.current = null;
+    void (async () => {
+      const viewer = await getPlaybackContext(titleId, type, params.episodeId, season, episode);
+      const [checkpoint, guestResume] = await Promise.all([
+        readCheckpoint(viewer.viewerKey, checkpointKey),
+        viewer.viewerKey === 'guest' ? getGuestResume(slug, type, season, episode) : Promise.resolve(null),
+      ]);
+      // Exact local checkpoint includes intentional seeks to zero. Timestamp wins over remote history.
+      const history = viewer.resume ?? guestResume;
+      const resume = selectResume(viewer.viewerKey, checkpoint, history);
+      const snapshot: Snapshot = { positionSeconds: resume?.positionSeconds ?? 0,
+        ...(checkpoint?.durationSeconds ? { durationSeconds: checkpoint.durationSeconds } : {}), playing: true };
+      const resolved = await resolvePlaybackDetails({ type, titleId,
+        ...(viewer.episodeId ? { episodeId: viewer.episodeId } : {}),
+        ...(params.tmdbId ? { tmdbId: params.tmdbId } : {}), ...(params.imdbId ? { imdbId: params.imdbId } : {}),
+        ...(season !== undefined ? { season } : {}), ...(episode !== undefined ? { episode } : {}),
+        ...(snapshot.positionSeconds > 0 ? { start: snapshot.positionSeconds } : {}),
       });
       if (cancelled) return;
+      setContext(viewer);
+      setInitial(snapshot);
+      setBridge(resolved);
+      setActiveId(resolved.sources[0]?.id ?? null);
+      setPhase(resolved.sources.length ? 'ready' : 'error');
+    })().catch(() => { if (!cancelled) setPhase('error'); });
+    return () => { cancelled = true; };
+  }, [titleId, type, slug, params.tmdbId, params.imdbId, params.episodeId, season, episode, checkpointKey, attempt]);
 
-      setSignedIn(!!user);
-      setSources(resolved);
-      setActiveId(resolved[0]?.id ?? null);
-      setPhase(resolved.length ? 'ready' : 'error');
-
-      // Signed-out viewers get a device-local entry (the native twin of the web
-      // guest store). Signed-in viewers are tracked server-side: a playback
-      // session row is recorded for EVERY play (embeds expose no position, so
-      // this row is what lets a signed-in embed watch show up in Continue
-      // Watching on the web, which falls back to recent playback_sessions).
-      if (!user) {
-        void recordGuestWatch({
-          slug,
-          type: titleType,
-          name,
-          ...(posterUrl ? { posterUrl } : {}),
-          ...(backdropUrl ? { backdropUrl } : {}),
-          // Ids must persist: the bridge can't resolve a source without a TMDB
-          // or IMDb id, so a guest entry saved without them is unplayable.
-          ...(tmdbId ? { tmdbId } : {}),
-          ...(imdbId ? { imdbId } : {}),
-          ...(titleId ? { catalogId: titleId } : {}),
-          ...(season !== undefined ? { seasonNumber: season } : {}),
-          ...(episode !== undefined ? { episodeNumber: episode } : {}),
-        });
-      } else if (resolved.length > 0 && sessionRecordedRef.current !== `${titleId}:${episodeId ?? ''}`) {
-        // Once per play: `attempt` is an effect dep, so a Retry tap would
-        // otherwise insert a second session row for the same viewing.
-        sessionRecordedRef.current = `${titleId}:${episodeId ?? ''}`;
-        void recordPlaybackSession(titleId, episodeId);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [titleId, titleType, slug, name, tmdbId, imdbId, season, episode, episodeId, attempt]);
-
-  // -------------------------------------------------------------------------
-  // Telemetry — native sources only, and only while one is actually playing
-  // -------------------------------------------------------------------------
-
-  const lastPositionRef = useRef<number | null>(null);
-  const lastDurationRef = useRef<number | null>(null);
-
-  const guestEpisode = useMemo(
-    () => (season !== undefined && episode !== undefined ? { seasonNumber: season, episodeNumber: episode } : undefined),
-    [season, episode],
-  );
-
-  const handleTime = useCallback((positionSeconds: number, durationSeconds: number | null) => {
-    lastPositionRef.current = positionSeconds;
-    lastDurationRef.current = durationSeconds;
-  }, []);
-
-  const flushProgress = useCallback(() => {
-    const position = lastPositionRef.current;
-    // Embeds report nothing, and a position we never observed is never invented.
-    if (position === null || position <= 0) return;
-    const duration = lastDurationRef.current;
-    if (signedIn) {
-      void reportProgress({
-        titleId,
-        ...(episodeId ? { episodeId } : {}),
-        positionSeconds: position,
-        ...(duration && duration > 0 ? { durationSeconds: duration } : {}),
+  // Record only an actually opened, consented source. Unknown TV episodes never write title-only history.
+  useEffect(() => {
+    if (phase !== 'ready' || !active || needsConsent || failed) return;
+    const key = `${context.viewerKey}:${checkpointKey}`;
+    if (sessionRecorded.current === key) return;
+    sessionRecorded.current = key;
+    if (context.viewerKey === 'guest') {
+      void recordGuestWatch({ slug, type, name,
+        ...(params.posterUrl ? { posterUrl: params.posterUrl } : {}), ...(params.backdropUrl ? { backdropUrl: params.backdropUrl } : {}),
+        ...(params.tmdbId ? { tmdbId: params.tmdbId } : {}), ...(params.imdbId ? { imdbId: params.imdbId } : {}), catalogId: titleId,
+        ...(season !== undefined ? { seasonNumber: season } : {}), ...(episode !== undefined ? { episodeNumber: episode } : {}),
       });
-    } else {
-      void updateGuestPosition(slug, position, duration && duration > 0 ? duration : undefined, guestEpisode);
+    } else if (context.viewerKey.startsWith('account:') && (type === 'movie' || context.episodeId)) {
+      void recordPlaybackSession(titleId, context.episodeId, context.viewerKey);
     }
-  }, [signedIn, titleId, episodeId, slug, guestEpisode]);
+    if (bridge.adPolicy && active.kind !== 'embed') notifyAdBreak({ policy: bridge.adPolicy, positionSeconds: initial.positionSeconds, phase: 'start' });
+  }, [phase, active, needsConsent, failed, context, checkpointKey, slug, type, name, titleId, season, episode, bridge.adPolicy]);
+
+  function persist(snapshot: Snapshot) {
+    if (!Number.isFinite(snapshot.positionSeconds) || snapshot.positionSeconds < 0) return;
+    lastSnapshot.current = snapshot;
+    setInitial(snapshot);
+    const shouldReport = context.viewerKey.startsWith('account:') && (type === 'movie' || !!context.episodeId);
+    const local = writeCheckpoint(context.viewerKey, checkpointKey, snapshot.positionSeconds, snapshot.durationSeconds, snapshot.playing, shouldReport);
+    if (context.viewerKey === 'guest') {
+      void updateGuestPosition(slug, snapshot.positionSeconds, snapshot.durationSeconds,
+        type === 'tv' && season !== undefined && episode !== undefined ? { seasonNumber: season, episodeNumber: episode } : undefined, type);
+    } else if (shouldReport) {
+      const input = { titleId, episodeId: context.episodeId, viewerKey: context.viewerKey,
+        positionSeconds: snapshot.positionSeconds, ...(snapshot.durationSeconds ? { durationSeconds: snapshot.durationSeconds } : {}) };
+      reports.current = reports.current.catch(() => {}).then(async () => {
+        const captured = await local;
+        const result = await reportProgress(input);
+        if (result.ok && captured) await markCheckpointSynced(input.viewerKey, checkpointKey, captured);
+      });
+    }
+    if (bridge.adPolicy) notifyAdBreak({ policy: bridge.adPolicy, positionSeconds: snapshot.positionSeconds, phase: 'progress' });
+  }
+
+  const persistRef = useRef(persist);
+  persistRef.current = persist;
+  useEffect(() => {
+    const listener = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' && lastSnapshot.current) persistRef.current(lastSnapshot.current);
+    });
+    return () => { listener.remove(); if (lastSnapshot.current) persistRef.current(lastSnapshot.current); };
+  }, []);
 
   useEffect(() => {
-    if (phase !== 'ready' || !activeSource) return;
-    if (!isNative || needsConsent || failed) return;
+    setCatalogNext(null);
+    if (type !== 'tv' || season === undefined || episode === undefined || !/^[0-9a-f-]{36}$/i.test(titleId)) return;
+    let cancelled = false;
+    void listSeasons(titleId).then((seasons) => {
+      if (cancelled) return;
+      const flat = seasons.flatMap((s) => s.episodes.map((e) => ({ season: s.seasonNumber, episode: e.episodeNumber, id: e.id, name: e.name })))
+        .sort((a, b) => a.season - b.season || a.episode - b.episode);
+      const index = flat.findIndex((e) => e.season === season && e.episode === episode);
+      setCatalogNext(index >= 0 ? flat[index + 1] ?? null : null);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [titleId, type, season, episode]);
+  const next = catalogNext ?? (params.nextSeason !== undefined && params.nextEpisode !== undefined
+    ? { season: params.nextSeason, episode: params.nextEpisode, name: params.nextEpisodeName, id: undefined } : null);
 
-    // A new source starts its own timeline — drop the previous one's readings so
-    // the first tick can't report a position from the server we just left.
-    lastPositionRef.current = null;
-    lastDurationRef.current = null;
-
-    const timer = setInterval(flushProgress, PROGRESS_INTERVAL_MS);
-    return () => {
-      clearInterval(timer);
-      flushProgress(); // last known real position, on unmount or source switch
-    };
-  }, [phase, activeSource, isNative, needsConsent, failed, flushProgress]);
-
-  // -------------------------------------------------------------------------
-  // Actions
-  // -------------------------------------------------------------------------
-
-  const activeIdRef = useRef<string | null>(null);
-  activeIdRef.current = activeSource?.id ?? null;
-
-  const handleSurfaceError = useCallback(() => {
-    if (activeIdRef.current) setFailedSourceId(activeIdRef.current);
-  }, []);
-
-  const close = useCallback(() => {
+  function close() {
+    if (lastSnapshot.current) persist(lastSnapshot.current);
     if (navigation.canGoBack()) navigation.goBack();
     else navigation.navigate('Tabs');
-  }, [navigation]);
-
-  const retry = useCallback(() => {
-    setFailedSourceId(null);
-    setAttempt((n) => n + 1);
-  }, []);
-
-  function selectSource(next: PlaybackSource) {
-    if (next.id === activeSource?.id) return;
-    setFailedSourceId(null);
-    setActiveId(next.id);
   }
 
-  function acceptConsent() {
-    if (!activeSource) return;
-    setFailedSourceId(null);
-    setConsentedIds((prev) => (prev.includes(activeSource.id) ? prev : [...prev, activeSource.id]));
+  const playNext = next ? () => {
+      if (lastSnapshot.current) persist(lastSnapshot.current);
+      navigation.replace('Player', { titleId, type, slug, name, tmdbId: params.tmdbId, imdbId: params.imdbId,
+        posterUrl: params.posterUrl, backdropUrl: params.backdropUrl, season: next.season, episode: next.episode,
+        episodeId: next.id, episodeName: next.name });
+  } : undefined;
+  const header = <View style={styles.headerRow}>
+    <Button label="Close player" variant="ghost" onPress={close} />
+    <Text style={styles.title} numberOfLines={2}>{name}{season !== undefined && episode !== undefined ? ` / S${season} E${episode}` : ''}</Text>
+  </View>;
+  const footer = <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.sourceRow} accessibilityLabel="Playback sources">
+    {bridge.sources.map((source) => <Pressable key={source.id} accessibilityRole="button" accessibilityLabel={`Source: ${source.label}`}
+      accessibilityState={{ selected: source.id === active?.id }} onPress={() => {
+        if (lastSnapshot.current) { persist(lastSnapshot.current); setInitial(lastSnapshot.current); }
+        setFailedId(null);
+        setActiveId(source.id);
+      }} style={[styles.chip, source.id === active?.id && { backgroundColor: colors.primary }]}>
+      <Text style={styles.chipText}>{source.label}{source.kind === 'embed' ? ' / external player' : ''}</Text>
+    </Pressable>)}
+  </ScrollView>;
+
+  if (phase === 'ready' && active && !needsConsent && !failed && active.kind !== 'embed') {
+    return <NativePlayer key={`${context.viewerKey}:${checkpointKey}`} source={active} initial={initial} subtitleCatalogUrl={bridge.subtitleCatalogUrl}
+      adPolicy={bridge.adPolicy} upNext={next && playNext ? { label: `Up next S${next.season} E${next.episode}`, onPress: playNext } : undefined}
+      onCheckpoint={persist} onError={() => setFailedId(active.id)} header={header} footer={footer} />;
   }
 
-  // -------------------------------------------------------------------------
-  // "Up next" — derived from the catalog, not from route params
-  // -------------------------------------------------------------------------
-  // The caller can't reliably know the following episode (and after advancing,
-  // nobody is left to tell us), so the next episode is computed here from the
-  // season/episode index. Falls back to caller-supplied params when present.
-  const [catalogNext, setCatalogNext] = useState<{ season: number; episode: number; name?: string } | null>(null);
-
-  useEffect(() => {
-    if (titleType !== 'tv' || season === undefined || episode === undefined) return;
-    // Guests carry a slug rather than a catalog id — nothing to look up.
-    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!UUID_RE.test(titleId)) return;
-
-    let cancelled = false;
-    void listSeasons(titleId)
-      .then((seasons) => {
-        if (cancelled) return;
-        const flat = seasons.flatMap((s) =>
-          s.episodes.map((e) => ({ season: s.seasonNumber, episode: e.episodeNumber, name: e.name })),
-        );
-        const idx = flat.findIndex((e) => e.season === season && e.episode === episode);
-        setCatalogNext(idx >= 0 && idx < flat.length - 1 ? flat[idx + 1]! : null);
-      })
-      .catch(() => {
-        if (!cancelled) setCatalogNext(null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [titleType, titleId, season, episode]);
-
-  const nextEp =
-    catalogNext ??
-    (nextSeason !== undefined && nextEpisode !== undefined
-      ? { season: nextSeason, episode: nextEpisode, ...(nextEpisodeName ? { name: nextEpisodeName } : {}) }
-      : null);
-
-  const goToNext = useCallback(() => {
-    if (!nextEp) return;
-    const next: RootStackParamList['Player'] = { titleId, type: titleType, slug, name };
-    if (tmdbId) next.tmdbId = tmdbId;
-    if (imdbId) next.imdbId = imdbId;
-    next.season = nextEp.season;
-    next.episode = nextEp.episode;
-    // episodeId / episodeName are intentionally omitted: the catalog id of the
-    // next episode isn't known here, and passing the current one would be a lie.
-    // The next screen re-derives everything from the catalog itself.
-    navigation.replace('Player', next);
-  }, [navigation, titleId, titleType, slug, name, tmdbId, imdbId, nextEp]);
-
-  // -------------------------------------------------------------------------
-  // Render
-  // -------------------------------------------------------------------------
-
-  const episodeLabel = season !== undefined && episode !== undefined ? `S${season} E${episode}` : null;
-  const heading = episodeLabel ? `${name} · ${episodeLabel}` : name;
-  const hasNext = nextEp !== null;
-
-  function renderSurface() {
-    if (phase !== 'ready' || !activeSource || failed || needsConsent) return null;
-
-    if (activeSource.kind === 'embed') {
-      return (
-        <WebView
-          key={activeSource.id}
-          source={{ uri: activeSource.url }}
-          style={styles.surface}
-          javaScriptEnabled
-          allowsFullscreenVideo
-          allowsInlineMediaPlayback
-          mediaPlaybackRequiresUserAction={false}
-          // A stock WebView announces itself with a "wv" token in the UA, which
-          // Cloudflare treats as a bot — vidup.to (Server 4) answers with
-          // "Sorry, you have been blocked". Presenting an ordinary mobile
-          // browser UA is what lets the provider's own player load, exactly as
-          // it does in the web app.
-          userAgent={BROWSER_USER_AGENT}
-          applicationNameForUserAgent=""
-          originWhitelist={['*']}
-          thirdPartyCookiesEnabled
-          domStorageEnabled
-          sharedCookiesEnabled
-          setSupportMultipleWindows={false}
-          onError={handleSurfaceError}
-        />
-      );
-    }
-
-    return (
-      <NativeSourcePlayer
-        key={activeSource.id}
-        source={activeSource}
-        onTime={handleTime}
-        onError={handleSurfaceError}
-        style={styles.surface}
-      />
-    );
-  }
-
-  const showError = phase === 'error' || failed;
-
-  return (
-    <View style={styles.root}>
-      {renderSurface()}
-
-      {/* Full-screen states — drawn under the chrome so Back stays reachable. */}
-      {phase === 'loading' ? (
-        <View style={styles.overlay}>
-          <Loading label="Finding a source…" />
-        </View>
-      ) : null}
-
-      {showError ? (
-        <View style={styles.overlay}>
-          <View style={styles.panel}>
-            <Text style={styles.panelTitle}>Playback unavailable</Text>
-            <Text style={styles.panelBody}>
-              No authorized source is available for this title right now.
-            </Text>
-            <View style={styles.panelActions}>
-              <Button label="Retry" onPress={retry} />
-              <Button label="Close" variant="ghost" onPress={close} />
-            </View>
-          </View>
-        </View>
-      ) : null}
-
-      {phase === 'ready' && !showError && needsConsent && activeSource ? (
-        <View style={styles.overlay}>
-          <View style={styles.panel}>
-            <Text style={styles.panelTitle}>Play with {activeSource.label}?</Text>
-            <Text style={styles.panelBody}>
-              Playback is provided by an external service — loading it may set its cookies and is
-              subject to their terms.
-            </Text>
-            <View style={styles.panelActions}>
-              <Button label="Load player" onPress={acceptConsent} />
-              <Button label="Not now" variant="ghost" onPress={close} />
-            </View>
-          </View>
-        </View>
-      ) : null}
-
-      {/* Top chrome: close affordance, title, and the up-next affordance. */}
-      <View style={[styles.topChrome, { paddingTop: insets.top + spacing(3) }]}>
-        <View style={styles.topRow}>
-          <Pressable
-            onPress={close}
-            accessibilityRole="button"
-            accessibilityLabel="Close player"
-            hitSlop={spacing(3)}
-            style={({ pressed }) => [styles.closeButton, pressed && { opacity: 0.7 }]}
-          >
-            <Text style={styles.closeGlyph}>✕</Text>
-          </Pressable>
-          <View style={styles.titleBlock}>
-            <Text style={styles.title} numberOfLines={1}>
-              {heading}
-            </Text>
-            {episodeName ? (
-              <Text style={styles.subtitle} numberOfLines={1}>
-                {episodeName}
-              </Text>
-            ) : null}
-          </View>
-        </View>
-
-        {hasNext && nextEp && !showError ? (
-          <Pressable
-            onPress={goToNext}
-            accessibilityRole="button"
-            accessibilityLabel={`Up next: season ${nextEp.season} episode ${nextEp.episode}`}
-            style={({ pressed }) => [styles.upNext, pressed && { opacity: 0.85 }]}
-          >
-            <Text style={styles.upNextLabel} numberOfLines={1}>
-              {`Up next: S${nextEp.season} E${nextEp.episode}${nextEp.name ? ` · ${nextEp.name}` : ''}`}
-            </Text>
-          </Pressable>
-        ) : null}
-      </View>
-
-      {/* Bottom chrome: server selector. */}
-      {phase === 'ready' && sources.length ? (
-        <View style={[styles.bottomChrome, { paddingBottom: insets.bottom + spacing(3) }]}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.serverRow}
-          >
-            {sources.map((source, index) => {
-              const active = source.id === activeSource?.id;
-              return (
-                <Pressable
-                  key={source.id}
-                  onPress={() => selectSource(source)}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: active }}
-                  accessibilityLabel={source.label || `Server ${index + 1}`}
-                  style={({ pressed }) => [
-                    styles.chip,
-                    active && styles.chipActive,
-                    pressed && { opacity: 0.85 },
-                  ]}
-                >
-                  <Text style={[styles.chipLabel, active && styles.chipLabelActive]} numberOfLines={1}>
-                    {source.label || `Server ${index + 1}`}
-                  </Text>
-                </Pressable>
-              );
-            })}
-          </ScrollView>
-        </View>
-      ) : null}
-    </View>
-  );
+  return <View style={styles.root}>
+    {phase === 'ready' && active?.kind === 'embed' && !needsConsent && !failed ? <WebView key={active.id} source={{ uri: active.url }}
+      style={StyleSheet.absoluteFill} javaScriptEnabled allowsFullscreenVideo allowsInlineMediaPlayback
+      mediaPlaybackRequiresUserAction={false} userAgent={BROWSER_USER_AGENT} applicationNameForUserAgent=""
+      originWhitelist={['http://*', 'https://*']} thirdPartyCookiesEnabled domStorageEnabled sharedCookiesEnabled
+      setSupportMultipleWindows={false} onError={() => setFailedId(active.id)} /> : <View style={styles.panel}>
+      {phase === 'loading' ? <Text style={styles.title}>Finding a source...</Text> : needsConsent ? <>
+        <Text style={styles.title}>Play with {active?.label}?</Text>
+        <Text style={styles.body}>Loading this external playback service may set its cookies and is subject to its terms.</Text>
+        <Button label="Load player" onPress={() => { if (active) setConsented((ids) => [...ids, active.id]); }} />
+        <Button label="Not now" variant="ghost" onPress={close} />
+      </> : <>
+        <Text style={styles.title}>Playback unavailable</Text>
+        <Text style={styles.body}>Retry or choose another authorized source.</Text>
+        <Button label="Retry" onPress={() => setAttempt((n) => n + 1)} />
+      </>}
+    </View>}
+    <View style={[styles.top, { paddingTop: insets.top + 12 }]}>{header}</View>
+    {phase === 'ready' ? <View style={[styles.bottom, { paddingBottom: insets.bottom + 12 }]}>{footer}</View> : null}
+  </View>;
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: colors.base },
-  surface: { flex: 1, backgroundColor: '#000' },
-  overlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: colors.base,
-    alignItems: 'center',
-    justifyContent: 'center',
-    padding: spacing(6),
-  },
-  panel: { alignItems: 'center', gap: spacing(3) },
-  panelTitle: { ...type.h2, color: colors.content, textAlign: 'center' },
-  panelBody: { ...type.body, color: colors.contentMuted, textAlign: 'center' },
-  panelActions: { alignItems: 'center', gap: spacing(2), marginTop: spacing(2) },
-
-  topChrome: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    paddingHorizontal: spacing(4),
-    paddingBottom: spacing(2),
-    gap: spacing(2),
-    pointerEvents: 'box-none',
-  },
-  topRow: { flexDirection: 'row', alignItems: 'center', gap: spacing(3), pointerEvents: 'box-none' },
-  closeButton: {
-    width: 34,
-    height: 34,
-    borderRadius: radius.pill,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: colors.surfaceOverlay,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  closeGlyph: { ...type.h3, color: colors.content, lineHeight: 20 },
-  titleBlock: { flex: 1, pointerEvents: 'none' },
-  title: { ...type.h3, color: colors.content, textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 6 },
-  subtitle: {
-    ...type.small,
-    color: colors.contentMuted,
-    marginTop: 2,
-    textShadowColor: 'rgba(0,0,0,0.6)',
-    textShadowRadius: 6,
-  },
-  upNext: {
-    alignSelf: 'flex-start',
-    backgroundColor: colors.primary,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing(3),
-    paddingVertical: spacing(1.5),
-  },
-  upNextLabel: { ...type.tiny, color: colors.primaryContrast, fontWeight: '600' },
-
-  bottomChrome: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    bottom: 0,
-    paddingTop: spacing(2),
-    pointerEvents: 'box-none',
-  },
-  serverRow: { gap: spacing(2), paddingHorizontal: spacing(4) },
-  chip: {
-    backgroundColor: colors.surfaceOverlay,
-    borderWidth: 1,
-    borderColor: colors.border,
-    borderRadius: radius.pill,
-    paddingHorizontal: spacing(4),
-    paddingVertical: spacing(2),
-  },
-  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  chipLabel: { ...type.small, fontWeight: '600', color: colors.contentMuted },
-  chipLabelActive: { color: colors.primaryContrast },
+  root: { flex: 1, backgroundColor: '#000' },
+  panel: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 24 },
+  headerRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 },
+  title: { color: colors.content, fontSize: 18, fontWeight: '600', flexShrink: 1 },
+  body: { color: colors.contentMuted, textAlign: 'center' },
+  top: { position: 'absolute', top: 0, left: 16, right: 16 },
+  bottom: { position: 'absolute', bottom: 0, left: 0, right: 0 },
+  sourceRow: { gap: 8, paddingHorizontal: 8 },
+  chip: { padding: 12, minHeight: 44, backgroundColor: '#252630', borderRadius: 12 },
+  chipText: { color: '#fff', fontSize: 13 },
 });

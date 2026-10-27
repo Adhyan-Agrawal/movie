@@ -19,6 +19,7 @@ import {
 } from '@/features/playback/session-actions';
 import { reportPlaybackIssueAction } from '@/features/playback/report-actions';
 import { recordGuestWatch } from '@/features/playback/guest-watch';
+import type { PlaybackAdPolicy } from '@/features/commerce/types';
 
 /**
  * Player surface (Spec Section 9). Responsive 16:9 external-provider iframe with
@@ -72,6 +73,7 @@ export interface PlayerShellProps {
   initialPosition?: number;
   resumeUpdatedAt?: number;
   viewerKey?: string;
+  adPolicy?: PlaybackAdPolicy;
   /**
    * Pre-roll ad zone (Spec Section 11). Resolved server-side from env and
    * passed here — env vars are stripped from client bundles. Null = no pre-roll.
@@ -128,6 +130,7 @@ export function PlayerShell({
   initialPosition,
   resumeUpdatedAt,
   viewerKey = 'guest',
+  adPolicy,
   preroll = null,
   nextEpisode,
 }: PlayerShellProps) {
@@ -383,6 +386,7 @@ export function PlayerShell({
                 titleSlug={title.slug}
                 titleName={title.name}
                 viewerKey={viewerKey}
+                adPolicy={adPolicy}
                 subtitleCatalogUrl={subtitleCatalogUrl}
                 upNext={nextEpisode ? {
                   name: [nextEpisode.label, nextEpisode.name].filter(Boolean).join(' - '),

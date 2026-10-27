@@ -12,6 +12,8 @@ export interface Title {
   slug: string;
   name: string;
   originalName?: string;
+  originalLanguage?: string;
+  originCountries?: string[];
   synopsis: string;
   releaseYear: number;
   runtimeMinutes?: number;
@@ -65,6 +67,22 @@ export interface MediaRow {
   heading: string;
   reason?: string;
   titles: Title[];
+  href?: string;
+  filters?: TitleFilters;
+}
+
+export interface TitleFilters {
+  type?: TitleType;
+  genre?: string;
+  sort?: 'trending' | 'newest' | 'oldest' | 'az' | 'score';
+  originalLanguage?: string;
+  country?: string;
+}
+
+export interface HomeData {
+  hero: Title[];
+  rows: MediaRow[];
+  collections?: Array<{ id: string; label: string; href: string; filters: TitleFilters }>;
 }
 
 /** A playable source, already anonymized to "Server N" by the web bridge. */
@@ -74,6 +92,64 @@ export interface PlaybackSource {
   url: string;
   kind: 'embed' | 'hls' | 'mp4' | 'dash';
   consentRequired: boolean;
+  streamCatalogUrl?: string;
+}
+
+export interface Quality {
+  id: string;
+  label: string;
+  height?: number;
+  width?: number;
+  bitrateKbps?: number;
+  auto?: boolean;
+}
+
+export interface MediaTrack {
+  id: string;
+  label: string;
+  language: string;
+  default?: boolean;
+}
+
+export interface Subtitle extends MediaTrack {
+  kind?: 'subtitles' | 'captions';
+  /** Only genuine VTT sidecars have a URL, never HLS subtitle playlists. */
+  url?: string;
+}
+
+export interface DirectStream {
+  id: string;
+  url: string;
+  startupLatencyMs?: number;
+  qualities: Quality[];
+  audioTracks: MediaTrack[];
+  subtitles: Subtitle[];
+}
+
+export interface StreamCatalog {
+  streams: DirectStream[];
+  recommendedStreamId?: string;
+}
+
+/** Optional bridge extensions. Native ad execution is supplied separately. */
+export interface PlaybackResponse {
+  sources: PlaybackSource[];
+  subtitleCatalogUrl?: string;
+  adPolicy?: NativeAdPolicy;
+  entitlements?: { resolved: boolean; adFree: boolean; status: string; maxProfiles: number };
+  entitlement?: Record<string, unknown>;
+}
+
+export interface NativeAdPolicy {
+  enabled: boolean; firstBreakSeconds: number; intervalSeconds: number; maxBreaks: number;
+  allowSkip: boolean; skipAfterSeconds: number;
+}
+
+export interface NativeVastCreative {
+  id: string; mediaUrl: string; durationSeconds: number; skipAfterSeconds: number | null;
+  tracking: Partial<Record<'impression' | 'start' | 'firstQuartile' | 'midpoint' | 'thirdQuartile' | 'complete' | 'skip' | 'error', string[]>>;
+  clickThrough?: string;
+  clickTracking?: string[];
 }
 
 export interface PlaybackRequest {

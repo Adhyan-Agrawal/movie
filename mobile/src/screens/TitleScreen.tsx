@@ -9,13 +9,11 @@ import {
   fetchContinueWatching,
   getMyRating,
   getResumePosition,
-  getTitleBySlug,
   isInWatchlist,
-  listCast,
-  listSeasons,
   setRating,
   toggleWatchlist,
 } from '../lib/api';
+import { getTitleDetails } from '../lib/catalog-bridge';
 import type { CastMember, Season, Title } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 
@@ -83,7 +81,8 @@ export default function TitleScreen() {
 
     (async () => {
       try {
-        const found = await getTitleBySlug(titleType, slug);
+        const details = await getTitleDetails(titleType, slug);
+        const found = details.title;
         if (!active) return;
         if (!found) {
           setNotFound(true);
@@ -92,8 +91,8 @@ export default function TitleScreen() {
         setTitle(found);
 
         const [seasonList, castList, listed, rating, continueEntries] = await Promise.all([
-          found.type === 'tv' ? listSeasons(found.id) : Promise.resolve<Season[]>([]),
-          listCast(found.id),
+          Promise.resolve(details.seasons),
+          Promise.resolve(details.cast),
           isInWatchlist(found.id),
           getMyRating(found.id),
           fetchContinueWatching(50),

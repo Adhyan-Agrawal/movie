@@ -1,12 +1,13 @@
 import { features } from '@/lib/env';
-import type { ContinueWatchingEntry, MediaRow, Title } from './types';
+import type { ContinueWatchingEntry, DiscoveryCollection, MediaRow, Title } from './types';
 import { listTitles } from './queries';
+import { DISCOVERY_COLLECTIONS, discoveryHref, loadDiscoveryRows } from './discovery';
 
 /**
  * Catalog read service (Section 6: route handlers -> services -> repositories).
  *
  * The home page is built ONLY from live catalog rows (via `listTitles`, which
- * reads Postgres under RLS). If Supabase is not configured, the read fails, or
+ * prefers TMDB, then reads Postgres under RLS). If neither is configured or
  * the catalog is empty, `hero` is null and `rows`/`continueWatching` are empty
  * so the home page renders an honest empty state — never fabricated content.
  * `degraded` is true when the live source could not be read at all.
@@ -16,13 +17,15 @@ export interface HomeData {
   /** Null when the catalog is empty or could not be read. */
   hero: Title | null;
   /**
-   * The rotating hero carousel pool: top ~14 trending titles (movies + series)
+    * The rotating hero carousel pool: up to six trending movies and series
    * that the home hero auto-cycles through, so the banner surfaces different
    * content across visits instead of pinning one title.
    */
   heroTitles: Title[];
   continueWatching: ContinueWatchingEntry[];
   rows: MediaRow[];
+  /** Optional, shared with the mobile home bridge. Only nonempty collections. */
+  collections?: DiscoveryCollection[];
   /** Personalized "Because you watched" row for signed-in viewers, else null. */
   forYou: MediaRow | null;
   /** True when the live catalog could not be read (unconfigured or DB error). */
@@ -33,45 +36,6 @@ export interface HomeData {
    * instead — one or the other, never both (Spec Sections 4, 8).
    */
   signedIn: boolean;
-}
-
-/** Build home rows (featured hero + genre/newest rows) from a live title set. */
-function buildRows(titles: Title[]): MediaRow[] {
-  const rows: MediaRow[] = [];
-
-  // Incoming list is popularity-ranked (trending) — keep that order so the
-  // "Trending now" row shows recognizable hits, not obscure high-score titles.
-  const trending = titles.slice(0, 12);
-  if (trending.length) rows.push({ id: 'trending', heading: 'Trending now', titles: trending });
-
-  const newest = [...titles].sort((a, b) => b.releaseYear - a.releaseYear).slice(0, 12);
-  if (newest.length) rows.push({ id: 'newest', heading: 'New & recent', titles: newest });
-
-  const movies = titles.filter((t) => t.type === 'movie').slice(0, 12);
-  if (movies.length) rows.push({ id: 'movies', heading: 'Movies', titles: movies });
-
-  const series = titles.filter((t) => t.type === 'tv').slice(0, 12);
-  if (series.length) rows.push({ id: 'tv', heading: 'TV series', titles: series });
-
-  // Genre rows for the most common genres in the live set.
-  const byGenre = new Map<string, Title[]>();
-  for (const t of titles) {
-    for (const g of t.genres) {
-      const list = byGenre.get(g) ?? [];
-      list.push(t);
-      byGenre.set(g, list);
-    }
-  }
-  const topGenres = [...byGenre.entries()]
-    .sort((a, b) => b[1].length - a[1].length)
-    .slice(0, 4);
-  for (const [genre, list] of topGenres) {
-    if (list.length >= 3) {
-      rows.push({ id: `genre-${genre.toLowerCase()}`, heading: genre, titles: list.slice(0, 12) });
-    }
-  }
-
-  return rows;
 }
 
 /**
@@ -118,13 +82,14 @@ async function loadForYou(): Promise<MediaRow | null> {
   }
 }
 
-export async function getHomeData(): Promise<HomeData> {
-  if (!features.supabaseConfigured) {
+export async function getHomeData(options: { personalize?: boolean } = {}): Promise<HomeData> {
+  if (!features.supabaseConfigured && !features.tmdbConfigured) {
     return {
       hero: null,
       heroTitles: [],
       continueWatching: [],
       rows: [],
+      collections: [],
       forYou: null,
       degraded: true,
       signedIn: false,
@@ -132,15 +97,17 @@ export async function getHomeData(): Promise<HomeData> {
   }
 
   try {
-    const [titles, continueWatching, signedIn, forYou] = await Promise.all([
+    const [trending, discoveryRows, continueWatching, signedIn, forYou] = await Promise.all([
       // Bounded read (egress): the home page only builds twelve-card shelves and
-      // a 14-slide hero from this set — pulling the whole catalog here was the
+       // a six-slide hero from this set — pulling the whole catalog here was the
       // single biggest egress consumer.
-      listTitles({ sort: 'trending', limit: 60 }),
-      loadContinueWatching(),
-      loadSignedIn(),
-      loadForYou(),
+      listTitles({ sort: 'trending', limit: 20 }),
+      loadDiscoveryRows(listTitles),
+      options.personalize === false ? Promise.resolve([]) : loadContinueWatching(),
+      options.personalize === false ? Promise.resolve(false) : loadSignedIn(),
+      options.personalize === false ? Promise.resolve(null) : loadForYou(),
     ]);
+    const titles = trending.length ? trending : discoveryRows.flatMap((row) => row.titles);
     if (!titles.length) {
       // DB reachable but empty catalog — honest empty state, not mock data.
       return {
@@ -148,6 +115,7 @@ export async function getHomeData(): Promise<HomeData> {
         heroTitles: [],
         continueWatching,
         rows: [],
+        collections: [],
         forYou: null,
         degraded: false,
         signedIn,
@@ -160,11 +128,11 @@ export async function getHomeData(): Promise<HomeData> {
     // Drop those genres and interleave the top movies + top scripted series so
     // the banner always features recognisable, premium titles of both kinds.
     const HERO_EXCLUDED_GENRES = new Set(['Reality', 'Talk', 'News', 'Game Show', 'Soap']);
-    const heroWorthy = titles.filter((t) => !t.genres.some((g) => HERO_EXCLUDED_GENRES.has(g)));
-    const heroMovies = heroWorthy.filter((t) => t.type === 'movie').slice(0, 7);
-    const heroSeries = heroWorthy.filter((t) => t.type === 'tv').slice(0, 7);
+    const heroWorthy = [...new Map(titles.filter((t) => t.backdropUrl && !t.genres.some((g) => HERO_EXCLUDED_GENRES.has(g))).map((t) => [t.id, t])).values()];
+    const heroMovies = heroWorthy.filter((t) => t.type === 'movie').slice(0, 3);
+    const heroSeries = heroWorthy.filter((t) => t.type === 'tv').slice(0, 3);
     const heroTitles: Title[] = [];
-    for (let i = 0; i < Math.max(heroMovies.length, heroSeries.length) && heroTitles.length < 14; i++) {
+    for (let i = 0; i < Math.max(heroMovies.length, heroSeries.length); i++) {
       if (i < heroMovies.length) heroTitles.push(heroMovies[i]!);
       if (i < heroSeries.length) heroTitles.push(heroSeries[i]!);
     }
@@ -172,13 +140,18 @@ export async function getHomeData(): Promise<HomeData> {
     // cached renders, then the carousel start position changes.
     const heroBucket = Math.floor(Date.now() / (6 * 60 * 60 * 1000));
     const hero = heroTitles[heroBucket % heroTitles.length] ?? titles[0]!;
-    const rows = buildRows(titles);
+    const rows: MediaRow[] = [
+      ...(trending.length ? [{ id: 'trending', collectionId: 'trending', heading: 'Trending now', titles: trending.slice(0, 12), href: discoveryHref({ sort: 'trending' }), filters: { sort: 'trending' as const } }] : []),
+      ...discoveryRows,
+    ];
+    const collections = DISCOVERY_COLLECTIONS.filter((collection) => rows.some((row) => row.id === collection.id));
 
     return {
       hero,
       heroTitles,
       continueWatching,
       rows,
+      collections,
       forYou,
       degraded: false,
       signedIn,
@@ -192,6 +165,7 @@ export async function getHomeData(): Promise<HomeData> {
       heroTitles: [],
       continueWatching: [],
       rows: [],
+      collections: [],
       forYou: null,
       degraded: true,
       signedIn: false,

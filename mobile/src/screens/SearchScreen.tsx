@@ -17,7 +17,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { colors, radius, spacing, type } from '../theme';
 import { EmptyState, Screen, SectionTitle } from '../components/ui';
 import { MediaCard } from '../components/MediaCard';
-import { listAllGenres, listTitles, searchPeople, searchTitles } from '../lib/api';
+import { listAllGenres, searchPeople } from '../lib/api';
+import { listTitles, searchTitles } from '../lib/catalog-bridge';
 import type { Person, Title } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 

@@ -1,3 +1,5 @@
+import { cache } from 'react';
+import { getViewerEntitlements } from '@/features/commerce/queries';
 import { cn } from '@/lib/cn';
 import { getAdSlot, type AdSlotName } from './config';
 import { AdsterraBanner } from './AdsterraBanner';
@@ -10,17 +12,22 @@ import { AdsterraBanner } from './AdsterraBanner';
  * Server component: the env key is resolved server-side and only the banner
  * embed (Adsterra's public pattern) reaches the client.
  */
-export function AdSlot({
+const viewerEntitlements = cache(() => getViewerEntitlements());
+
+export async function AdSlot({
   slot,
   className,
   /** Hide the placeholder entirely when unconfigured (default: show it). */
-  silentWhenUnconfigured = false,
+  silentWhenUnconfigured = true,
 }: {
   slot: AdSlotName;
   className?: string;
   silentWhenUnconfigured?: boolean;
 }) {
   const config = getAdSlot(slot);
+  if (!config.adsterraKey && silentWhenUnconfigured) return null;
+  const entitlements = await viewerEntitlements();
+  if (!entitlements.resolved || entitlements.adFree) return null;
 
   if (!config.adsterraKey) {
     if (silentWhenUnconfigured) return null;

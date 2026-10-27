@@ -1,12 +1,13 @@
 import { cache } from 'react';
 import { features } from '@/lib/env';
 import type { CastMember, Season, Title, TitleType } from './types';
+import { matchesDiscovery } from './discovery';
 
 /**
  * Read API over the catalog (Section 6: services -> repositories).
  *
- * Every read goes to the Postgres-backed repository (`./repository`,
- * server-only) under RLS when Supabase is configured. There is NO mock
+ * Public discovery reads prefer TMDB, with a Postgres-backed repository
+ * (`./repository`, server-only) fallback under RLS. There is NO mock
  * fallback: if Supabase is not configured, or a repository call fails, list
  * functions return `[]` and single-title lookups return `null` so the UI can
  * render honest empty states instead of fabricated content. The repository
@@ -18,6 +19,8 @@ import type { CastMember, Season, Title, TitleType } from './types';
 export interface TitleFilters {
   type?: TitleType;
   genre?: string;
+  originalLanguage?: string;
+  country?: string;
   year?: number;
   minYear?: number;
   maxYear?: number;
@@ -61,10 +64,10 @@ export const getTitleBySlug = cache(async (type: TitleType, slug: string): Promi
   if (features.tmdbConfigured) {
     try {
       const { getTmdbTitle } = await import('./tmdb-catalog');
-      return await withReadDeadline(getTmdbTitle(type, slug));
+      const title = await withReadDeadline(getTmdbTitle(type, slug));
+      if (title) return title;
     } catch (err) {
       warnFailure('getTmdbTitle', err);
-      return null;
     }
   }
   if (!features.supabaseConfigured) return null;
@@ -95,7 +98,6 @@ export const listAllGenres = cache(async (): Promise<string[]> => {
       return await withReadDeadline(listTmdbGenres());
     } catch (err) {
       warnFailure('listTmdbGenres', err);
-      return [];
     }
   }
   if (!features.supabaseConfigured) return [];
@@ -112,18 +114,21 @@ export async function listTitles(filters: TitleFilters = {}): Promise<Title[]> {
   if (features.tmdbConfigured) {
     try {
       const { listTmdbTitles, searchTmdbTitles } = await import('./tmdb-catalog');
-      if (filters.query) return await withReadDeadline(searchTmdbTitles(filters.query));
-      const result = await withReadDeadline(listTmdbTitles(filters));
+      if (filters.query) {
+        const titles = await withReadDeadline(searchTmdbTitles(filters.query, filters));
+        return titles.filter((title) => matchesDiscovery(title, filters)).slice(0, filters.limit ?? 24);
+      }
+      const result = await withReadDeadline(listTmdbTitles(filters, 1, filters.limit ?? 20));
       return filters.limit ? result.titles.slice(0, filters.limit) : result.titles;
     } catch (err) {
       warnFailure('listTmdbTitles', err);
-      return [];
     }
   }
   if (!features.supabaseConfigured) return [];
   try {
     const { repoListTitles } = await import('./repository');
-    return await repoListTitles(filters);
+    const titles = await repoListTitles(filters);
+    return titles.filter((title) => matchesDiscovery(title, filters));
   } catch (err) {
     warnFailure('listTitles', err);
     return [];
@@ -140,21 +145,20 @@ export async function listTitlesPage(filters: TitleFilters, page: number, pageSi
     try {
       const { listTmdbTitles, searchTmdbTitles } = await import('./tmdb-catalog');
       if (filters.query) {
-        const titles = await withReadDeadline(searchTmdbTitles(filters.query));
+        const titles = (await withReadDeadline(searchTmdbTitles(filters.query, filters))).filter((title) => matchesDiscovery(title, filters));
         return { titles: titles.slice((page - 1) * pageSize, page * pageSize), total: titles.length };
       }
-      const result = await withReadDeadline(listTmdbTitles(filters, page));
-      return { titles: result.titles.slice(0, pageSize), total: result.total };
+      return await withReadDeadline(listTmdbTitles(filters, page, pageSize));
     } catch (err) {
       warnFailure('listTmdbTitlesPage', err);
-      return { titles: [], total: 0 };
     }
   }
   if (!features.supabaseConfigured) return { titles: [], total: 0 };
   try {
     const { repoListTitlesPage } = await import('./repository');
     const result = await repoListTitlesPage(filters, page, pageSize);
-    return { titles: result.rows, total: result.total };
+    const titles = result.rows.filter((title) => matchesDiscovery(title, filters));
+    return { titles, total: result.total };
   } catch (err) {
     warnFailure('listTitlesPage', err);
     return { titles: [], total: 0 };

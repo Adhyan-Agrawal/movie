@@ -5,6 +5,7 @@ import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { getSupabaseServiceClient } from '@/lib/supabase/service';
 import { sendWelcomeEmail } from '@/features/email/send';
 import type { AuthActionState } from './state';
+import { safeAuthReturnPath } from './return-path';
 
 /**
  * Auth server actions (Spec Section 8). These run on the server with the
@@ -39,6 +40,7 @@ export async function signInAction(
     return { error: 'Enter your email and password.' };
   }
 
+  try {
   const supabase = await getSupabaseServerClient();
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) {
@@ -52,16 +54,19 @@ export async function signInAction(
       const { error: confirmErr } = await admin.auth.admin.updateUserById(user.id, {
         email_confirm: true,
       });
-      if (confirmErr) return { error: confirmErr.message };
+      if (confirmErr) return { error: 'Sign-in could not be completed. Please try again.' };
       const { error: retryErr } = await supabase.auth.signInWithPassword({ email, password });
-      if (retryErr) return { error: retryErr.message };
+      if (retryErr) return { error: 'The email or password is incorrect.' };
     } else {
-      return { error: error.message };
+      return { error: error.status === 429 ? 'Too many sign-in attempts. Please wait and try again.' : 'The email or password is incorrect.' };
     }
+  }
+  } catch {
+    return { error: 'Sign-in is temporarily unavailable. Please try again shortly.' };
   }
 
   // Only allow internal redirect targets (never an arbitrary absolute URL).
-  const safeNext = next.startsWith('/') && !next.startsWith('//') ? next : '/account';
+  const safeNext = safeAuthReturnPath(next);
   redirect(safeNext);
 }
 

@@ -11,6 +11,12 @@ import type { ContinueEntry, Title, TitleType } from './types';
 const STORAGE_KEY = 'lumora:guest-continue-watching';
 const MAX_ENTRIES = 20;
 const MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
+let mutationQueue: Promise<void> = Promise.resolve();
+
+function mutate(run: () => Promise<void>): Promise<void> {
+  mutationQueue = mutationQueue.then(run).catch(() => {});
+  return mutationQueue;
+}
 
 interface GuestEntry {
   slug: string;
@@ -55,6 +61,7 @@ async function write(entries: GuestEntry[]): Promise<void> {
 }
 
 export async function readGuestEntries(): Promise<ContinueEntry[]> {
+  await mutationQueue;
   const entries = (await readRaw()).sort((a, b) => b.updatedAt - a.updatedAt);
   return entries.map((e) => {
     // Rebuild a Title for the card; ids are carried through so the player can
@@ -85,8 +92,14 @@ export async function readGuestEntries(): Promise<ContinueEntry[]> {
 
 /** Record (or refresh) that this device watched a title. */
 export async function recordGuestWatch(entry: Omit<GuestEntry, 'updatedAt'>): Promise<void> {
-  const rest = (await readRaw()).filter((e) => e.slug !== entry.slug);
-  await write([{ ...entry, updatedAt: Date.now() }, ...rest]);
+  if (entry.type === 'tv' && (entry.seasonNumber === undefined || entry.episodeNumber === undefined)) return;
+  return mutate(async () => {
+    const entries = await readRaw();
+    const same = (e: GuestEntry) => e.slug === entry.slug && e.type === entry.type
+      && e.seasonNumber === entry.seasonNumber && e.episodeNumber === entry.episodeNumber;
+    const previous = entries.find(same);
+    await write([{ ...previous, ...entry, updatedAt: Date.now() }, ...entries.filter((e) => !same(e))]);
+  });
 }
 
 /** Update the saved position/episode for a guest entry. */
@@ -95,13 +108,27 @@ export async function updateGuestPosition(
   positionSeconds: number,
   durationSeconds: number | undefined,
   episode?: { seasonNumber?: number; episodeNumber?: number },
+  titleType?: TitleType,
 ): Promise<void> {
-  const entries = await readRaw();
-  const idx = entries.findIndex((e) => e.slug === slug);
-  const entry = idx >= 0 ? entries[idx] : undefined;
-  if (!entry) return;
-  const progress =
-    durationSeconds && durationSeconds > 0 ? Math.min(1, Math.max(0, positionSeconds / durationSeconds)) : undefined;
-  entries[idx] = { ...entry, positionSeconds, progress, ...(episode ?? {}), updatedAt: Date.now() };
-  await write(entries.sort((a, b) => b.updatedAt - a.updatedAt));
+  if (!Number.isFinite(positionSeconds) || positionSeconds < 0) return;
+  return mutate(async () => {
+    const entries = await readRaw();
+    const idx = entries.findIndex((e) => e.slug === slug && (!titleType || e.type === titleType)
+      && e.seasonNumber === episode?.seasonNumber && e.episodeNumber === episode?.episodeNumber);
+    const entry = idx >= 0 ? entries[idx] : undefined;
+    if (!entry || (entry.type === 'tv' && !episode)) return;
+    const progress = durationSeconds && durationSeconds > 0
+      ? Math.min(1, Math.max(0, positionSeconds / durationSeconds)) : entry.progress;
+    entries[idx] = { ...entry, positionSeconds, progress, updatedAt: Date.now() };
+    await write(entries.sort((a, b) => b.updatedAt - a.updatedAt));
+  });
+}
+
+export async function getGuestResume(slug: string, type: TitleType, season?: number, episode?: number): Promise<{ positionSeconds: number; updatedAt: number } | null> {
+  if (type === 'tv' && (season === undefined || episode === undefined)) return null;
+  await mutationQueue;
+  const entry = (await readRaw()).find((e) => e.slug === slug && e.type === type
+    && e.seasonNumber === season && e.episodeNumber === episode);
+  return entry && Number.isFinite(entry.positionSeconds) && entry.positionSeconds! >= 0
+    ? { positionSeconds: entry.positionSeconds!, updatedAt: entry.updatedAt } : null;
 }

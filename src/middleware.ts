@@ -12,12 +12,8 @@ import { NextResponse, type NextRequest } from 'next/server';
  * auth cookies onto both the request and the response.
  *
  * Admin gate: /admin is authorized HERE, before any rendering starts, so that
- * unauthorized requests get a genuine HTTP 404. (A `notFound()` thrown inside
- * the admin layout still renders the not-found UI, but the segment has a
- * `loading.tsx` streaming boundary — the 200 status is already sent by the time
- * the check resolves, and a 200 would confirm the console exists.) We rewrite
- * to an unmatched path instead of redirecting, so the URL stays `/admin` and
- * the response is indistinguishable from a route that never existed.
+ * anonymous visitors go through password sign-in, while authenticated callers
+ * without permission receive a clear 403 before protected rendering starts.
  *
  * If Supabase isn't configured (mock mode), every admin check fails closed.
  */
@@ -32,20 +28,32 @@ const ADMIN_PERMISSION_KEYS = [
   'provider.manage',
   'ads.manage',
   'roles.manage',
+  'plans.manage',
+  'billing.read',
 ] as const;
 
-/** An unmatched path: rewriting here yields the standard 404 + not-found page. */
-const NOT_FOUND_PATH = '/-not-found';
+function signIn(request: NextRequest, previous?: NextResponse): NextResponse {
+  const destination = new URL('/signin', request.url);
+  destination.searchParams.set('next', request.nextUrl.pathname);
+  const response = NextResponse.redirect(destination, request.method === 'GET' || request.method === 'HEAD' ? 307 : 303);
+  for (const cookie of previous?.cookies.getAll() ?? []) response.cookies.set(cookie);
+  return response;
+}
+
+function denyAdmin(request: NextRequest, previous?: NextResponse): NextResponse {
+  const response = NextResponse.rewrite(new URL('/access-denied', request.url), { status: 403 });
+  for (const cookie of previous?.cookies.getAll() ?? []) response.cookies.set(cookie);
+  return response;
+}
 
 export async function middleware(request: NextRequest) {
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  const adminRequest = request.nextUrl.pathname === '/admin' || request.nextUrl.pathname.startsWith('/admin/');
 
   // Supabase not configured — nothing to refresh, and every admin check fails closed.
   if (!url || !anonKey) {
-    if (request.nextUrl.pathname.startsWith('/admin')) {
-      return NextResponse.rewrite(new URL(NOT_FOUND_PATH, request.url));
-    }
+    if (adminRequest) return signIn(request);
     return NextResponse.next({ request });
   }
 
@@ -80,11 +88,15 @@ export async function middleware(request: NextRequest) {
     // Ignore; the request proceeds unauthenticated and downstream RLS/guards apply.
   }
 
-  // Admin gate (runs BEFORE rendering, so the 404 status is never streamed away).
-  if (request.nextUrl.pathname.startsWith('/admin')) {
+  // Admin gate runs before rendering; query parameters never authorize entry.
+  if (adminRequest) {
+    if (!userId) return signIn(request, response);
     let authorized = false;
     if (userId) {
       try {
+        const { data: account, error: accountError } = await supabase.from('accounts')
+          .select('is_suspended').eq('id', userId).maybeSingle();
+        if (accountError || !account || account.is_suspended) return denyAdmin(request, response);
         // Same 3-step resolution as `hasPermission` in check.ts (flat queries —
         // the nested-select type shape doesn't match PostgREST's embed output).
         // Runs under RLS with the user's session (self-readable memberships).
@@ -115,7 +127,7 @@ export async function middleware(request: NextRequest) {
       }
     }
     if (!authorized) {
-      return NextResponse.rewrite(new URL(NOT_FOUND_PATH, request.url));
+      return denyAdmin(request, response);
     }
   }
 

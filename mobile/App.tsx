@@ -3,8 +3,8 @@ import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect } from 'react';
-import { Text } from 'react-native';
+import { useEffect, useState } from 'react';
+import { AccessibilityInfo, Text } from 'react-native';
 import * as ScreenOrientation from 'expo-screen-orientation';
 
 import { colors } from './src/theme';
@@ -65,6 +65,12 @@ function MainTabs() {
 }
 
 export default function App() {
+  const [reduceMotion, setReduceMotion] = useState(true);
+  useEffect(() => {
+    void AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
+    return () => subscription.remove();
+  }, []);
   // The app is portrait-first; the PLAYER unlocks rotation for itself (see
   // PlayerScreen) and restores portrait on exit.
   useEffect(() => {
@@ -80,6 +86,7 @@ export default function App() {
             headerStyle: { backgroundColor: colors.base },
             headerTintColor: colors.content,
             contentStyle: { backgroundColor: colors.base },
+            animation: reduceMotion ? 'none' : 'default',
           }}
         >
           <Stack.Screen name="Tabs" component={MainTabs} options={{ headerShown: false }} />

@@ -1,14 +1,19 @@
 import { supabase } from './supabase';
 import type {
   CastMember,
+  HomeData,
   ContinueEntry,
   MediaRow,
   Person,
   PlaybackRequest,
   PlaybackSource,
+  PlaybackResponse,
+  StreamCatalog,
+  Subtitle,
   Season,
   Title,
   TitleType,
+  TitleFilters,
 } from './types';
 
 /**
@@ -22,10 +27,19 @@ import type {
  * native app never sees real provider identities, only "Server N".
  */
 
-const WEB_URL = process.env.EXPO_PUBLIC_WEB_URL ?? 'https://hulkofyt.eu.org';
+const WEB_URL = (process.env.EXPO_PUBLIC_WEB_URL ?? 'https://hulkofyt.eu.org').replace(/\/$/, '');
+
+export function sameOriginPlaybackUrl(value: string): string | null {
+  try {
+    const url = new URL(value, WEB_URL);
+    const base = new URL(WEB_URL);
+    return url.origin === base.origin && !url.username && !url.password
+      && (url.protocol === 'https:' || url.protocol === 'http:') ? url.href : null;
+  } catch { return null; }
+}
 
 const TITLE_SELECT =
-  'id, type, slug, name, original_name, synopsis, release_year, runtime_minutes, ' +
+  'id, type, slug, name, original_name, original_language, synopsis, release_year, runtime_minutes, ' +
   'maturity, poster_url, backdrop_url, trailer_url, editorial_score, tmdb_id, imdb_id, ' +
   'title_genres ( genres ( name ) )';
 
@@ -48,6 +62,7 @@ function toTitle(row: any): Title {
     genres,
   };
   if (row.original_name) title.originalName = row.original_name;
+  if (row.original_language) title.originalLanguage = row.original_language;
   if (row.runtime_minutes != null) title.runtimeMinutes = row.runtime_minutes;
   if (row.poster_url) title.posterUrl = row.poster_url;
   if (row.backdrop_url) title.backdropUrl = row.backdrop_url;
@@ -62,7 +77,7 @@ function toTitle(row: any): Title {
 // Catalog
 // ---------------------------------------------------------------------------
 
-export interface TitleQuery {
+export interface TitleQuery extends TitleFilters {
   type?: TitleType;
   genre?: string;
   sort?: 'trending' | 'newest' | 'oldest' | 'az' | 'score';
@@ -73,11 +88,18 @@ export interface TitleQuery {
 
 /** Browse/list titles, popularity-ranked by default (like the web "trending"). */
 export async function listTitles(query: TitleQuery = {}): Promise<Title[]> {
+  // Country metadata is not in the local database. Never infer it from language or genre.
+  if (query.country) return [];
   const page = Math.max(1, query.page ?? 1);
   const pageSize = Math.min(50, Math.max(1, query.pageSize ?? 40));
 
   let q = supabase.from('titles').select(TITLE_SELECT);
   if (query.type) q = q.eq('type', query.type);
+  if (query.originalLanguage) {
+    const languages = query.originalLanguage.toLowerCase().split('|').filter((language) => /^[a-z]{2,3}$/.test(language));
+    if (!languages.length) return [];
+    q = q.in('original_language', languages);
+  }
   switch (query.sort) {
     case 'newest':
       q = q.order('release_year', { ascending: false, nullsFirst: false });
@@ -210,7 +232,7 @@ export async function listCast(titleId: string): Promise<CastMember[]> {
 }
 
 /** Home rows: top trending (popularity) split into sensible shelves. */
-export async function fetchHome(): Promise<{ hero: Title[]; rows: MediaRow[] }> {
+export async function fetchHome(): Promise<HomeData> {
   const trending = await listTitles({ sort: 'trending', pageSize: 50 });
   const HERO_EXCLUDED = new Set(['Reality', 'Talk', 'News', 'Game Show', 'Soap']);
   const worthy = trending.filter((t) => !t.genres.some((g) => HERO_EXCLUDED.has(g)));
@@ -295,6 +317,10 @@ export async function getPersonCredits(
 // ---------------------------------------------------------------------------
 
 export async function resolvePlayback(request: PlaybackRequest): Promise<PlaybackSource[]> {
+  return (await resolvePlaybackDetails(request)).sources;
+}
+
+export async function resolvePlaybackDetails(request: PlaybackRequest): Promise<PlaybackResponse> {
   const params = new URLSearchParams({ type: request.type });
   // Catalog ids let the bridge also return Lumora-hosted (native HLS/mp4)
   // sources. Guard on the UUID shape: guest entries carry a slug, and sending
@@ -308,13 +334,69 @@ export async function resolvePlayback(request: PlaybackRequest): Promise<Playbac
   if (request.episode !== undefined) params.set('episode', String(request.episode));
   if (request.start !== undefined && request.start > 0) params.set('start', String(Math.round(request.start)));
   try {
-    const res = await fetch(`${WEB_URL}/api/playback?${params.toString()}`);
-    if (!res.ok) return [];
-    const json = (await res.json()) as { sources?: PlaybackSource[] };
-    return json.sources ?? [];
+    const { data } = await supabase.auth.getSession();
+    const res = await fetch(`${WEB_URL}/api/playback?${params.toString()}`, {
+      headers: data.session?.access_token ? { Authorization: `Bearer ${data.session.access_token}` } : {},
+    });
+    if (!res.ok) return { sources: [] };
+    const json = (await res.json()) as PlaybackResponse;
+    return { ...json, sources: Array.isArray(json.sources) ? json.sources.map((s) => ({ ...s,
+      url: s.url.startsWith('/') ? new URL(s.url, WEB_URL).href : s.url,
+      ...(s.streamCatalogUrl ? { streamCatalogUrl: sameOriginPlaybackUrl(s.streamCatalogUrl) ?? undefined } : {}),
+    })) : [], subtitleCatalogUrl: json.subtitleCatalogUrl ? sameOriginPlaybackUrl(json.subtitleCatalogUrl) ?? undefined : undefined };
   } catch {
-    return [];
+    return { sources: [] };
   }
+}
+
+export async function fetchStreamCatalog(url: string, signal?: AbortSignal): Promise<StreamCatalog> {
+  const safe = sameOriginPlaybackUrl(url);
+  if (!safe) return { streams: [] };
+  const response = await fetch(safe, { signal });
+  if (!response.ok) throw new Error('Stream options unavailable.');
+  const json = await response.json() as StreamCatalog;
+  return { ...json, streams: Array.isArray(json.streams) ? json.streams.filter((s) => sameOriginPlaybackUrl(s.url)).map((s) => ({ ...s,
+    url: sameOriginPlaybackUrl(s.url)!, qualities: s.qualities ?? [], audioTracks: s.audioTracks ?? [],
+    subtitles: (s.subtitles ?? []).map((t) => ({ ...t, url: t.url ? sameOriginPlaybackUrl(t.url) ?? undefined : undefined })),
+  })) : [] };
+}
+
+export async function fetchSubtitleCatalog(url: string, signal?: AbortSignal): Promise<Subtitle[]> {
+  const safe = sameOriginPlaybackUrl(url);
+  if (!safe) return [];
+  const response = await fetch(safe, { signal });
+  if (!response.ok) throw new Error('Subtitle options unavailable.');
+  const json = await response.json() as { tracks?: Subtitle[] };
+  return (json.tracks ?? []).filter((t) => !!t.url && !!sameOriginPlaybackUrl(t.url))
+    .map((t) => ({ ...t, url: sameOriginPlaybackUrl(t.url!)! }));
+}
+
+export async function getPlaybackContext(titleId: string, type: TitleType, episodeId?: string, season?: number, episode?: number) {
+  const unavailable = { viewerKey: 'unavailable', episodeId, resume: null as { positionSeconds: number; updatedAt: number } | null };
+  try {
+    const session = await supabase.auth.getSession();
+    if (session.error) return unavailable;
+    if (!session.data.session) return { ...unavailable, viewerKey: 'guest' };
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data.user) return unavailable;
+    const { data: profile, error: profileError } = await supabase.from('profiles').select('id')
+      .eq('account_id', data.user.id).order('created_at', { ascending: true }).limit(1).maybeSingle();
+    if (profileError) return unavailable;
+    let exactEpisode = episodeId;
+    if (type === 'tv' && !exactEpisode && season !== undefined && episode !== undefined && /^[0-9a-f-]{36}$/i.test(titleId)) {
+      const { data: found } = await supabase.from('episodes').select('id').eq('title_id', titleId)
+        .eq('season_number', season).eq('episode_number', episode).maybeSingle();
+      exactEpisode = found?.id;
+    }
+    const viewerKey = `account:${data.user.id}${profile ? `:profile:${profile.id}` : ''}`;
+    if (!profile || (type === 'tv' && !exactEpisode)) return { viewerKey, episodeId: exactEpisode, resume: null };
+    let query = supabase.from('watch_progress').select('position_seconds, updated_at')
+      .eq('profile_id', profile.id).eq('account_id', data.user.id).eq('title_id', titleId);
+    query = exactEpisode ? query.eq('episode_id', exactEpisode) : query.is('episode_id', null);
+    const { data: row } = await query.order('updated_at', { ascending: false }).limit(1).maybeSingle();
+    return { viewerKey, episodeId: exactEpisode, resume: row && Number.isFinite(row.position_seconds) && row.position_seconds >= 0
+      ? { positionSeconds: row.position_seconds, updatedAt: Date.parse(row.updated_at) || 0 } : null };
+  } catch { return unavailable; }
 }
 
 // ---------------------------------------------------------------------------
@@ -330,10 +412,12 @@ export async function resolvePlayback(request: PlaybackRequest): Promise<Playbac
 export async function recordPlaybackSession(
   titleId: string,
   episodeId?: string,
+  viewerKey?: string,
 ): Promise<{ ok: boolean }> {
   const user = await currentUser();
   if (!user) return { ok: false };
   const profileId = await defaultProfileId();
+  if (viewerKey && viewerKey !== `account:${user.id}${profileId ? `:profile:${profileId}` : ''}`) return { ok: false };
   const { error } = await supabase.from('playback_sessions').insert({
     account_id: user.id,
     ...(profileId ? { profile_id: profileId } : {}),
@@ -553,11 +637,15 @@ export async function reportProgress(input: {
   episodeId?: string;
   positionSeconds: number;
   durationSeconds?: number;
+  viewerKey?: string;
 }): Promise<{ ok: boolean }> {
+  if (!Number.isFinite(input.positionSeconds) || input.positionSeconds < 0 || input.positionSeconds > 2147483647
+    || (input.durationSeconds !== undefined && (!Number.isFinite(input.durationSeconds) || input.durationSeconds <= 0))) return { ok: false };
   const user = await currentUser();
   if (!user) return { ok: false };
   const profileId = await defaultProfileId();
   if (!profileId) return { ok: false };
+  if (input.viewerKey && input.viewerKey !== `account:${user.id}:profile:${profileId}`) return { ok: false };
 
   const duration = input.durationSeconds;
   const progress = duration && duration > 0 ? Math.min(1, Math.max(0, input.positionSeconds / duration)) : 0;
@@ -566,6 +654,7 @@ export async function reportProgress(input: {
   let existing = supabase
     .from('watch_progress')
     .select('id')
+    .eq('account_id', user.id)
     .eq('profile_id', profileId)
     .eq('title_id', input.titleId);
   existing = input.episodeId ? existing.eq('episode_id', input.episodeId) : existing.is('episode_id', null);
@@ -579,7 +668,7 @@ export async function reportProgress(input: {
     updated_at: new Date().toISOString(),
   };
   if (row) {
-    const { error } = await supabase.from('watch_progress').update(payload).eq('id', row.id);
+    const { error } = await supabase.from('watch_progress').update(payload).eq('id', row.id).eq('account_id', user.id).eq('profile_id', profileId);
     return { ok: !error };
   }
   const { error } = await supabase.from('watch_progress').insert({
@@ -629,8 +718,7 @@ export async function getResumePosition(
   q = episodeId ? q.eq('episode_id', episodeId) : q.is('episode_id', null);
   const { data } = await q.order('updated_at', { ascending: false }).limit(1).maybeSingle();
   if (!data) return null;
-  // Only resume mid-watch (not barely started, not finished).
-  if (data.progress < 0.02 || data.progress >= 0.95) return null;
+  if (!Number.isFinite(data.position_seconds) || data.position_seconds < 0) return null;
   return { positionSeconds: data.position_seconds, progress: data.progress };
 }
 

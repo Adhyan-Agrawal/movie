@@ -6,6 +6,9 @@ import type { TitleFilters } from '@/features/catalog/queries';
 import { BrowseResults, parseTitleFilters, type SearchParamsRecord } from '@/features/catalog/components/BrowseResults';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
+import { DiscoveryNav } from '@/features/catalog/components/DiscoveryNav';
+import { DiscoveryFilters } from '@/features/catalog/components/DiscoveryFilters';
+import { parseDiscoveryFilters } from '@/features/catalog/discovery';
 
 export const metadata: Metadata = {
   title: 'Movies',
@@ -15,11 +18,13 @@ export const metadata: Metadata = {
 export default async function MoviesPage({ searchParams }: { searchParams: Promise<SearchParamsRecord> }) {
   const sp = await searchParams;
   const genres = await listAllGenres();
-  const filters: TitleFilters = { ...parseTitleFilters(sp), type: 'movie' };
+  const filters: TitleFilters = { ...parseTitleFilters(sp), ...parseDiscoveryFilters(sp), type: 'movie' };
 
   return (
     <Container>
-      <PageHeader title="Movies" description="Feature films, filtered your way." />
+      <PageHeader title="Make it a movie night" description="From Hollywood thrills to Hindi cinema and discoveries beyond the familiar." />
+      <div className="mb-5"><DiscoveryNav type="movie" genres={genres} /></div>
+      <DiscoveryFilters />
       <BrowseResults filters={filters} sp={sp} basePath="/movies" genres={genres} lockType="movie" />
       {/* Ad (Spec Section 11): one leaderboard below the results — below the fold. */}
       <ConsentGate><AdSlot slot="browseLeaderboard" /></ConsentGate>

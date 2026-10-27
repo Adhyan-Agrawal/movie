@@ -15,6 +15,10 @@ export interface Title {
   name: string;
   /** Optional original-language name shown as secondary metadata. */
   originalName?: string;
+  /** ISO 639-1 language from provider metadata; absent when unknown. */
+  originalLanguage?: string;
+  /** ISO 3166-1 countries reported by the provider, never inferred from language. */
+  originCountries?: string[];
   synopsis: string;
   releaseYear: number;
   /** Runtime in minutes (movies) or average episode runtime (tv). */
@@ -71,7 +75,28 @@ export interface MediaRow {
   heading: string;
   /** Human-readable reason for personalized rows (Section 13). */
   reason?: string;
+  /** Full collection listing, including its filter/sort dimensions. */
+  href?: string;
+  /** Stable discovery definition ID, independent of the display heading. */
+  collectionId?: string;
+  filters?: DiscoveryFilters;
   titles: Title[];
+}
+
+export interface DiscoveryFilters {
+  type?: TitleType;
+  genre?: string;
+  sort?: 'trending' | 'newest' | 'oldest' | 'az' | 'score';
+  /** Pipe-separated language codes are an OR, e.g. ta|te|ml|kn. */
+  originalLanguage?: string;
+  country?: string;
+}
+
+export interface DiscoveryCollection {
+  id: string;
+  label: string;
+  href: string;
+  filters: DiscoveryFilters;
 }
 
 /** One episode row (client-safe DTO). */

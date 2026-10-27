@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -9,6 +9,7 @@ import { Row } from '../components/Row';
 import { currentUser, fetchContinueWatching, getTitleBySlug, signOut, submitTitleRequest } from '../lib/api';
 import { readGuestEntries } from '../lib/guest';
 import { supabase } from '../lib/supabase';
+import { SubscriptionStatus } from '../components/SubscriptionStatus';
 import type { ContinueEntry, TitleType } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 
@@ -33,12 +34,16 @@ export default function AccountScreen() {
   const [email, setEmail] = useState<string | null>(null);
   const [entries, setEntries] = useState<ContinueEntry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     const user = await currentUser();
+    const loadedEntries = user ? await fetchContinueWatching() : await readGuestEntries();
+    if (generation !== loadGeneration.current) return;
     setSignedIn(Boolean(user));
     setEmail(user?.email ?? null);
-    setEntries(user ? await fetchContinueWatching() : await readGuestEntries());
+    setEntries(loadedEntries);
   }, []);
 
   // Refresh whenever the tab is focused (e.g. returning from the Auth screen).
@@ -51,6 +56,7 @@ export default function AccountScreen() {
   // And live, when the session changes while the tab is already on screen.
   useEffect(() => {
     const { data } = supabase.auth.onAuthStateChange(() => {
+      loadGeneration.current += 1;
       void load();
     });
     return () => data.subscription.unsubscribe();
@@ -63,6 +69,7 @@ export default function AccountScreen() {
   }, [load]);
 
   async function handleSignOut() {
+    loadGeneration.current += 1;
     await signOut();
     await load();
   }
@@ -125,6 +132,7 @@ export default function AccountScreen() {
               <Button label="Sign in" size="sm" onPress={() => navigation.navigate('Auth')} />
             )}
           </View>
+          {signedIn ? <SubscriptionStatus key={email ?? 'signed-in'} /> : null}
         </View>
 
         {entries.length > 0 ? (

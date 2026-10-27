@@ -12,8 +12,7 @@ import type { Person, PersonCredit, PersonSearchResult } from '@/features/people
  * the client-safe `Title` DTO. RLS applies (anon key), so anonymous callers see
  * only published/public/released titles via `title_is_public()`; editors with
  * `catalog.read` additionally see drafts. Callers in `queries.ts`/`data.ts`
- * fall back to the mock catalog if any of these throw, so a transient DB error
- * degrades gracefully rather than 500-ing the page.
+ * return honest empty states if these fail; no mock catalog is substituted.
  *
  * `server-only` guards against this repository (and the server Supabase client)
  * being pulled into a client bundle.
@@ -30,6 +29,7 @@ interface TitleRow {
   slug: string;
   name: string;
   original_name: string | null;
+  original_language: string | null;
   synopsis: string;
   release_year: number | null;
   runtime_minutes: number | null;
@@ -45,7 +45,7 @@ interface TitleRow {
 }
 
 const TITLE_SELECT =
-  'id, type, slug, name, original_name, synopsis, release_year, runtime_minutes, ' +
+  'id, type, slug, name, original_name, original_language, synopsis, release_year, runtime_minutes, ' +
   'maturity, poster_url, backdrop_url, trailer_url, editorial_score, featured, ' +
   'tmdb_id, imdb_id, title_genres ( genres ( name ) )';
 
@@ -75,6 +75,7 @@ function toTitle(row: TitleRow): Title {
     featured: row.featured,
   };
   if (row.original_name) title.originalName = row.original_name;
+  if (row.original_language && /^[a-z]{2}$/i.test(row.original_language)) title.originalLanguage = row.original_language.toLowerCase();
   if (row.runtime_minutes != null) title.runtimeMinutes = row.runtime_minutes;
   if (row.poster_url) title.posterUrl = row.poster_url;
   if (row.backdrop_url) title.backdropUrl = row.backdrop_url;
@@ -118,10 +119,17 @@ export async function repoListGenres(): Promise<string[]> {
 }
 
 export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[]> {
+  // The existing schema has no origin-country column. Never guess it from language.
+  if (filters.country) return [];
   const db = await getSupabaseServerClient();
-  let query = db.from('titles').select(TITLE_SELECT);
+  const select = filters.genre
+    ? TITLE_SELECT.replace('title_genres ( genres ( name ) )', 'title_genres!inner ( genres!inner ( name ) )')
+    : TITLE_SELECT;
+  let query = db.from('titles').select(select);
 
   if (filters.type) query = query.eq('type', filters.type);
+  if (filters.originalLanguage) query = query.in('original_language', filters.originalLanguage.split('|'));
+  if (filters.genre) query = query.eq('title_genres.genres.name', filters.genre);
   if (filters.year) query = query.eq('release_year', filters.year);
   if (filters.minYear) query = query.gte('release_year', filters.minYear);
   if (filters.maxYear) query = query.lte('release_year', filters.maxYear);
@@ -208,6 +216,7 @@ export async function repoListTitlesPage(
   page: number,
   pageSize: number,
 ): Promise<PagedTitles> {
+  if (filters.country) return { rows: [], total: 0 };
   const db = await getSupabaseServerClient();
   const select = filters.genre
     ? TITLE_SELECT.replace('title_genres ( genres ( name ) )', 'title_genres!inner ( genres!inner ( name ) )')
@@ -215,6 +224,7 @@ export async function repoListTitlesPage(
   let query = db.from('titles').select(select, { count: 'exact' });
 
   if (filters.type) query = query.eq('type', filters.type);
+  if (filters.originalLanguage) query = query.in('original_language', filters.originalLanguage.split('|'));
   if (filters.year) query = query.eq('release_year', filters.year);
   if (filters.minYear) query = query.gte('release_year', filters.minYear);
   if (filters.maxYear) query = query.lte('release_year', filters.maxYear);

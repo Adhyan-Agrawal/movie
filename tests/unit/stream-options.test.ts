@@ -62,4 +62,12 @@ describe('unified stream options', () => {
     const measured = streams.map((stream) => ({ ...stream, startupLatencyMs: stream.id === 'uhd' ? 120 : -1 }));
     expect(chooseStream(measured, { quality: 'auto', audio: trackKey({ language: 'en' }), subtitle: 'off' }, 'quality', 'hd')?.id).toBe('uhd');
   });
+
+  it('does not prefer 4K when timings are tied or unavailable', () => {
+    const candidates = [streams[0]!, streams[1]!];
+    const preferences = { quality: 'auto', audio: '', subtitle: 'off' };
+    expect(chooseStream(candidates, preferences, 'quality')?.id).toBe('hd');
+    expect(chooseStream(candidates.map((stream) => ({ ...stream, startupLatencyMs: 80 })), preferences, 'quality')?.id).toBe('hd');
+    expect(chooseStream(candidates, preferences, 'quality', 'uhd')?.id).toBe('uhd');
+  });
 });

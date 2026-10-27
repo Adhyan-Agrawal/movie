@@ -12,6 +12,7 @@ interface AccountSection {
 const ACCOUNT_SECTIONS: AccountSection[] = [
   { href: '/account', label: 'Overview' },
   { href: '/account/profiles', label: 'Profiles' },
+  { href: '/account/subscription', label: 'Subscription' },
   { href: '/account/watchlist', label: 'Watchlist' },
   { href: '/account/history', label: 'History' },
   { href: '/account/settings', label: 'Settings' },

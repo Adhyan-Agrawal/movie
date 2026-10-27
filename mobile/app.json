@@ -34,7 +34,8 @@
       "backgroundColor": "#08090c"
     },
     "plugins": [
-      "expo-video"
+      "expo-video",
+      "expo-screen-orientation"
     ]
   }
 }

@@ -34,6 +34,8 @@ const ADMIN_PERMISSIONS = [
   PERMISSIONS.PROVIDER_MANAGE,
   PERMISSIONS.ADS_MANAGE,
   PERMISSIONS.ROLES_MANAGE,
+  PERMISSIONS.PLANS_MANAGE,
+  PERMISSIONS.BILLING_READ,
 ] as const satisfies readonly Permission[];
 
 export default async function AdminLayout({ children }: { children: React.ReactNode }) {

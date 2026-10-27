@@ -114,11 +114,9 @@ export function chooseStream(
   };
   const latency = (stream: DirectStream) => typeof stream.startupLatencyMs === 'number'
     && Number.isFinite(stream.startupLatencyMs) && stream.startupLatencyMs >= 0 ? stream.startupLatencyMs : Infinity;
-  const bestHeight = (stream: DirectStream) => Math.max(0, ...stream.qualities.map((quality) => nominalQualityHeight(quality) ?? 0));
   return candidates.sort((a, b) => score(b) - score(a)
     || latency(a) - latency(b)
-    || Number(b.id === currentStreamId) - Number(a.id === currentStreamId)
-    || bestHeight(b) - bestHeight(a))[0];
+    || Number(b.id === currentStreamId) - Number(a.id === currentStreamId))[0];
 }
 
 export function preferencesForStream(stream: DirectStream, preferences: StreamPreferences): StreamPreferences {

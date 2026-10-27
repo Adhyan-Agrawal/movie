@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getPlaybackCommerceContext } from '@/features/commerce/queries';
 import { features } from '@/lib/env';
 import { listProviderConfigs } from '@/lib/providers/config';
 import { resolvePlayback } from '@/lib/providers/registry';
@@ -62,12 +63,13 @@ export async function GET(request: NextRequest) {
     ...(episode !== undefined ? { episode } : {}),
   };
 
-  const [resolved, nativeSources] = await Promise.all([
+  const [resolved, nativeSources, commerceContext] = await Promise.all([
     resolvePlayback(playbackRequest),
     features.supabaseConfigured && titleId
       ? import('@/features/playback/native-sources').then(({ resolveNativeSources }) => resolveNativeSources(titleId, episodeId))
         .catch(() => [] as PlaybackSource[])
       : Promise.resolve([] as PlaybackSource[]),
+    getPlaybackCommerceContext(request),
   ]);
 
   // Anything the provider documents a resume parameter for gets `start`
@@ -82,6 +84,12 @@ export async function GET(request: NextRequest) {
   };
 
   const origin = request.nextUrl.origin;
+  let subtitleCatalogUrl: string | undefined;
+  if (tmdbId && /^[1-9]\d{0,9}$/.test(tmdbId) && (type === 'movie' || (season !== undefined && episode !== undefined && episode > 0))) {
+    const subtitleParams = new URLSearchParams({ tmdbId, type });
+    if (type === 'tv') { subtitleParams.set('season', String(season)); subtitleParams.set('episode', String(episode)); }
+    subtitleCatalogUrl = `${origin}/api/subtitles?${subtitleParams.toString()}`;
+  }
   // Resume first (needs the real provider id), THEN anonymize — so the public
   // payload never carries an upstream identity.
   let fallbackIndex = 0;
@@ -97,5 +105,6 @@ export async function GET(request: NextRequest) {
     };
   });
 
-  return NextResponse.json({ sources: publicSources }, { headers: { 'Cache-Control': 'no-store' } });
+  return NextResponse.json({ sources: publicSources, adPolicy: commerceContext.ads, entitlements: commerceContext.entitlements,
+    ...(subtitleCatalogUrl ? { subtitleCatalogUrl } : {}) }, { headers: { 'Cache-Control': 'no-store' } });
 }

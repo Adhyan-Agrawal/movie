@@ -1,5 +1,6 @@
 import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
+import { getViewerEntitlements } from '@/features/commerce/queries';
 
 /**
  * Adsterra ad-frame document (Spec Section 11).
@@ -11,6 +12,8 @@ import { NextResponse } from 'next/server';
  * into the document, so the route cannot be used as an injection vector.
  */
 export async function GET(request: NextRequest) {
+  const entitlements = await getViewerEntitlements(request);
+  if (!entitlements.resolved || entitlements.adFree) return new NextResponse(null, { status: 204, headers: { 'Cache-Control': 'private, no-store' } });
   const key = request.nextUrl.searchParams.get('key') ?? '';
   const w = Number(request.nextUrl.searchParams.get('w') ?? '728');
   const h = Number(request.nextUrl.searchParams.get('h') ?? '90');

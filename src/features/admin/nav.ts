@@ -17,6 +17,7 @@ export const ADMIN_NAV: AdminNavItem[] = [
   { href: '/admin/providers', label: 'Providers', icon: '⧉', hint: 'Playback sources and adapters' },
   { href: '/admin/email', label: 'Email', icon: '✉', hint: 'SMTP settings and transactional templates' },
   { href: '/admin/ads', label: 'Ads', icon: '◫', hint: 'Placements, campaigns, consent' },
+  { href: '/admin/plans', label: 'Plans', icon: '$', hint: 'Plan versions and audited access grants' },
   { href: '/admin/users', label: 'Users', icon: '☺', hint: 'Accounts, roles, sessions' },
   { href: '/admin/settings', label: 'Settings', icon: '⚙', hint: 'Brand, playback, privacy, flags' },
   { href: '/admin/audit', label: 'Audit', icon: '☰', hint: 'Immutable change history' },

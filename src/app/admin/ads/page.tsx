@@ -3,6 +3,12 @@ import { Badge } from '@/components/ui/Badge';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { adSlotStatuses, adsConfigured } from '@/features/ads/config';
 import { listAdminAdPlacements } from '@/features/admin/queries';
+import { requireCommercePermission } from '@/features/commerce/admin';
+import { getVastConfiguration } from '@/features/commerce/queries';
+import { VastSettingsForm } from '@/features/commerce/VastSettingsForm';
+import { PERMISSIONS } from '@/lib/permissions/permissions';
+
+export const dynamic = 'force-dynamic';
 
 export const metadata = {
   title: 'Ads',
@@ -17,6 +23,9 @@ export const metadata = {
  * impression reporting arrive with the commercial phase.
  */
 export default async function AdminAdsPage() {
+  const allowed = await requireCommercePermission(PERMISSIONS.ADS_MANAGE).then(() => true).catch(() => false);
+  if (!allowed) return <p role="alert" className="py-6">Access restricted. A verified account with ads.manage is required.</p>;
+  const vast = await getVastConfiguration();
   const slots = adSlotStatuses();
   const configured = adsConfigured();
   // Degrade to "not seeded" if the read fails — the env status above is the
@@ -27,8 +36,13 @@ export default async function AdminAdsPage() {
     <div className="flex flex-col gap-8 py-6">
       <PageHeader
         title="Advertising"
-        description="Adsterra placements across the site — below-the-fold banners plus one skippable player pre-roll."
+        description="Private VAST playback configuration and advertising placement status."
       />
+
+      <section aria-labelledby="vast-settings" className="flex flex-col gap-3">
+        <h2 id="vast-settings" className="text-lg font-semibold">Playback VAST policy</h2>
+        <VastSettingsForm config={vast} />
+      </section>
 
       <section aria-labelledby="ads-provider" className="flex flex-col gap-3">
         <div className="flex items-center gap-2">
@@ -95,9 +109,9 @@ export default async function AdminAdsPage() {
         </h2>
         <ul className="max-w-2xl list-inside list-disc text-sm leading-relaxed text-content-muted">
           <li>Below-the-fold banners only — never between the user and the Play action.</li>
-          <li>One skippable pre-roll (5s countdown) per tab session on the player.</li>
+          <li>Playback breaks follow the VAST policy above; no advertising for resolved ad-free plans.</li>
           <li>No popunders, navigation interstitials, or social-bar formats.</li>
-          <li>Ads require viewer consent where applicable (see the site consent banner) and respect the global kill switch planned for this console.</li>
+          <li>Ads require viewer consent where applicable and respect the playback enable switch.</li>
         </ul>
       </section>
     </div>

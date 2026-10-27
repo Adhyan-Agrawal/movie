@@ -13,6 +13,8 @@ export const PERMISSIONS = {
   CATALOG_DELETE: 'catalog.delete',
   PROVIDER_MANAGE: 'provider.manage',
   ADS_MANAGE: 'ads.manage',
+  PLANS_MANAGE: 'plans.manage',
+  BILLING_READ: 'billing.read',
   EMAIL_MANAGE: 'email.manage',
   USERS_READ: 'users.read',
   USERS_SUSPEND: 'users.suspend',
@@ -46,6 +48,9 @@ export const SENSITIVE_ACTIONS = [
   'bulk.delete',
   'account.delete',
   'provider.change',
+  'plan.change',
+  'subscription.change',
+  'ads.vast.change',
 ] as const;
 
 export type SensitiveAction = (typeof SENSITIVE_ACTIONS)[number];

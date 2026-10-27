@@ -71,6 +71,38 @@ export type AdEventTypeEnum =
 export interface Database {
   public: {
     Tables: {
+      commerce_plans: {
+        Row: {
+          id: string; slug: string; version: number; name: string; description: string;
+          currency: string; price_minor: number; billing_interval: 'month' | 'year' | 'one_time';
+          ad_free: boolean; max_profiles: number; features: Json;
+          status: 'draft' | 'published' | 'archived'; published_at: string | null;
+          created_at: string; updated_at: string;
+        };
+        Insert: {
+          id?: string; slug: string; version: number; name: string; description?: string;
+          currency: string; price_minor: number; billing_interval: 'month' | 'year' | 'one_time';
+          ad_free?: boolean; max_profiles?: number; features?: Json;
+          status?: 'draft' | 'published' | 'archived'; published_at?: string | null;
+          created_at?: string; updated_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['commerce_plans']['Insert']>;
+        Relationships: [];
+      };
+      commerce_subscriptions: {
+        Row: {
+          id: string; account_id: string; plan_id: string; source: 'admin_grant';
+          status: 'active' | 'revoked'; starts_at: string; access_until: string; reason: string;
+          granted_by: string | null; revoked_at: string | null; revoked_by: string | null; created_at: string;
+        };
+        Insert: {
+          id?: string; account_id: string; plan_id: string; source?: 'admin_grant';
+          status?: 'active' | 'revoked'; starts_at?: string; access_until: string; reason: string;
+          granted_by?: string | null; revoked_at?: string | null; revoked_by?: string | null; created_at?: string;
+        };
+        Update: Partial<Database['public']['Tables']['commerce_subscriptions']['Insert']>;
+        Relationships: [];
+      };
       accounts: {
         Row: {
           id: string;
@@ -1069,6 +1101,17 @@ export interface Database {
     };
     Views: Record<never, never>;
     Functions: {
+      commerce_viewer_entitlements: { Args: Record<string, never>; Returns: Json };
+      commerce_manage_plan: {
+        Args: { p_actor: string; p_operation: string; p_id: string | null; p_payload: Json; p_reason: string };
+        Returns: string;
+      };
+      commerce_manage_subscription: {
+        Args: { p_actor: string; p_operation: string; p_account: string; p_plan: string | null;
+          p_subscription: string | null; p_access_until: string | null; p_reason: string };
+        Returns: string;
+      };
+      commerce_save_vast: { Args: { p_actor: string; p_config: Json; p_reason: string }; Returns: undefined };
       has_permission: {
         Args: { perm_key: string };
         Returns: boolean;

@@ -23,19 +23,26 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
   const count = children.length;
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
+  const [autoplay, setAutoplay] = useState(true);
+  const [reducedMotion, setReducedMotion] = useState(true);
+
+  useEffect(() => {
+    const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const update = () => setReducedMotion(preference.matches);
+    update();
+    preference.addEventListener('change', update);
+    return () => preference.removeEventListener('change', update);
+  }, []);
 
   const next = useCallback(() => setIndex((i) => (i + 1) % count), [count]);
   const prev = useCallback(() => setIndex((i) => (i - 1 + count) % count), [count]);
 
   // Auto-advance unless the viewer is interacting or prefers reduced motion.
   useEffect(() => {
-    if (paused || count <= 1) return;
-    if (typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
-      return;
-    }
-    const timer = window.setInterval(next, ADVANCE_MS);
+    if (paused || !autoplay || reducedMotion || count <= 1) return;
+    const timer = window.setInterval(() => { if (!document.hidden) next(); }, ADVANCE_MS);
     return () => window.clearInterval(timer);
-  }, [paused, count, next]);
+  }, [paused, autoplay, reducedMotion, count, next]);
 
   if (count === 0) return null;
 
@@ -48,7 +55,8 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
-      onBlur={() => setPaused(false)}
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false); }}
+      onTouchStart={() => setAutoplay(false)}
     >
       {/* Slides stacked with a crossfade; only the active one is in the tree. */}
       <div className="relative">
@@ -56,8 +64,12 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
           <div
             key={i}
             aria-hidden={i === index ? undefined : true}
+            inert={i !== index}
+            role="group"
+            aria-roledescription="slide"
+            aria-label={`${i + 1} of ${count}`}
             className={cn(
-              'transition-opacity duration-700 ease-deliberate',
+              'transition-opacity duration-700 ease-deliberate motion-reduce:transition-none',
               i === index ? 'relative opacity-100' : 'pointer-events-none absolute inset-0 opacity-0',
             )}
           >
@@ -72,7 +84,7 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
           type="button"
           onClick={prev}
           aria-label="Previous trending title"
-          className="grid h-9 w-9 place-items-center rounded-full border border-border bg-base/60 text-content backdrop-blur transition-colors hover:bg-surface-raised"
+          className="grid h-11 w-11 place-items-center rounded-full border border-border bg-base/60 text-content backdrop-blur transition-colors hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-primary"
         >
           <span aria-hidden="true">←</span>
         </button>
@@ -86,10 +98,9 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
               aria-current={i === index}
               onClick={() => setIndex(i)}
               className={cn(
-                'h-2 rounded-full transition-all duration-300',
-                i === index ? 'w-5 bg-primary' : 'w-2 bg-content-subtle hover:bg-content-muted',
+                'grid h-11 w-6 place-items-center rounded-full focus-visible:ring-2 focus-visible:ring-primary',
               )}
-            />
+            ><span aria-hidden="true" className={cn('h-2 rounded-full motion-safe:transition-all', i === index ? 'w-5 bg-primary' : 'w-2 bg-content-subtle')} /></button>
           ))}
         </div>
 
@@ -97,10 +108,11 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
           type="button"
           onClick={next}
           aria-label="Next trending title"
-          className="grid h-9 w-9 place-items-center rounded-full border border-border bg-base/60 text-content backdrop-blur transition-colors hover:bg-surface-raised"
+          className="grid h-11 w-11 place-items-center rounded-full border border-border bg-base/60 text-content backdrop-blur transition-colors hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-primary"
         >
           <span aria-hidden="true">→</span>
         </button>
+        {!reducedMotion ? <button type="button" onClick={() => setAutoplay((value) => !value)} aria-label={autoplay ? 'Pause slideshow' : 'Resume slideshow'} className="min-h-11 rounded-full border border-border bg-base/80 px-3 text-xs text-content focus-visible:ring-2 focus-visible:ring-primary">{autoplay ? 'Pause' : 'Resume'}</button> : null}
       </div>
     </div>
   );
