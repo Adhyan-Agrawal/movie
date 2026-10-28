@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { collectionRow, DISCOVERY_COLLECTIONS, DISCOVERY_GENRES, DISCOVERY_SHELVES, discoveryHref, loadDiscoveryRows, matchesDiscovery, parseDiscoveryFilters } from '@/features/catalog/discovery';
-import type { Title } from '@/features/catalog/types';
+import type { DiscoveryFilters, Title } from '@/features/catalog/types';
 
 const title = (fields: Partial<Title> = {}): Title => ({ id: 'movie-1', type: 'movie', slug: 'fixture-1', name: 'Fixture', synopsis: '', releaseYear: 2024, maturity: 'PG', genres: ['Comedy'], ...fields });
 afterEach(() => vi.useRealTimers());
@@ -19,9 +19,11 @@ describe('verified discovery collections', () => {
     expect(row?.reason).toContain('other Hindi-language films');
   });
 
-  it('groups the four South Indian languages but not Hindi or unknown language', () => {
+  it('groups the four South Indian languages only with verified Indian origin', () => {
     const south = DISCOVERY_COLLECTIONS.find((item) => item.id === 'south-indian-cinema')!;
-    expect(collectionRow(south, ['ta', 'te', 'ml', 'kn', 'hi', undefined].map((originalLanguage, index) => title({ id: String(index), ...(originalLanguage ? { originalLanguage } : {}) })))?.titles).toHaveLength(4);
+    const candidates = ['ta', 'te', 'ml', 'kn', 'hi', undefined].map((originalLanguage, index) => title({ id: String(index), originCountries: ['IN'], ...(originalLanguage ? { originalLanguage } : {}) }));
+    candidates.push(title({ id: 'unknown-country', originalLanguage: 'ta' }), title({ id: 'other-country', originalLanguage: 'ta', originCountries: ['US'] }));
+    expect(collectionRow(south, candidates)?.titles.map((item) => item.id)).toEqual(['0', '1', '2', '3']);
   });
 
   it('does not infer a country from original language', () => {
@@ -104,7 +106,7 @@ describe('verified discovery collections', () => {
   });
 
   it('isolates optional shelf failures without publishing empty rows', async () => {
-    const read = vi.fn(async (filters) => {
+    const read = vi.fn(async (filters: DiscoveryFilters) => {
       if (filters.genre === 'Comedy') throw new Error('Fixture read failed');
       return [title()];
     });

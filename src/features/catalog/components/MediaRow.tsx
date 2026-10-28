@@ -15,7 +15,7 @@ export function MediaRow({ row }: { row: MediaRowType }) {
           <h2 id={`row-${row.id}`} className="text-lg font-semibold tracking-tight md:text-xl">{row.heading}</h2>
           {row.reason ? <p className="mt-1 text-xs text-content-subtle">{row.reason}</p> : null}
         </div>
-        {row.href ? <Link href={row.href} aria-label={`View all ${row.heading}`} className="inline-flex min-h-11 shrink-0 items-center text-sm font-medium text-content-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">View all <span aria-hidden="true" className="ml-2">&gt;</span></Link> : null}
+        {row.href ? <Link href={row.href} prefetch={false} aria-label={`View all ${row.heading}`} className="inline-flex min-h-11 shrink-0 items-center text-sm font-medium text-content-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">View all <span aria-hidden="true" className="ml-2">&gt;</span></Link> : null}
       </div>
       <ul
         className="flex gap-3 overflow-x-auto px-4 pb-2 md:px-8 [scrollbar-width:thin]"

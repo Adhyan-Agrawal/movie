@@ -182,8 +182,7 @@ export function NativePlayer(props: NativePlayerProps) {
     let adActive = false;
     let adResume: PendingPosition | null = null;
     let adRequest: AbortController | undefined;
-    let adClock = performance.now();
-    const adSchedule = createVastSchedule(startProps.adPolicy ?? DEFAULT_VAST_CONFIGURATION);
+    const adSchedule = createVastSchedule(startProps.adPolicy ?? DEFAULT_VAST_CONFIGURATION, resumePosition);
     const failedStreams = new Set<string>();
     setOptions({ qualities: [], audioTracks: [], subtitles: [] });
     setPreferences(desired); setActivePanel(null); setTimingOffset(0); setPlaybackRate(1);
@@ -571,7 +570,6 @@ export function NativePlayer(props: NativePlayerProps) {
           if (adResume.playing) void videoPlayer.play()?.catch(() => {});
         }
         adResume = null;
-        adClock = performance.now();
       };
       adDoneRef.current = finishAd;
       const beginAd = () => {
@@ -633,15 +631,23 @@ export function NativePlayer(props: NativePlayerProps) {
         updateProgress();
         const now = Date.now();
         if (!videoPlayer.paused() && now - lastFlushAt >= REPORT_INTERVAL_MS) flush();
-        const clock = performance.now();
-        const elapsed = (clock - adClock) / 1000;
-        adClock = clock;
-        if (!videoPlayer.paused() && !videoPlayer.seeking() && document.visibilityState !== 'hidden'
-          && !adActive && !castHandle && !pendingPosition && latestProps.current.adPolicy?.enabled
-          && readConsent()?.ads && adSchedule.advance(elapsed)) beginAd();
+        if (adSchedule.update({
+          contentTimeSeconds: videoPlayer.currentTime() ?? 0,
+          paused: videoPlayer.paused() || document.visibilityState === 'hidden',
+          seeking: videoPlayer.seeking() || Boolean(pendingPosition),
+          adPlaying: adActive || Boolean(castHandle),
+        })) beginAd();
       };
-      const handleSeeked = () => { reconcileCues(); updateProgress(); flush(); };
-      const handleHidden = () => { adClock = performance.now(); if (document.visibilityState === 'hidden') flush(); };
+      const handleSeeked = () => {
+        adSchedule.update({
+          contentTimeSeconds: videoPlayer.currentTime() ?? 0,
+          paused: videoPlayer.paused() || document.visibilityState === 'hidden',
+          seeking: true,
+          adPlaying: adActive || Boolean(castHandle),
+        });
+        reconcileCues(); updateProgress(); flush();
+      };
+      const handleHidden = () => { if (document.visibilityState === 'hidden') flush(); };
       const handlePause = () => { if (!cancelled) flush(); };
       const handleSkip = (event: Event) => {
         const target = event.target as Element;
@@ -698,7 +704,6 @@ export function NativePlayer(props: NativePlayerProps) {
       videoPlayer.on('timeupdate', handleTimeUpdate);
       videoPlayer.on('seeked', handleSeeked);
       videoPlayer.on('pause', handlePause);
-      videoPlayer.on('play', () => { adClock = performance.now(); });
       videoPlayer.on('ended', flush);
       videoPlayer.on('error', handlePlaybackError);
       document.addEventListener('visibilitychange', handleHidden);

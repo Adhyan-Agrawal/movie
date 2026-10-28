@@ -11,4 +11,7 @@ export interface VastCreative {
 }
 
 export type ParsedVast = { kind: 'inline'; creative: VastCreative }
-  | { kind: 'wrapper'; url: string; tracking: VastCreative['tracking'] };
+  | { kind: 'wrapper'; url: string; tracking: VastCreative['tracking']; clickTracking?: string[] };
+
+/** API success envelope. Provider configuration never belongs in this public DTO. */
+export interface VastResponse { creative: VastCreative }

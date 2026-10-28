@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Title } from '@/features/catalog/types';
 
-const mocks = vi.hoisted(() => ({ features: { tmdbConfigured: true, supabaseConfigured: false }, listTitles: vi.fn() }));
+const mocks = vi.hoisted(() => ({ features: { tmdbConfigured: true, supabaseConfigured: false }, listTitles: vi.fn(), getContinueWatching: vi.fn(), isSignedIn: vi.fn(), getForYouRow: vi.fn() }));
 vi.mock('@/lib/env', () => ({ features: mocks.features }));
 vi.mock('@/features/catalog/queries', () => ({ listTitles: mocks.listTitles }));
-import { getHomeData } from '@/features/catalog/data';
+vi.mock('@/features/playback/progress-queries', () => ({ getContinueWatching: mocks.getContinueWatching, isSignedIn: mocks.isSignedIn }));
+vi.mock('@/features/catalog/personalization', () => ({ getForYouRow: mocks.getForYouRow }));
+import { getHomeData, getPublicHomeData } from '@/features/catalog/data';
 import { matchesDiscovery } from '@/features/catalog/discovery';
 
 const fixtures: Title[] = [
@@ -16,10 +18,25 @@ beforeEach(() => {
   mocks.features.tmdbConfigured = true;
   mocks.features.supabaseConfigured = false;
   mocks.listTitles.mockReset().mockImplementation(async (filters) => fixtures.filter((title) => matchesDiscovery(title, filters)));
+  mocks.getContinueWatching.mockReset().mockResolvedValue([{ title: fixtures[0] }]);
+  mocks.isSignedIn.mockReset().mockResolvedValue(true);
+  mocks.getForYouRow.mockReset().mockResolvedValue({ id: 'personal', heading: 'Because you watched', titles: [fixtures[0]] });
 });
 afterEach(() => vi.restoreAllMocks());
 
 describe('public home discovery payload', () => {
+  it('skips every personal read for both public entry points with Supabase configured', async () => {
+    mocks.features.supabaseConfigured = true;
+    const publicHome = await getPublicHomeData();
+    expect(publicHome).toEqual(await getHomeData({ personalize: false }));
+    expect(publicHome).toMatchObject({ signedIn: false, continueWatching: [], forYou: null, degraded: false });
+    expect(publicHome.rows.length).toBeGreaterThan(0);
+    expect(mocks.getContinueWatching).not.toHaveBeenCalled();
+    expect(mocks.isSignedIn).not.toHaveBeenCalled();
+    expect(mocks.getForYouRow).not.toHaveBeenCalled();
+    expect(mocks.listTitles.mock.calls.every(([filters]) => filters.limit <= 20)).toBe(true);
+  });
+
   it('works with TMDB configured and Supabase absent', async () => {
     const home = await getHomeData();
     expect(home.hero).not.toBeNull();

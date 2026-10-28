@@ -16,7 +16,10 @@ export default async function HomePage() {
   // Honest empty states: no mock fallback, no fabricated rows.
   if (!hero) {
     return (
-      <div className="px-4 py-16 md:px-8">
+      <div className="flex flex-col gap-8 py-16">
+        {signedIn ? <ContinueWatchingRow entries={continueWatching} /> : <GuestContinueWatchingRow />}
+        {forYou ? <MediaRow row={forYou} /> : null}
+        <div className="px-4 md:px-8">
         {degraded ? (
           <EmptyState
             icon="⚠"
@@ -27,7 +30,7 @@ export default async function HomePage() {
         ) : (
           <EmptyState
             title="The catalog is empty"
-             description="No titles are available from the catalog right now."
+            description="No titles are available from the catalog right now."
             action={
               <Link href="/browse" className={buttonClasses({ variant: 'secondary' })}>
                 Browse anyway
@@ -35,6 +38,7 @@ export default async function HomePage() {
             }
           />
         )}
+        </div>
       </div>
     );
   }

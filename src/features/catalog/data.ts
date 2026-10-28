@@ -82,6 +82,11 @@ async function loadForYou(): Promise<MediaRow | null> {
   }
 }
 
+/** Public bridge entry point: never reads authentication, history or recommendations. */
+export function getPublicHomeData(): Promise<HomeData> {
+  return getHomeData({ personalize: false });
+}
+
 export async function getHomeData(options: { personalize?: boolean } = {}): Promise<HomeData> {
   if (!features.supabaseConfigured && !features.tmdbConfigured) {
     return {
