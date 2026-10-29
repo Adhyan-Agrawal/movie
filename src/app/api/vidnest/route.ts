@@ -37,6 +37,7 @@ const RECEIVER_CORS_HEADERS = {
 
 type StreamHeaders = Record<string, string>;
 type ProxyPayload = { expiresAt: number; headers: StreamHeaders; url: string };
+type ApiConfig = { baseUrl: URL; cdnBaseUrl?: URL; secret: string };
 type GatewaySubtitle = Track & { headers: StreamHeaders };
 type ResolvedStream = { url: string; headers: StreamHeaders; subtitles: GatewaySubtitle[]; audioLanguage: string };
 type CacheEntry<T> = { expiresAt: number; promise: Promise<T> };
@@ -208,13 +209,27 @@ function jsonError(message: string, status: number) {
   return NextResponse.json({ error: message }, { status, headers: { 'Cache-Control': 'private, no-store' } });
 }
 
-function getApiConfig(): { baseUrl: URL; secret: string } | null {
+function getCdnBaseUrl(): URL | undefined {
+  const rawUrl = process.env.VIDNEST_CDN_BASE_URL;
+  if (!rawUrl) return undefined;
+  try {
+    const url = new URL(rawUrl);
+    const hostname = url.hostname.replace(/^\[|\]$/g, '');
+    if (url.protocol !== 'https:' || url.username || url.password || url.search || url.hash || url.pathname !== '/media'
+      || isPrivateOrLoopbackHost(hostname) || isIP(hostname)) return undefined;
+    return url;
+  } catch {
+    return undefined;
+  }
+}
+
+function getApiConfig(): ApiConfig | null {
   const secret = process.env.VIDNEST_API_SECRET;
   const rawUrl = process.env.VIDNEST_API_URL ?? 'https://vidnest-pi.vercel.app';
   if (!secret || secret.length < 32) return null;
   try {
     const baseUrl = new URL(rawUrl);
-    return baseUrl.protocol === 'https:' ? { baseUrl, secret } : null;
+    return baseUrl.protocol === 'https:' ? { baseUrl, cdnBaseUrl: getCdnBaseUrl(), secret } : null;
   } catch {
     return null;
   }
@@ -330,14 +345,21 @@ async function resolvedStreams(target: URL, secret: string, key: string): Promis
   }));
 }
 
-function proxyPath(url: string, headers: StreamHeaders, secret: string): string {
+function capabilityUrl(token: string, cdnBaseUrl?: URL): string {
+  if (!cdnBaseUrl) return `/api/vidnest?token=${encodeURIComponent(token)}`;
+  const url = new URL(cdnBaseUrl);
+  url.searchParams.set('token', token);
+  return url.href;
+}
+
+function proxyPath(url: string, headers: StreamHeaders, secret: string, cdnBaseUrl?: URL): string {
   const token = createToken({ url, headers, expiresAt: Date.now() + TOKEN_TTL_MS }, secret);
-  return `/api/vidnest?token=${encodeURIComponent(token)}`;
+  return capabilityUrl(token, cdnBaseUrl);
 }
 
 async function streamCatalog(
   streams: ResolvedStream[], secret: string, onHealthy: (startup: HealthyStartup) => void,
-  onFallback: (manifest: PlaybackManifest) => void,
+  onFallback: (manifest: PlaybackManifest) => void, cdnBaseUrl?: URL,
 ): Promise<DirectStream[]> {
   const catalog: DirectStream[] = new Array(streams.length);
   const deadline = Date.now() + CATALOG_BUDGET_MS;
@@ -416,12 +438,12 @@ async function streamCatalog(
         });
       }
       catalog[index] = {
-        id: String(index), url: proxyPath(stream.url, stream.headers, secret), ...metadata,
+        id: String(index), url: proxyPath(stream.url, stream.headers, secret, cdnBaseUrl), ...metadata,
         ...(startupLatencyMs !== undefined ? { startupLatencyMs } : {}),
         subtitles: [
           ...metadata.subtitles,
           ...stream.subtitles.map(({ headers, url, ...track }) => ({
-            ...track, ...(url ? { url: proxyPath(url, headers, secret) } : {}),
+            ...track, ...(url ? { url: proxyPath(url, headers, secret, cdnBaseUrl) } : {}),
           })),
         ],
       };
@@ -430,7 +452,7 @@ async function streamCatalog(
   return catalog;
 }
 
-async function catalogProbe(streams: ResolvedStream[], secret: string, key: string): Promise<CatalogProbe> {
+async function catalogProbe(streams: ResolvedStream[], secret: string, key: string, cdnBaseUrl?: URL): Promise<CatalogProbe> {
   return cached(catalogCache, key, CATALOG_TTL_MS, async () => {
     let first!: (startup: HealthyStartup | undefined) => void;
     const probe: CatalogProbe = {
@@ -441,7 +463,7 @@ async function catalogProbe(streams: ResolvedStream[], secret: string, key: stri
       first(startup);
     }, (manifest) => {
       if (!probe.fallback || manifest.order < probe.fallback.order) probe.fallback = manifest;
-    });
+    }, cdnBaseUrl);
     void probe.complete.then(() => first(undefined), () => first(undefined));
     return probe;
   });
@@ -513,12 +535,14 @@ async function probePlaylist(body: ReadableStream<Uint8Array>): Promise<{
   return { body: replayStream(reader, buffered), playlist, contentType };
 }
 
-function rewritePlaylist(playlist: string, sourceUrl: string, headers: StreamHeaders, secret: string): string {
+function rewritePlaylist(
+  playlist: string, sourceUrl: string, headers: StreamHeaders, secret: string, cdnBaseUrl?: URL,
+): string {
   const proxyUrl = (value: string) => {
     try {
       const url = new URL(value, sourceUrl);
       if (url.protocol !== 'https:') return value;
-      return proxyPath(url.href, headers, secret);
+      return proxyPath(url.href, headers, secret, cdnBaseUrl);
     } catch {
       return value;
     }
@@ -534,7 +558,7 @@ function rewritePlaylist(playlist: string, sourceUrl: string, headers: StreamHea
     .join('');
 }
 
-async function proxy(request: NextRequest, token: string, secret: string): Promise<NextResponse> {
+async function proxy(request: NextRequest, token: string, secret: string, cdnBaseUrl?: URL): Promise<NextResponse> {
   const payload = readToken(token, secret);
   if (!payload) return jsonError('Invalid or expired playback token.', 403);
 
@@ -607,7 +631,7 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
       if (!filtered) return jsonError('The requested quality is unavailable.', 404);
       rawPlaylist = filtered;
     }
-    const playlist = rewritePlaylist(rawPlaylist, sourceUrl, payload.headers, secret);
+    const playlist = rewritePlaylist(rawPlaylist, sourceUrl, payload.headers, secret, cdnBaseUrl);
     return new NextResponse(playlist, {
       headers: { 'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl' },
       status: 200,
@@ -626,14 +650,14 @@ async function proxy(request: NextRequest, token: string, secret: string): Promi
   return new NextResponse(inspected.body, { headers, status: response.status });
 }
 
-function castCapability(payload: ProxyPayload, secret: string): NextResponse {
+function castCapability(payload: ProxyPayload, secret: string, cdnBaseUrl?: URL): NextResponse {
   const token = createToken({ ...payload, expiresAt: Math.min(payload.expiresAt, Date.now() + 15 * 60 * 1000) }, secret);
-  return NextResponse.json({ url: `/api/vidnest?token=${encodeURIComponent(token)}` }, {
+  return NextResponse.json({ url: capabilityUrl(token, cdnBaseUrl) }, {
     headers: { 'Cache-Control': 'private, no-store' },
   });
 }
 
-async function resolve(request: NextRequest, config: { baseUrl: URL; secret: string }): Promise<NextResponse> {
+async function resolve(request: NextRequest, config: ApiConfig): Promise<NextResponse> {
   const params = request.nextUrl.searchParams;
   const tmdbId = params.get('tmdbId');
   const type = params.get('type');
@@ -660,8 +684,8 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   const key = sign(target.href, config.secret);
   const streams = await resolvedStreams(target, config.secret, key);
   if (params.get('metadata') === '1' || streamIndexRaw === 'auto') {
-    const catalogKey = sign(`${key}:${JSON.stringify(streams)}`, config.secret);
-    const probe = await catalogProbe(streams, config.secret, catalogKey);
+    const catalogKey = sign(`${key}:${JSON.stringify(streams)}:${config.cdnBaseUrl?.href ?? 'origin'}`, config.secret);
+    const probe = await catalogProbe(streams, config.secret, catalogKey, config.cdnBaseUrl);
     if (params.get('metadata') === '1') {
       const catalog = await probe.complete;
       return NextResponse.json({
@@ -671,8 +695,8 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
     const selected = probe.best ?? await probe.firstHealthy ?? probe.fallback;
     if (!selected) return jsonError('No healthy playback source is available.', streams.length ? 502 : 404);
     const stream = streams[selected.index]!;
-    if (params.get('cast') === '1') return castCapability({ url: stream.url, headers: stream.headers, expiresAt: Date.now() + TOKEN_TTL_MS }, config.secret);
-    return new NextResponse(rewritePlaylist(selected.playlist, selected.sourceUrl, stream.headers, config.secret), {
+    if (params.get('cast') === '1') return castCapability({ url: stream.url, headers: stream.headers, expiresAt: Date.now() + TOKEN_TTL_MS }, config.secret, config.cdnBaseUrl);
+    return new NextResponse(rewritePlaylist(selected.playlist, selected.sourceUrl, stream.headers, config.secret, config.cdnBaseUrl), {
       status: 200,
       headers: {
         'Cache-Control': 'private, no-store', 'Content-Type': 'application/vnd.apple.mpegurl',
@@ -683,14 +707,14 @@ async function resolve(request: NextRequest, config: { baseUrl: URL; secret: str
   const stream = streams[streamIndex];
   const streamUrl = stream?.url;
   if (!stream || typeof streamUrl !== 'string') return jsonError('No playback source is available.', 404);
-  if (params.get('cast') === '1') return castCapability({ url: streamUrl, headers: stream.headers, expiresAt: Date.now() + TOKEN_TTL_MS }, config.secret);
+  if (params.get('cast') === '1') return castCapability({ url: streamUrl, headers: stream.headers, expiresAt: Date.now() + TOKEN_TTL_MS }, config.secret, config.cdnBaseUrl);
 
   const token = createToken({
     url: streamUrl,
     headers: stream.headers,
     expiresAt: Date.now() + TOKEN_TTL_MS,
   }, config.secret);
-  return proxy(request, token, config.secret);
+  return proxy(request, token, config.secret, config.cdnBaseUrl);
 }
 
 export function OPTIONS() {
@@ -706,7 +730,7 @@ export async function GET(request: NextRequest) {
     if (request.nextUrl.searchParams.has('rendition') && !token) return jsonError('Quality selection requires a playback capability.', 400);
     if (token && request.nextUrl.searchParams.get('cast') === '1') {
       const payload = readToken(token, config.secret);
-      return payload ? castCapability(payload, config.secret) : jsonError('Invalid playback token.', 403);
+      return payload ? castCapability(payload, config.secret, config.cdnBaseUrl) : jsonError('Invalid playback token.', 403);
     }
     const response = token ? await proxy(request, token, config.secret) : await resolve(request, config);
     // Only holders of encrypted capabilities can read media from a receiver origin.

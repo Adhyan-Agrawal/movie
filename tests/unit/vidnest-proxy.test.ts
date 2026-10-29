@@ -70,6 +70,7 @@ beforeEach(async () => {
   GET = (await import('@/app/api/vidnest/route')).GET;
   vi.stubEnv('VIDNEST_API_SECRET', API_SECRET);
   vi.stubEnv('VIDNEST_API_URL', 'https://resolver.example');
+  vi.stubEnv('VIDNEST_CDN_BASE_URL', '');
 });
 
 afterEach(() => {
@@ -79,6 +80,52 @@ afterEach(() => {
 });
 
 describe('Vidnest proxy transport', () => {
+  it('uses a validated optional CDN endpoint while keeping Worker-to-origin child URLs same-origin', async () => {
+    vi.stubEnv('VIDNEST_CDN_BASE_URL', 'https://vidnest-edge.example/media');
+    const fetchMock = installFetch('https://third-party.example/master.m3u8', new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts\n', {
+      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+    }), {
+      origin: 'https://player.example',
+      referer: 'https://player.example/watch',
+    });
+
+    const response = await GET(playbackRequest());
+    const playlist = await response.text();
+    const edgeLine = playlist.split(/\r?\n/).find((line) => line.startsWith('https://vidnest-edge.example/'));
+    expect(edgeLine).toBeDefined();
+    const edgeUrl = new URL(edgeLine!);
+    expect(edgeUrl.pathname).toBe('/media');
+    expect(edgeUrl.searchParams.get('token')).toMatch(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/);
+    expect(playlist).not.toMatch(/third-party\.example|player\.example|referer|origin/);
+
+    fetchMock.mockResolvedValueOnce(new Response('#EXTM3U\n#EXTINF:6,\nnested.ts\n', {
+      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+    }));
+    const originResponse = await GET(new NextRequest(`https://app.example/api/vidnest?token=${encodeURIComponent(edgeUrl.searchParams.get('token')!)}`));
+    const originPlaylist = await originResponse.text();
+    expect(originPlaylist).toContain('/api/vidnest?token=');
+    expect(originPlaylist).not.toContain('vidnest-edge.example');
+  });
+
+  it.each([
+    'http://vidnest-edge.example/media',
+    'https://user:password@vidnest-edge.example/media',
+    'https://vidnest-edge.example/media?unsafe=1',
+    'https://vidnest-edge.example/not-media',
+    'https://localhost/media',
+  ])('keeps the existing same-origin fallback for an invalid CDN URL: %s', async (cdnUrl) => {
+    vi.stubEnv('VIDNEST_CDN_BASE_URL', cdnUrl);
+    installFetch('https://third-party.example/master.m3u8', new Response('#EXTM3U\nsegment.ts\n', {
+      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
+    }));
+
+    const response = await GET(playbackRequest());
+    const playlist = await response.text();
+
+    expect(playlist).toContain('/api/vidnest?token=');
+    expect(playlist).not.toContain('vidnest-edge.example');
+  });
+
   it('serves one fixed rendition to native clients while preserving alternate audio', async () => {
     const master = [
       '#EXTM3U', '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en",URI="audio.m3u8"',
