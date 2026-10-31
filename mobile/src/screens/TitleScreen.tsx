@@ -13,7 +13,7 @@ import {
   setRating,
   toggleWatchlist,
 } from '../lib/api';
-import { getTitleDetails } from '../lib/catalog-bridge';
+import { getTitleDetails, isAccountCatalogId } from '../lib/catalog-bridge';
 import type { CastMember, Season, Title } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 
@@ -89,21 +89,24 @@ export default function TitleScreen() {
           return;
         }
         setTitle(found);
+        const seasonList = details.seasons;
+        setSeasons(seasonList);
+        setCast(details.cast);
+        if (seasonList.length) setSelectedSeason(seasonList[0].seasonNumber);
+        setLoading(false);
 
-        const [seasonList, castList, listed, rating, continueEntries] = await Promise.all([
-          Promise.resolve(details.seasons),
-          Promise.resolve(details.cast),
-          isInWatchlist(found.id),
-          getMyRating(found.id),
-          fetchContinueWatching(50),
+        // Virtual TMDB ids have no account-library foreign key. Public details
+        // render immediately, independent of private reads or their failures.
+        if (!isAccountCatalogId(found.id)) return;
+        const [listed, rating, continueEntries] = await Promise.all([
+          isInWatchlist(found.id).catch(() => false),
+          getMyRating(found.id).catch(() => null),
+          fetchContinueWatching(50).catch(() => []),
         ]);
         if (!active) return;
 
-        setSeasons(seasonList);
-        setCast(castList);
         setInList(listed);
         setMyRating(rating);
-        if (seasonList.length) setSelectedSeason(seasonList[0].seasonNumber);
 
         // Resume CTA: a series deep-links to the LAST episode the viewer was
         // watching (episode id from continue-watching, position confirmed via
@@ -113,8 +116,8 @@ export default function TitleScreen() {
           const episode = seasonList
             .flatMap((s) => s.episodes)
             .find((e) => e.id === entry.episodeId);
-          if (episode) {
-            const position = await getResumePosition(found.id, episode.id);
+          if (episode && isAccountCatalogId(episode.id)) {
+            const position = await getResumePosition(found.id, episode.id).catch(() => null);
             if (active && position) {
               setResume({
                 season: episode.seasonNumber,
@@ -126,7 +129,7 @@ export default function TitleScreen() {
             }
           }
         } else if (found.type === 'movie') {
-          const position = await getResumePosition(found.id);
+          const position = await getResumePosition(found.id).catch(() => null);
           if (active && position) setResume({ label: 'Resume' });
         }
       } catch {
@@ -167,7 +170,7 @@ export default function TitleScreen() {
   }, [seasons, selectedSeason]);
 
   async function onToggleWatchlist() {
-    if (!title || listBusy) return;
+    if (!title || listBusy || !isAccountCatalogId(title.id)) return;
     const user = await currentUser();
     if (!user) {
       navigation.navigate('Auth');
@@ -188,7 +191,7 @@ export default function TitleScreen() {
   }
 
   async function onRate(value: number) {
-    if (!title || ratingBusy) return;
+    if (!title || ratingBusy || !isAccountCatalogId(title.id)) return;
     const user = await currentUser();
     if (!user) {
       navigation.navigate('Auth');
@@ -227,6 +230,7 @@ export default function TitleScreen() {
   }
 
   const isSeries = title.type === 'tv';
+  const accountAvailable = isAccountCatalogId(title.id);
   const primaryLabel = resume ? resume.label : 'Play';
   const filledStars = myRating != null ? Math.round(myRating / 2) : 0;
 
@@ -295,10 +299,11 @@ export default function TitleScreen() {
         <View style={styles.actions}>
           <Button label={primaryLabel} size="lg" onPress={onPrimaryPress} style={styles.playButton} />
           <Button
-            label={inList ? '✓ In My List' : '+ My List'}
+            label={!accountAvailable ? 'My List unavailable' : inList ? '✓ In My List' : '+ My List'}
             variant="secondary"
             size="lg"
             loading={listBusy}
+            disabled={!accountAvailable}
             onPress={onToggleWatchlist}
             style={styles.listButton}
           />
@@ -307,7 +312,7 @@ export default function TitleScreen() {
         {/* Viewer rating: 5 stars, each worth 2 points on the 1–10 scale. */}
         <View style={styles.ratingRow}>
           <Text style={styles.ratingValue}>
-            {myRating != null ? `Your rating: ${myRating}/10` : 'Rate this title'}
+            {!accountAvailable ? 'Account rating unavailable' : myRating != null ? `Your rating: ${myRating}/10` : 'Rate this title'}
           </Text>
           <View style={styles.stars}>
             {STARS.map((star) => {
@@ -316,11 +321,11 @@ export default function TitleScreen() {
                 <Pressable
                   key={star}
                   onPress={() => onRate(value)}
-                  disabled={ratingBusy}
+                  disabled={ratingBusy || !accountAvailable}
                   hitSlop={6}
                   accessibilityRole="button"
                   accessibilityLabel={`Rate ${value} out of 10`}
-                  accessibilityState={{ selected: myRating === value, disabled: ratingBusy }}
+                  accessibilityState={{ selected: myRating === value, disabled: ratingBusy || !accountAvailable }}
                   style={({ pressed }) => [styles.star, { opacity: pressed ? 0.7 : 1 }]}
                 >
                   <Text

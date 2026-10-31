@@ -10,6 +10,7 @@ import { currentUser, fetchContinueWatching, getTitleBySlug, signOut, submitTitl
 import { readGuestEntries } from '../lib/guest';
 import { supabase } from '../lib/supabase';
 import { SubscriptionStatus } from '../components/SubscriptionStatus';
+import { AdMobPrivacyChoices } from '../ads/AdMobProvider';
 import type { ContinueEntry, TitleType } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 
@@ -35,43 +36,85 @@ export default function AccountScreen() {
   const [entries, setEntries] = useState<ContinueEntry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const loadGeneration = useRef(0);
+  const identity = useRef<string | null | undefined>(undefined);
+  const focused = useRef(false);
+  const mounted = useRef(true);
 
   const load = useCallback(async () => {
+    if (!mounted.current || !focused.current) return;
     const generation = ++loadGeneration.current;
-    const user = await currentUser();
-    const loadedEntries = user ? await fetchContinueWatching() : await readGuestEntries();
-    if (generation !== loadGeneration.current) return;
-    setSignedIn(Boolean(user));
-    setEmail(user?.email ?? null);
-    setEntries(loadedEntries);
+    const current = () => mounted.current && focused.current && generation === loadGeneration.current;
+    try {
+      const user = await currentUser();
+      const accountId = user?.id ?? null;
+      if (!current()) return;
+      if (identity.current !== undefined && identity.current !== accountId) {
+        setSignedIn(null); setEmail(null); setEntries([]);
+        return;
+      }
+      identity.current = accountId;
+      const loadedEntries = user ? await fetchContinueWatching() : await readGuestEntries();
+      if (!current() || identity.current !== accountId) return;
+      // Library helpers also resolve auth internally. Never pair another identity's rows/email.
+      const latest = await currentUser();
+      if (!current()) return;
+      if ((latest?.id ?? null) !== accountId) {
+        identity.current = latest?.id ?? null;
+        loadGeneration.current += 1;
+        setSignedIn(null); setEmail(null); setEntries([]); setRefreshing(false);
+        return;
+      }
+      setSignedIn(Boolean(user));
+      setEmail(user?.email ?? null);
+      setEntries(loadedEntries);
+    } catch {
+      if (current()) { setSignedIn(null); setEmail(null); setEntries([]); }
+    }
   }, []);
 
   // Refresh whenever the tab is focused (e.g. returning from the Auth screen).
   useFocusEffect(
     useCallback(() => {
+      focused.current = true;
       void load();
+      return () => { focused.current = false; loadGeneration.current += 1; };
     }, [load]),
   );
 
   // And live, when the session changes while the tab is already on screen.
   useEffect(() => {
-    const { data } = supabase.auth.onAuthStateChange(() => {
+    mounted.current = true;
+    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
       loadGeneration.current += 1;
-      void load();
+      const accountId = session?.user.id ?? null;
+      if (identity.current !== accountId) {
+        setSignedIn(null); setEmail(null); setEntries([]); setRefreshing(false);
+      }
+      identity.current = accountId;
+      // Supabase auth callbacks hold its session lock; defer any auth/library reads.
+      queueMicrotask(() => { if (mounted.current && focused.current) void load(); });
     });
-    return () => data.subscription.unsubscribe();
+    return () => { mounted.current = false; loadGeneration.current += 1; data.subscription.unsubscribe(); };
   }, [load]);
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
-    await load();
-    setRefreshing(false);
+    const pending = load();
+    const generation = loadGeneration.current;
+    try { await pending; } finally {
+      if (mounted.current && focused.current && generation === loadGeneration.current) setRefreshing(false);
+    }
   }, [load]);
 
   async function handleSignOut() {
-    loadGeneration.current += 1;
-    await signOut();
-    await load();
+    const generation = ++loadGeneration.current;
+    setSignedIn(null); setEmail(null); setEntries([]); setRefreshing(false);
+    try { await signOut(); } finally {
+      if (mounted.current && focused.current && generation === loadGeneration.current) {
+        identity.current = undefined;
+        await load();
+      }
+    }
   }
 
   async function playEntry(entry: ContinueEntry) {
@@ -106,6 +149,7 @@ export default function AccountScreen() {
     return (
       <Screen>
         <Loading label="Loading your account…" />
+        <Button label="Retry account" variant="secondary" size="sm" onPress={load} />
       </Screen>
     );
   }
@@ -133,6 +177,7 @@ export default function AccountScreen() {
             )}
           </View>
           {signedIn ? <SubscriptionStatus key={email ?? 'signed-in'} /> : null}
+          <AdMobPrivacyChoices />
         </View>
 
         {entries.length > 0 ? (
@@ -214,7 +259,7 @@ function RequestTitleCard({ signedIn, onSignIn }: { signedIn: boolean; onSignIn:
       <Text style={styles.cardTitle}>Request a title</Text>
       {signedIn ? (
         <>
-          <Text style={styles.cardHint}>Can't find something? Tell us what to add.</Text>
+          <Text style={styles.cardHint}>Can&apos;t find something? Tell us what to add.</Text>
 
           <TextInput
             value={name}

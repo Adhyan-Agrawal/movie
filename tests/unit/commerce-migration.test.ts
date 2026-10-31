@@ -14,10 +14,17 @@ describe('commerce migration security invariants', () => {
     expect(sql).toMatch(/\bbegin;/); expect(sql).toMatch(/commit;\s*$/);
     expect(sql).toContain("('plans.manage'"); expect(sql).toContain("('billing.read'");
   });
-  it('enables RLS, permits self reads and revokes direct client writes', () => {
+  it('enables RLS, limits self reads to sanitized entitlements and revokes direct client writes', () => {
     expect(sql).toContain('alter table public.commerce_plans enable row level security');
     expect(sql).toContain('alter table public.commerce_subscriptions enable row level security');
-    expect(sql).toMatch(/commerce_subscriptions_self_read[\s\S]*?using \(account_id = auth.uid\(\)\)/);
+    expect(sql).not.toMatch(/create policy commerce_subscriptions_self_read\b/);
+    expect(sql).toMatch(/create policy commerce_subscriptions_admin_read on public\.commerce_subscriptions for select\s+using \(public\.has_permission\('billing\.read'\)\)/);
+    expect(sql).toContain('create function public.commerce_viewer_entitlements()\nreturns jsonb language sql stable security definer set search_path = public as $$');
+    expect(body('commerce_viewer_entitlements').trim()).toBe('select public.commerce_entitlements_for(auth.uid());');
+    expect(body('commerce_entitlements_for')).not.toMatch(/\b(reason|granted_by|revoked_by)\b/);
+    expect(sql).toContain('revoke all on function public.commerce_entitlements_for(uuid) from public, anon, authenticated;');
+    expect(sql).toContain('revoke all on function public.commerce_viewer_entitlements() from public;');
+    expect(sql).toContain('grant execute on function public.commerce_viewer_entitlements() to anon, authenticated;');
     expect(sql).toContain('revoke insert, update, delete on public.commerce_plans, public.commerce_subscriptions from anon, authenticated');
   });
   it.each(['commerce_manage_plan', 'commerce_manage_subscription', 'commerce_save_vast'])('sensitive RPC %s is service-only, permissioned, reasoned and transactional with audit', (name) => {

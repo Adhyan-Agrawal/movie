@@ -6,14 +6,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { WebView } from 'react-native-webview';
 import * as ScreenOrientation from 'expo-screen-orientation';
 import { Button } from '../components/ui';
-import { getPlaybackContext, listSeasons, recordPlaybackSession, reportProgress, resolvePlaybackDetails } from '../lib/api';
+import { fetchIntroCatalog, getPlaybackContext, listSeasons, recordPlaybackSession, reportProgress, resolvePlaybackDetails } from '../lib/api';
 import { getGuestResume, recordGuestWatch, updateGuestPosition } from '../lib/guest';
-import type { PlaybackResponse } from '../lib/types';
+import type { IntroMarker, PlaybackResponse } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 import NativePlayer, { type Snapshot } from '../player/NativePlayer';
 import { markCheckpointSynced, mediaKey, readCheckpoint, selectResume, writeCheckpoint } from '../player/checkpoint';
 import { acquireOrientation } from '../player/orientation';
-import { notifyAdBreak } from '../player/policy';
 import { colors } from '../theme';
 
 type PlayerRoute = RouteProp<RootStackParamList, 'Player'>;
@@ -28,6 +27,7 @@ export default function PlayerScreen() {
   const { titleId, type, slug, name, season, episode } = params;
   const [phase, setPhase] = useState<'loading' | 'ready' | 'error'>('loading');
   const [bridge, setBridge] = useState<PlaybackResponse>({ sources: [] });
+  const [intro, setIntro] = useState<{ identity: string; url: string; marker: IntroMarker | null } | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [consented, setConsented] = useState<string[]>([]);
   const [failedId, setFailedId] = useState<string | null>(null);
@@ -39,6 +39,9 @@ export default function PlayerScreen() {
   const lastSnapshot = useRef<Snapshot | null>(null);
   const reports = useRef<Promise<unknown>>(Promise.resolve());
   const checkpointKey = mediaKey({ titleId, type, season, episode, episodeId: params.episodeId });
+  const introIdentity = JSON.stringify([titleId, type, slug, params.tmdbId, params.imdbId, season, episode, params.episodeId]);
+  const introIdentityRef = useRef(introIdentity);
+  introIdentityRef.current = introIdentity;
   const active = bridge.sources.find((s) => s.id === activeId) ?? bridge.sources[0];
   const needsConsent = !!active && active.consentRequired && !consented.includes(active.id);
   const failed = !!active && active.id === failedId;
@@ -49,7 +52,9 @@ export default function PlayerScreen() {
 
   useEffect(() => {
     let cancelled = false;
+    const introRequest = new AbortController();
     setPhase('loading');
+    setIntro(null);
     setFailedId(null);
     lastSnapshot.current = null;
     void (async () => {
@@ -75,9 +80,15 @@ export default function PlayerScreen() {
       setBridge(resolved);
       setActiveId(resolved.sources[0]?.id ?? null);
       setPhase(resolved.sources.length ? 'ready' : 'error');
+      const introUrl = resolved.introCatalogUrl;
+      if (introUrl && resolved.sources.length) void fetchIntroCatalog(introUrl, introRequest.signal).then((marker) => {
+        if (!cancelled && !introRequest.signal.aborted && introIdentityRef.current === introIdentity) {
+          setIntro({ identity: introIdentity, url: introUrl, marker });
+        }
+      });
     })().catch(() => { if (!cancelled) setPhase('error'); });
-    return () => { cancelled = true; };
-  }, [titleId, type, slug, params.tmdbId, params.imdbId, params.episodeId, season, episode, checkpointKey, attempt]);
+    return () => { cancelled = true; introRequest.abort(); };
+  }, [titleId, type, slug, params.tmdbId, params.imdbId, params.episodeId, season, episode, checkpointKey, introIdentity, attempt]);
 
   // Record only an actually opened, consented source. Unknown TV episodes never write title-only history.
   useEffect(() => {
@@ -94,8 +105,7 @@ export default function PlayerScreen() {
     } else if (context.viewerKey.startsWith('account:') && (type === 'movie' || context.episodeId)) {
       void recordPlaybackSession(titleId, context.episodeId, context.viewerKey);
     }
-    if (bridge.adPolicy && active.kind !== 'embed') notifyAdBreak({ policy: bridge.adPolicy, positionSeconds: initial.positionSeconds, phase: 'start' });
-  }, [phase, active, needsConsent, failed, context, checkpointKey, slug, type, name, titleId, season, episode, bridge.adPolicy]);
+  }, [phase, active, needsConsent, failed, context, checkpointKey, slug, type, name, titleId, season, episode, params.posterUrl, params.backdropUrl, params.tmdbId, params.imdbId]);
 
   function persist(snapshot: Snapshot) {
     if (!Number.isFinite(snapshot.positionSeconds) || snapshot.positionSeconds < 0) return;
@@ -115,7 +125,6 @@ export default function PlayerScreen() {
         if (result.ok && captured) await markCheckpointSynced(input.viewerKey, checkpointKey, captured);
       });
     }
-    if (bridge.adPolicy) notifyAdBreak({ policy: bridge.adPolicy, positionSeconds: snapshot.positionSeconds, phase: 'progress' });
   }
 
   const persistRef = useRef(persist);
@@ -172,7 +181,8 @@ export default function PlayerScreen() {
 
   if (phase === 'ready' && active && !needsConsent && !failed && active.kind !== 'embed') {
     return <NativePlayer key={`${context.viewerKey}:${checkpointKey}`} source={active} initial={initial} subtitleCatalogUrl={bridge.subtitleCatalogUrl}
-      adPolicy={bridge.adPolicy} upNext={next && playNext ? { label: `Up next S${next.season} E${next.episode}`, onPress: playNext } : undefined}
+      intro={intro?.identity === introIdentity && intro.url === bridge.introCatalogUrl ? intro.marker : null}
+      adPolicy={bridge.entitlements?.resolved === true && bridge.entitlements.adFree === false ? bridge.adPolicy : undefined} upNext={next && playNext ? { label: `Up next S${next.season} E${next.episode}`, onPress: playNext } : undefined}
       onCheckpoint={persist} onError={() => setFailedId(active.id)} header={header} footer={footer} />;
   }
 

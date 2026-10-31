@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
+  AccessibilityInfo,
   useWindowDimensions,
   Pressable,
   RefreshControl,
@@ -18,10 +19,11 @@ import { Button, EmptyState, Loading, Screen, SectionTitle } from '../components
 import { Hero } from '../components/Hero';
 import { Row } from '../components/Row';
 import { MediaCard } from '../components/MediaCard';
+import { HomeAdMobBanner } from '../ads/AdMobProvider';
 import { currentUser, fetchContinueWatching, listAllGenres } from '../lib/api';
 import { fetchHome, getTitleBySlug, listTitles } from '../lib/catalog-bridge';
 import { readGuestEntries } from '../lib/guest';
-import type { ContinueEntry, MediaRow, Title } from '../lib/types';
+import type { ContinueEntry, HomeData, MediaRow, Title, TitleFilters } from '../lib/types';
 import type { RootStackParamList } from '../navigation';
 
 /**
@@ -41,9 +43,7 @@ import type { RootStackParamList } from '../navigation';
 const COLUMN_GAP = spacing(3);
 const MAX_GENRES = 18;
 
-type DiscoveryFilter = NonNullable<Parameters<typeof listTitles>[0]> & { originalLanguage?: string; country?: string };
-type Collection = { id: string; label: string; href?: string; filters: DiscoveryFilter };
-type DiscoveryRow = MediaRow & { href?: string; filters?: DiscoveryFilter };
+type Collection = NonNullable<HomeData['collections']>[number];
 
 type LoadState = 'loading' | 'ready' | 'error';
 type GenreState = 'idle' | 'loading' | 'ready' | 'error';
@@ -55,16 +55,19 @@ export default function HomeScreen() {
   const cardWidth = Math.floor((width - spacing(4) * 2 - COLUMN_GAP * 2) / 3);
   const scroll = useRef<ScrollView>(null);
   const filterTop = useRef(0);
+  const homeRequest = useRef(0);
 
   const [state, setState] = useState<LoadState>('loading');
   const [hero, setHero] = useState<Title[]>([]);
-  const [rows, setRows] = useState<DiscoveryRow[]>([]);
+  const [rows, setRows] = useState<MediaRow[]>([]);
   const [collections, setCollections] = useState<Collection[]>([]);
   const [continueEntries, setContinueEntries] = useState<ContinueEntry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
+  const [reducedMotion, setReducedMotion] = useState(true);
 
   const [genres, setGenres] = useState<string[]>([]);
   const [activeGenre, setActiveGenre] = useState<string | null>(null);
+  const [activeFilterId, setActiveFilterId] = useState<string | null>(null);
   const [genreTitles, setGenreTitles] = useState<Title[]>([]);
   const [genreState, setGenreState] = useState<GenreState>('idle');
   /** Monotonic id — only the newest genre request may write state. */
@@ -106,8 +109,9 @@ export default function HomeScreen() {
 
   /** Fetch the full home payload. Errors become an explicit error state. */
   const loadHome = useCallback(async (isRefresh: boolean) => {
-    if (isRefresh) setRefreshing(true);
-    else setState('loading');
+    const request = ++homeRequest.current;
+    setRefreshing(isRefresh);
+    if (!isRefresh) setState('loading');
     try {
       // Continue Watching lives on Home (not just the Account tab) — signed-in
       // viewers read their server rows, guests their device-local store. A
@@ -123,21 +127,21 @@ export default function HomeScreen() {
           }
         })(),
       ]);
+      if (request !== homeRequest.current) return;
       setHero(data.hero);
-      const discovery = data as typeof data & { collections?: Collection[]; forYou?: MediaRow | null };
-      const publicRows = data.rows.filter((row) => row.titles.length > 0);
-      setRows(discovery.forYou?.titles.length && !publicRows.some((row) => row.id === discovery.forYou!.id) ? [discovery.forYou, ...publicRows] : publicRows);
-      setCollections(discovery.collections ?? []);
+      setRows(data.rows.filter((row) => row.titles.length > 0));
+      setCollections(data.collections ?? []);
       setContinueEntries(continueEntries);
       setState('ready');
     } catch {
+      if (request !== homeRequest.current) return;
       setHero([]);
       setRows([]);
       setCollections([]);
       setContinueEntries([]);
       setState('error');
     } finally {
-      if (isRefresh) setRefreshing(false);
+      if (request === homeRequest.current) setRefreshing(false);
     }
   }, []);
 
@@ -151,9 +155,17 @@ export default function HomeScreen() {
   }, []);
 
   useEffect(() => {
-    void loadHome(false);
     void loadGenres();
-  }, [loadHome, loadGenres]);
+    let mounted = true;
+    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
+    void AccessibilityInfo.isReduceMotionEnabled().then((value) => { if (mounted) setReducedMotion(value); }).catch(() => {});
+    return () => {
+      mounted = false;
+      homeRequest.current++;
+      genreRequest.current++;
+      subscription.remove();
+    };
+  }, [loadGenres]);
 
   useFocusEffect(useCallback(() => {
     void loadHome(false);
@@ -166,16 +178,18 @@ export default function HomeScreen() {
 
   /** Toggle a genre chip and swap the inline grid for its titles. */
   const onPressGenre = useCallback(
-    async (genre: string, filters: DiscoveryFilter = { genre }) => {
-      if (genre === activeGenre) {
+    async (genre: string, filters: TitleFilters = { genre }, collectionId = `genre:${genre}`) => {
+      if (collectionId === activeFilterId) {
         genreRequest.current += 1; // drop any in-flight load for the old chip
         setActiveGenre(null);
+        setActiveFilterId(null);
         setGenreTitles([]);
         setGenreState('idle');
         return;
       }
       const id = ++genreRequest.current;
       setActiveGenre(genre);
+      setActiveFilterId(collectionId);
       setGenreTitles([]);
       setGenreState('loading');
       scroll.current?.scrollTo({ y: filterTop.current, animated: false });
@@ -189,19 +203,19 @@ export default function HomeScreen() {
         setGenreState('error');
       }
     },
-    [activeGenre],
+    [activeFilterId],
   );
 
-  const hasContent = hero.length > 0 || rows.length > 0;
+  const hasContent = hero.length > 0 || rows.length > 0 || continueEntries.length > 0;
 
-  const discoverySection = genres.length > 0 || collections.length > 0 ? (
+  const discoverySection = genres.length > 0 || collections.length > 0 || activeFilterId ? (
     <View style={styles.genreSection} onLayout={(event) => { filterTop.current = event.nativeEvent.layout.y; }}>
       <SectionTitle>Find your next favorite</SectionTitle>
       {collections.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.collectionChips}>
-        {collections.map((item) => <Chip key={item.id} label={item.label} active={item.label === activeGenre} onPress={() => void onPressGenre(item.label, item.filters)} />)}
+        {collections.map((item) => <Chip key={item.id} label={item.label} active={item.id === activeFilterId} onPress={() => void onPressGenre(item.label, item.filters, item.id)} />)}
       </ScrollView> : null}
       <View style={styles.chips}>
-        {genres.slice(0, MAX_GENRES).filter((genre) => !collections.some((item) => item.filters.genre === genre)).map((genre) => <Chip key={genre} label={genre} active={genre === activeGenre} onPress={() => void onPressGenre(genre)} />)}
+        {genres.slice(0, MAX_GENRES).filter((genre) => !collections.some((item) => item.filters.genre === genre)).map((genre) => <Chip key={genre} label={genre} active={`genre:${genre}` === activeFilterId} onPress={() => void onPressGenre(genre)} />)}
       </View>
       {genreState === 'loading' ? <InlineLoading label={`Loading ${activeGenre}...`} /> : null}
       {genreState === 'error' ? <EmptyState title="Couldn't load that collection" description="Select it again to clear, then retry." /> : null}
@@ -243,7 +257,7 @@ export default function HomeScreen() {
         ) : null}
 
         {state === 'ready' && !hasContent ? (
-          <EmptyState title="Nothing to watch yet" description="The catalog is empty right now — new titles land soon." />
+          <EmptyState title="Nothing to watch yet" description="No titles are available from the catalog right now." />
         ) : null}
 
         {state === 'ready' && hasContent ? (
@@ -261,17 +275,18 @@ export default function HomeScreen() {
                 progressById={Object.fromEntries(continueEntries.map((e) => [e.title.id, e.progress]))}
               />
             ) : null}
-            <Hero titles={hero} onPressTitle={openTitle} />
+            <Hero key={reducedMotion ? 'still' : 'carousel'} titles={reducedMotion ? hero.slice(0, 1) : hero} onPressTitle={openTitle} />
+            <HomeAdMobBanner />
             {discoverySection}
             {rows.map((row) => (
               <View key={row.id}>
-              {row.filters ? <Pressable onPress={() => void onPressGenre(row.heading, row.filters)} accessibilityRole="button" accessibilityLabel={`View all ${row.heading}`} style={styles.viewAll}><Text style={styles.viewAllText}>View all / {row.heading}</Text></Pressable> : null}
-              <Row
-                heading={row.heading}
-                reason={row.reason}
-                titles={row.titles}
-                onPressTitle={openTitle}
-              />
+                {row.filters ? <Pressable onPress={() => void onPressGenre(row.heading, row.filters, row.collectionId ?? row.id)} accessibilityRole="button" accessibilityLabel={`View all ${row.heading}`} style={styles.viewAll}><Text style={styles.viewAllText}>View all / {row.heading}</Text></Pressable> : null}
+                <Row
+                  heading={row.heading}
+                  reason={row.reason}
+                  titles={row.titles}
+                  onPressTitle={openTitle}
+                />
               </View>
             ))}
           </>

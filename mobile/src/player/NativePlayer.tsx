@@ -3,16 +3,26 @@ import { AppState, BackHandler, Pressable, ScrollView, StyleSheet, Text, View, u
 import { StatusBar } from 'expo-status-bar';
 import { useVideoPlayer, VideoView, type AudioTrack, type SubtitleTrack } from 'expo-video';
 import * as ScreenOrientation from 'expo-screen-orientation';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { fetchStreamCatalog, fetchSubtitleCatalog, sameOriginPlaybackUrl } from '../lib/api';
-import type { DirectStream, NativeAdPolicy, PlaybackSource, Subtitle } from '../lib/types';
+import { fetchStreamCatalog, fetchSubtitleCatalog, fetchVastCreative, sameOriginPlaybackUrl } from '../lib/api';
+import type { DirectStream, IntroMarker, NativeAdPolicy, NativeVastCreative, PlaybackSource, Subtitle } from '../lib/types';
 import { colors } from '../theme';
 import { chooseStream, compatiblePreferences, DEFAULT_PREFERENCES, qualityHeight, qualityKey, renditionUrl, trackKey, type Preferences } from './options';
 import { doubleTap, parseVtt, subtitleText, type Cue, type Tap } from './subtitles';
 import { acquireOrientation } from './orientation';
-import { AdController } from './AdController';
+import NativeVastAd from './VastAdBreak';
+import { createNativeAdResume, createNativeAdSchedule, validNativeAdPolicy } from './policy';
 
 export interface Snapshot { positionSeconds: number; durationSeconds?: number; playing: boolean }
+const AD_CONSENT_KEY = 'lumora:ads:consent';
+
+export function canSkipIntro(intro: IntroMarker | null | undefined, positionSeconds: number, durationSeconds: number, blocked = false): intro is IntroMarker {
+  return !blocked && !!intro && Number.isFinite(intro.startSeconds) && Number.isFinite(intro.endSeconds)
+    && intro.startSeconds >= 0 && intro.endSeconds > intro.startSeconds
+    && Number.isFinite(positionSeconds) && positionSeconds >= intro.startSeconds && positionSeconds < intro.endSeconds
+    && Number.isFinite(durationSeconds) && durationSeconds > 0 && intro.endSeconds <= durationSeconds;
+}
 
 function Action({ label, onPress, selected, disabled }: { label: string; onPress: () => void; selected?: boolean; disabled?: boolean }) {
   return <Pressable accessibilityRole="button" accessibilityLabel={label} accessibilityState={{ selected, disabled }}
@@ -26,10 +36,11 @@ function timeLabel(seconds: number): string {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
 }
 
-export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPolicy, upNext, onCheckpoint, onError, header, footer }: {
+export default function NativePlayer({ source, initial, subtitleCatalogUrl, intro, adPolicy, upNext, onCheckpoint, onError, header, footer }: {
   source: PlaybackSource;
   initial: Snapshot;
   subtitleCatalogUrl?: string;
+  intro?: IntroMarker | null;
   adPolicy?: NativeAdPolicy;
   upNext?: { label: string; onPress: () => void };
   onCheckpoint: (snapshot: Snapshot) => void;
@@ -60,6 +71,12 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
   const [catalogNotice, setCatalogNotice] = useState('');
   const [videoResolution, setVideoResolution] = useState('');
   const [controlsHeight, setControlsHeight] = useState(190);
+  const [headerHeight, setHeaderHeight] = useState(96);
+  const [captionHeight, setCaptionHeight] = useState(48);
+  const [introSeeking, setIntroSeeking] = useState(false);
+  const [adConsent, setAdConsent] = useState(false);
+  const [adBusy, setAdBusy] = useState(false);
+  const [ad, setAd] = useState<{ creative: NativeVastCreative; policy: NativeAdPolicy; volume: number; muted: boolean } | null>(null);
   const snapshot = useRef<Snapshot>(initial);
   const callbacks = useRef({ onCheckpoint, onError });
   callbacks.current = { onCheckpoint, onError };
@@ -78,10 +95,28 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
   requestedRate.current = rate;
   const touchStart = useRef<{ x: number; y: number } | null>(null);
   const lastTap = useRef<Tap | null>(null);
+  const advertisingConsent = useRef(false);
+  const consentVersion = useRef(0);
+  const consentWrites = useRef<Promise<void>>(Promise.resolve());
+  const adActive = useRef(false);
+  const adRequest = useRef<AbortController | null>(null);
+  const adSchedule = useRef<ReturnType<typeof createNativeAdSchedule> | null>(null);
+  const adResume = useRef<{ resume: ReturnType<typeof createNativeAdResume>; snapshot: Snapshot } | null>(null);
+  const finishAdRef = useRef<() => void>(() => {});
+  const policyRef = useRef(adPolicy); policyRef.current = adPolicy;
+  const introRef = useRef(intro); introRef.current = intro;
+  const introSeekTarget = useRef<number | null>(null);
+
+  function resetIntroSeek() {
+    introSeekTarget.current = null;
+    if (alive.current) setIntroSeeking(false);
+  }
+
+  useEffect(() => { resetIntroSeek(); }, [intro?.startSeconds, intro?.endSeconds]);
 
   function observe(): Snapshot {
     try {
-      if (!replacing.current) snapshot.current = { positionSeconds: player.currentTime,
+      if (!replacing.current && !adActive.current) snapshot.current = { positionSeconds: player.currentTime,
         ...(player.duration > 0 ? { durationSeconds: player.duration } : {}), playing: player.playing };
     } catch { /* The hook may already have released the native object during cleanup. */ }
     return snapshot.current;
@@ -92,6 +127,74 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
     callbacks.current.onCheckpoint(value ?? observe());
     lastFlush.current = Date.now();
   }
+
+  function restoreAdContent() {
+    const saved = adResume.current;
+    if (!saved) return;
+    const foreground = alive.current && AppState.currentState === 'active';
+    snapshot.current = { ...saved.snapshot, playing: saved.resume.playing && foreground };
+    try { saved.resume.restore(foreground); } catch { /* Navigation may have released the native player. */ }
+    if (alive.current) { setPosition(saved.resume.positionSeconds); setPlaying(snapshot.current.playing); flush(snapshot.current); }
+    if (foreground || !alive.current || !saved.resume.playing) adResume.current = null;
+  }
+
+  function finishAd() {
+    if (!adActive.current) return;
+    adRequest.current?.abort(); adRequest.current = null;
+    adSchedule.current?.finish();
+    // Keep content listeners frozen until the exact pre-break state has been restored.
+    restoreAdContent();
+    adActive.current = false;
+    if (alive.current) { setAd(null); setAdBusy(false); }
+  }
+  finishAdRef.current = finishAd;
+
+  async function beginAd() {
+    const policy = policyRef.current;
+    if (adActive.current || replacing.current || !advertisingConsent.current || !validNativeAdPolicy(policy)
+      || !player.playing || player.status !== 'readyToPlay' || AppState.currentState !== 'active') {
+      adSchedule.current?.finish(); return;
+    }
+    const saved = observe();
+    adActive.current = true;
+    setAdBusy(true); setSettings(false); lastTap.current = null;
+    const controller = new AbortController(); adRequest.current = controller;
+    try {
+      const resume = createNativeAdResume(player);
+      adResume.current = { snapshot: { ...saved, positionSeconds: resume.positionSeconds, playing: resume.playing }, resume };
+      snapshot.current = adResume.current.snapshot;
+      const creative = await fetchVastCreative(true, controller.signal);
+      if (!alive.current || controller.signal.aborted || adRequest.current !== controller) return;
+      if (!creative || !advertisingConsent.current || AppState.currentState !== 'active') { finishAdRef.current(); return; }
+      setAd({ creative, policy, volume: player.volume, muted: player.muted });
+    } catch { if (adRequest.current === controller) finishAdRef.current(); }
+  }
+
+  function chooseAdConsent(allowed: boolean) {
+    consentVersion.current += 1;
+    advertisingConsent.current = allowed;
+    setAdConsent(allowed);
+    adSchedule.current?.resetObservation();
+    if (!allowed) finishAdRef.current();
+    consentWrites.current = consentWrites.current.catch(() => {}).then(() => AsyncStorage.setItem(AD_CONSENT_KEY, String(allowed)))
+      .catch(() => { if (alive.current) setNotice('Advertising choice applies for this playback; privacy storage is unavailable.'); });
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    const version = consentVersion.current;
+    void AsyncStorage.getItem(AD_CONSENT_KEY).then((stored) => {
+      if (cancelled || version !== consentVersion.current) return;
+      advertisingConsent.current = stored === 'true'; setAdConsent(stored === 'true');
+      adSchedule.current?.resetObservation();
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    finishAdRef.current();
+    adSchedule.current = validNativeAdPolicy(adPolicy) ? createNativeAdSchedule(adPolicy) : null;
+  }, [adPolicy?.enabled, adPolicy?.firstBreakSeconds, adPolicy?.intervalSeconds, adPolicy?.maxBreaks, adPolicy?.allowSkip, adPolicy?.skipAfterSeconds]);
 
   function applyTracks() {
     const prefs = desired.current;
@@ -121,23 +224,29 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
     alive.current = true;
     const subscriptions = [
       player.addListener('timeUpdate', ({ currentTime }) => {
-        if (replacing.current || !Number.isFinite(currentTime) || currentTime < 0) return;
+        if (replacing.current || adActive.current || !Number.isFinite(currentTime) || currentTime < 0) return;
+        if (introSeekTarget.current !== null && currentTime >= introSeekTarget.current) resetIntroSeek();
         snapshot.current = { positionSeconds: currentTime, playing: player.playing,
           ...(player.duration > 0 ? { durationSeconds: player.duration } : {}) };
         setPosition(currentTime);
         if (Date.now() - lastFlush.current >= 5000) flush();
+        if (advertisingConsent.current && adSchedule.current?.sample({ positionSeconds: currentTime, nowMs: Date.now(),
+          playing: player.playing, ready: player.status === 'readyToPlay', foreground: AppState.currentState === 'active', playbackRate: player.playbackRate })) void beginAd();
       }),
       player.addListener('playingChange', ({ isPlaying }) => {
-        if (replacing.current) return;
+        adSchedule.current?.resetObservation();
+        if (replacing.current || adActive.current) return;
         setPlaying(isPlaying);
         snapshot.current.playing = isPlaying;
         if (!isPlaying) flush();
       }),
       player.addListener('statusChange', ({ status }) => {
+        adSchedule.current?.resetObservation();
         setLoading(status === 'loading' || status === 'idle');
         if (status === 'error') callbacks.current.onError();
       }),
       player.addListener('sourceLoad', (event) => {
+        adSchedule.current?.resetObservation();
         const loadedUrl = typeof event.videoSource === 'object' && event.videoSource ? event.videoSource.uri : event.videoSource;
         if (pending.current && loadedUrl && loadedUrl !== pending.current.url) return;
         setDuration(event.duration);
@@ -167,11 +276,16 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
       player.addListener('playToEnd', () => flush()),
     ];
     const app = AppState.addEventListener('change', (state) => {
-      if (state !== 'active') { flush(); player.pause(); snapshot.current.playing = false; flush(snapshot.current); }
+      adSchedule.current?.resetObservation();
+      if (state !== 'active') { finishAdRef.current(); flush(); player.pause(); snapshot.current.playing = false; flush(snapshot.current); }
+      else if (adResume.current) restoreAdContent();
     });
     return () => {
       flush();
       alive.current = false;
+      resetIntroSeek();
+      finishAdRef.current();
+      adResume.current = null;
       generation.current += 1;
       subscriptions.forEach((s) => s.remove());
       app.remove();
@@ -209,6 +323,9 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
   const quality = stream?.qualities.find((q) => qualityKey(q) === preferences.quality);
   const url = renditionUrl(stream?.url ?? source.url, preferences.quality === 'auto' ? undefined : quality);
   useEffect(() => {
+    resetIntroSeek();
+    finishAdRef.current(); adResume.current = null;
+    adSchedule.current?.resetObservation();
     const id = ++generation.current;
     const saved = observe();
     flush(snapshot.current);
@@ -245,15 +362,31 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
   }, [sidecar?.url]);
 
   function seek(next: number) {
-    if (replacing.current) return;
-    const target = Math.max(0, Math.min(duration > 0 ? duration : Infinity, next));
+    if (replacing.current || adActive.current || !Number.isFinite(next)) return false;
+    if (introSeekTarget.current !== null && next !== introSeekTarget.current) resetIntroSeek();
+    adSchedule.current?.resetObservation();
+    const target = Math.max(0, Math.min(player.duration > 0 ? player.duration : Infinity, next));
     player.currentTime = target;
     snapshot.current = { ...snapshot.current, positionSeconds: target };
     setPosition(target);
     flush(snapshot.current);
+    return true;
+  }
+
+  function skipIntro() {
+    const marker = introRef.current;
+    try {
+      if (!alive.current || !observed.current || !canSkipIntro(marker, player.currentTime, player.duration,
+        replacing.current || adActive.current || introSeekTarget.current !== null || player.status !== 'readyToPlay')) return;
+      // Lock synchronously: repeated taps can arrive before React removes the button or native seek completes.
+      introSeekTarget.current = marker.endSeconds;
+      setIntroSeeking(true);
+      if (!seek(marker.endSeconds)) resetIntroSeek();
+    } catch { resetIntroSeek(); }
   }
 
   function change(field: keyof Preferences, value: string) {
+    if (adActive.current) return;
     const next = { ...preferences, [field]: value };
     const chosen = chooseStream(streams, next, field, stream?.id);
     setPreferences(chosen ? compatiblePreferences(chosen, next) : next);
@@ -261,6 +394,7 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
   }
 
   function touchEnd(event: GestureResponderEvent) {
+    if (adActive.current) return;
     const start = touchStart.current;
     const { pageX: x, pageY: y, locationX } = event.nativeEvent;
     touchStart.current = null;
@@ -290,19 +424,32 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
   for (const t of subtitleTracks) subtitles.set(trackKey(t), t.label || t.language);
   for (const t of sidecars) subtitles.set(`sidecar:${t.id}`, t.label);
   const text = subtitleText(cues, position, offset);
+  const presentationBottom = chrome ? controlsHeight + 12 : insets.bottom + 28;
+  const hasIntroRoom = height - presentationBottom - (text ? captionHeight + 12 : 0) - 44
+    >= (chrome ? headerHeight : insets.top + 56) + 12;
+  let introVisible = false;
+  if (alive.current && observed.current && hasIntroRoom && !settings) {
+    try {
+      introVisible = canSkipIntro(intro, player.currentTime, player.duration,
+        source.kind === 'embed' || replacing.current || loading || adBusy || adActive.current || introSeeking || player.status !== 'readyToPlay');
+    } catch { /* Released/unfinished players cannot prove a safe intro target. */ }
+  }
 
   return <View style={styles.root}>
-    <AdController player={player} policy={adPolicy} />
     <StatusBar hidden={fullscreen} style="light" />
     <VideoView player={player} style={StyleSheet.absoluteFill} contentFit="contain" nativeControls={false}
       fullscreenOptions={{ enable: false }} surfaceType="textureView" />
     <View style={StyleSheet.absoluteFill} onTouchStart={(e) => { touchStart.current = { x: e.nativeEvent.pageX, y: e.nativeEvent.pageY }; }}
       onTouchEnd={touchEnd} onTouchCancel={() => { touchStart.current = null; lastTap.current = null; }} />
-    {text ? <View pointerEvents="none" style={[styles.subtitles, { bottom: chrome ? controlsHeight + 12 : insets.bottom + 28 }]}>
-      <Text style={styles.subtitleText}>{text}</Text>
+    {(introVisible || text) && !adBusy ? <View pointerEvents="box-none" style={[styles.presentation, { bottom: presentationBottom,
+      left: Math.max(insets.left + 16, width * 0.05), right: Math.max(insets.right + 16, width * 0.05) }]}>
+      {introVisible ? <View style={styles.introAction}><Action label="Skip intro" onPress={skipIntro} /></View> : null}
+      {text ? <View pointerEvents="none" onLayout={(event) => setCaptionHeight(event.nativeEvent.layout.height)} style={styles.subtitles}>
+        <Text style={styles.subtitleText}>{text}</Text>
+      </View> : null}
     </View> : null}
     {loading ? <Text pointerEvents="none" style={styles.loading}>Buffering...</Text> : null}
-    {chrome ? <View pointerEvents="box-none" style={[styles.header, { paddingTop: insets.top + 12 }]}>{header}
+    {chrome ? <View pointerEvents="box-none" onLayout={(event) => setHeaderHeight(event.nativeEvent.layout.height)} style={[styles.header, { paddingTop: insets.top + 12 }]}>{header}
       {upNext && duration > 0 && position >= duration * 0.9 && duration - position <= 90 ? <Action label={upNext.label} onPress={upNext.onPress} /> : null}
     </View> : null}
     {!chrome ? <View style={[styles.reveal, { top: insets.top + 12 }]}><Action label="Show controls" onPress={() => setChrome(true)} /></View> : null}
@@ -326,13 +473,17 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
         <Action label="Reset subtitle timing" disabled={!sidecar} onPress={() => setOffset(0)} /></View>
       <Text style={styles.label}>Speed</Text>
       <View style={styles.row}>{[0.5, 0.75, 1, 1.25, 1.5, 2].map((speed) => <Action key={speed} label={`${speed}x`} selected={rate === speed}
-        onPress={() => { player.playbackRate = speed; setRate(speed); }} />)}</View>
+        onPress={() => { adSchedule.current?.resetObservation(); player.playbackRate = speed; setRate(speed); }} />)}</View>
+      <Text style={styles.label}>Advertising privacy</Text>
+      <Text style={styles.detail}>Video advertising is off unless you opt in here. VAST beacon delivery is disabled on Android. This choice is separate from permission to load a streaming source.</Text>
+      <View style={styles.row}><Action label="Allow video advertising" selected={adConsent} onPress={() => chooseAdConsent(true)} />
+        <Action label="Decline video advertising" selected={!adConsent} onPress={() => chooseAdConsent(false)} /></View>
       <Text style={styles.detail}>Google Cast is unsupported in this build. No native Cast module is installed.</Text>
     </ScrollView> : null}
     {chrome ? <View onLayout={(event) => setControlsHeight(event.nativeEvent.layout.height)} style={[styles.controls, { paddingBottom: insets.bottom + 12 }]}>
       {!!notice && <Text accessibilityLiveRegion="polite" style={styles.detail}>{notice}</Text>}
       <Text style={styles.detail}>{timeLabel(position)} / {duration > 0 ? timeLabel(duration) : '--:--'}</Text>
-      <Pressable accessibilityRole="adjustable" accessibilityLabel="Playback position" disabled={duration <= 0 || loading}
+      <Pressable accessibilityRole="adjustable" accessibilityLabel="Playback position" disabled={duration <= 0 || loading || adBusy}
         accessibilityValue={{ min: 0, max: Math.round(duration), now: Math.round(position), text: timeLabel(position) }}
         accessibilityActions={[{ name: 'increment', label: 'Forward 10 seconds' }, { name: 'decrement', label: 'Back 10 seconds' }]}
         onAccessibilityAction={(e) => seek(position + (e.nativeEvent.actionName === 'increment' ? 10 : -10))}
@@ -340,14 +491,16 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, adPo
         <View style={[styles.progress, { width: `${duration > 0 ? Math.min(100, position / duration * 100) : 0}%` }]} />
       </Pressable>
       <View style={styles.row}>
-        <Action label="Back 10 seconds" disabled={loading} onPress={() => seek(observe().positionSeconds - 10)} />
-        <Action label={playing ? 'Pause' : 'Play'} disabled={loading} onPress={() => { if (player.playing) { const paused = observe(); player.pause(); snapshot.current = { ...paused, playing: false }; flush(snapshot.current); } else player.play(); }} />
-        <Action label="Forward 10 seconds" disabled={loading} onPress={() => seek(observe().positionSeconds + 10)} />
+        <Action label="Back 10 seconds" disabled={loading || adBusy} onPress={() => seek(observe().positionSeconds - 10)} />
+        <Action label={playing ? 'Pause' : 'Play'} disabled={loading || adBusy} onPress={() => { if (adActive.current) return; if (player.playing) { const paused = observe(); player.pause(); snapshot.current = { ...paused, playing: false }; flush(snapshot.current); } else player.play(); }} />
+        <Action label="Forward 10 seconds" disabled={loading || adBusy} onPress={() => seek(observe().positionSeconds + 10)} />
         <Action label="Settings" selected={settings} onPress={() => setSettings((value) => !value)} />
         <Action label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'} onPress={() => setFullscreen((value) => !value)} />
       </View>
       {footer}
     </View> : null}
+    {adBusy && !ad ? <View style={styles.adLoading} accessibilityLabel="Loading advertisement"><Text style={styles.detail}>Loading advertisement...</Text></View> : null}
+    {ad ? <NativeVastAd creative={ad.creative} policy={ad.policy} volume={ad.volume} muted={ad.muted} onDone={() => finishAdRef.current()} /> : null}
   </View>;
 }
 
@@ -366,7 +519,10 @@ const styles = StyleSheet.create({
   scrubber: { height: 44, justifyContent: 'center', backgroundColor: '#363740', borderRadius: 8, overflow: 'hidden' },
   progress: { height: 6, backgroundColor: colors.primary },
   loading: { position: 'absolute', top: '42%', alignSelf: 'center', color: '#fff', backgroundColor: '#111', padding: 12 },
-  subtitles: { position: 'absolute', left: '5%', right: '5%', alignItems: 'center' },
+  presentation: { position: 'absolute', alignItems: 'center', gap: 12 },
+  introAction: { alignSelf: 'flex-end' },
+  subtitles: { alignItems: 'center', maxWidth: '100%' },
   subtitleText: { color: '#fff', backgroundColor: 'rgba(0,0,0,0.8)', fontSize: 20, textAlign: 'center', padding: 8 },
   reveal: { position: 'absolute', right: 16 },
+  adLoading: { position: 'absolute', top: 0, bottom: 0, left: 0, right: 0, zIndex: 30, backgroundColor: '#06070a', justifyContent: 'center', alignItems: 'center' },
 });

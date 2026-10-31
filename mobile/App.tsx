@@ -1,4 +1,4 @@
-import { NavigationContainer, DarkTheme, type Theme } from '@react-navigation/native';
+import { NavigationContainer, DarkTheme, useNavigationContainerRef, type Theme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -17,6 +17,7 @@ import TitleScreen from './src/screens/TitleScreen';
 import PlayerScreen from './src/screens/PlayerScreen';
 import PersonScreen from './src/screens/PersonScreen';
 import AuthScreen from './src/screens/AuthScreen';
+import { AdMobProvider, useAdMob } from './src/ads/AdMobProvider';
 
 /**
  * Lumora native app shell.
@@ -42,9 +43,9 @@ const navTheme: Theme = {
 };
 
 /** Simple glyph tabs (no icon dependency needed). */
-const tabIcon = (glyph: string) => ({ color }: { color: string }) => (
+const tabIcon = (glyph: string) => function TabIcon({ color }: { color: string }) { return (
   <Text style={{ color, fontSize: 18 }}>{glyph}</Text>
-);
+); };
 
 function MainTabs() {
   return (
@@ -64,7 +65,19 @@ function MainTabs() {
   );
 }
 
-export default function App() {
+function AppNavigation() {
+  const navigationRef = useNavigationContainerRef<RootStackParamList>();
+  const ads = useAdMob();
+  function syncNavigation() {
+    if (!navigationRef.isReady()) return;
+    const state = navigationRef.getRootState();
+    if (!state) return;
+    const root = state.routes[state.index];
+    if (!root) return;
+    const tabState = root.state;
+    ads.navigation({ root: root.name, key: root.key,
+      ...(root.name === 'Tabs' ? { tab: tabState?.routes[tabState.index ?? 0]?.name ?? 'Home' } : {}) });
+  }
   const [reduceMotion, setReduceMotion] = useState(true);
   useEffect(() => {
     void AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
@@ -80,8 +93,11 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
-      <NavigationContainer theme={navTheme}>
+      <NavigationContainer ref={navigationRef} theme={navTheme} onReady={syncNavigation} onStateChange={syncNavigation}>
         <Stack.Navigator
+          screenListeners={({ route }) => ({ blur: () => ads.blur(route.key), transitionEnd: ({ data }) => {
+            if (route.name === 'Title' && data.closing) requestAnimationFrame(() => ads.browsingComplete());
+          } })}
           screenOptions={{
             headerStyle: { backgroundColor: colors.base },
             headerTintColor: colors.content,
@@ -98,4 +114,8 @@ export default function App() {
       </NavigationContainer>
     </SafeAreaProvider>
   );
+}
+
+export default function App() {
+  return <AdMobProvider><AppNavigation /></AdMobProvider>;
 }

@@ -2,8 +2,10 @@ import { supabase } from './supabase';
 import type {
   CastMember,
   HomeData,
+  IntroMarker,
   ContinueEntry,
   MediaRow,
+  NativeVastCreative,
   Person,
   PlaybackRequest,
   PlaybackSource,
@@ -343,7 +345,8 @@ export async function resolvePlaybackDetails(request: PlaybackRequest): Promise<
     return { ...json, sources: Array.isArray(json.sources) ? json.sources.map((s) => ({ ...s,
       url: s.url.startsWith('/') ? new URL(s.url, WEB_URL).href : s.url,
       ...(s.streamCatalogUrl ? { streamCatalogUrl: sameOriginPlaybackUrl(s.streamCatalogUrl) ?? undefined } : {}),
-    })) : [], subtitleCatalogUrl: json.subtitleCatalogUrl ? sameOriginPlaybackUrl(json.subtitleCatalogUrl) ?? undefined : undefined };
+    })) : [], subtitleCatalogUrl: json.subtitleCatalogUrl ? sameOriginPlaybackUrl(json.subtitleCatalogUrl) ?? undefined : undefined,
+    introCatalogUrl: typeof json.introCatalogUrl === 'string' ? sameOriginPlaybackUrl(json.introCatalogUrl) ?? undefined : undefined };
   } catch {
     return { sources: [] };
   }
@@ -369,6 +372,94 @@ export async function fetchSubtitleCatalog(url: string, signal?: AbortSignal): P
   const json = await response.json() as { tracks?: Subtitle[] };
   return (json.tracks ?? []).filter((t) => !!t.url && !!sameOriginPlaybackUrl(t.url))
     .map((t) => ({ ...t, url: sameOriginPlaybackUrl(t.url!)! }));
+}
+
+/** Optional public metadata must never stall or fail content playback. */
+export async function fetchIntroCatalog(url: string, signal?: AbortSignal): Promise<IntroMarker | null> {
+  const safe = sameOriginPlaybackUrl(url);
+  if (!safe || signal?.aborted) return null;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  let onAbort: (() => void) | undefined;
+  const timeout = setTimeout(abort, 5000);
+  try {
+    return await Promise.race([
+      (async () => {
+        const response = await fetch(safe, { signal: controller.signal, credentials: 'omit', redirect: 'error' });
+        if (!response.ok || controller.signal.aborted || (response.url && !sameOriginPlaybackUrl(response.url))) return null;
+        const body = await response.json() as { intro?: IntroMarker } | null;
+        const intro = body?.intro;
+        if (controller.signal.aborted || !intro || typeof intro !== 'object' || Array.isArray(intro)
+          || !Number.isFinite(intro.startSeconds) || !Number.isFinite(intro.endSeconds)
+          || intro.startSeconds < 0 || intro.startSeconds >= intro.endSeconds) return null;
+        return { startSeconds: intro.startSeconds, endSeconds: intro.endSeconds };
+      })(),
+      new Promise<null>((resolve) => {
+        onAbort = () => resolve(null);
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        if (controller.signal.aborted) resolve(null);
+      }),
+    ]);
+  } catch { return null; } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+    if (onAbort) controller.signal.removeEventListener('abort', onAbort);
+  }
+}
+
+/** Only normalized creatives are public; tags and provider credentials remain server-side. */
+export async function fetchVastCreative(consent: boolean, signal?: AbortSignal): Promise<NativeVastCreative | null> {
+  if (consent !== true || signal?.aborted) return null;
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal?.addEventListener('abort', abort, { once: true });
+  let onAbort: (() => void) | undefined;
+  const timeout = setTimeout(abort, 10_000);
+  try {
+    // The deadline also covers a stalled session lookup, not just the HTTP request.
+    return await Promise.race([
+      (async () => {
+        const { data, error } = await supabase.auth.getSession();
+        if (error || controller.signal.aborted) return null;
+        const response = await fetch(`${WEB_URL}/api/vast?consent=1`, { signal: controller.signal,
+          headers: data.session?.access_token ? { Authorization: `Bearer ${data.session.access_token}` } : {},
+          credentials: 'omit', redirect: 'error' });
+        if (!response.ok || response.status === 204 || controller.signal.aborted) return null;
+        const body = await response.json() as { creative?: NativeVastCreative };
+        const creative = body?.creative;
+        const https = (value: unknown) => {
+          if (typeof value !== 'string' || value.length > 4096) return false;
+          try { const url = new URL(value); return url.protocol === 'https:' && !url.username && !url.password
+            && !url.hash && (!url.port || url.port === '443'); } catch { return false; }
+        };
+        if (controller.signal.aborted || !creative || typeof creative.id !== 'string' || !creative.id || creative.id.length > 256
+          || !https(creative.mediaUrl) || !Number.isFinite(creative.durationSeconds) || creative.durationSeconds <= 0 || creative.durationSeconds > 600
+          || (creative.skipAfterSeconds !== null && (!Number.isFinite(creative.skipAfterSeconds)
+            || creative.skipAfterSeconds < 0 || creative.skipAfterSeconds > creative.durationSeconds))
+          || !creative.tracking || typeof creative.tracking !== 'object' || Array.isArray(creative.tracking)) return null;
+        const tracking: NativeVastCreative['tracking'] = {};
+        const events = ['impression', 'start', 'firstQuartile', 'midpoint', 'thirdQuartile', 'complete', 'skip', 'error'] as const;
+        for (const event of events) {
+          const values = creative.tracking[event];
+          if (Array.isArray(values)) tracking[event] = [...new Set(values.filter(https))].slice(0, 20);
+        }
+        return { id: creative.id, mediaUrl: creative.mediaUrl, durationSeconds: creative.durationSeconds,
+          skipAfterSeconds: creative.skipAfterSeconds, tracking,
+          ...(https(creative.clickThrough) ? { clickThrough: creative.clickThrough } : {}),
+          ...(Array.isArray(creative.clickTracking) ? { clickTracking: [...new Set(creative.clickTracking.filter(https))].slice(0, 20) } : {}) };
+      })(),
+      new Promise<null>((resolve) => {
+        onAbort = () => resolve(null);
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+        if (controller.signal.aborted) resolve(null);
+      }),
+    ]);
+  } catch { return null; } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener('abort', abort);
+    if (onAbort) controller.signal.removeEventListener('abort', onAbort);
+  }
 }
 
 export async function getPlaybackContext(titleId: string, type: TitleType, episodeId?: string, season?: number, episode?: number) {

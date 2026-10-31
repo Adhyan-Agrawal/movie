@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { PlaybackResponse } from '../../mobile/src/lib/types';
 
 const mock = vi.hoisted(() => ({
   getSession: vi.fn(), getUser: vi.fn(), from: vi.fn(), fetch: vi.fn(),
@@ -22,18 +23,38 @@ describe('Android optional playback bridge', () => {
     const source = { id: 'direct', label: 'Direct', kind: 'hls', consentRequired: false, url: '/api/vidnest?stream=auto' };
     mock.fetch.mockResolvedValue(new Response(JSON.stringify({ sources: [source] })));
     expect(await resolvePlayback({ type: 'movie', tmdbId: '123' })).toEqual([{ ...source, url: `${origin}${source.url}` }]);
+    mock.fetch.mockResolvedValue(new Response(JSON.stringify({ sources: [source] })));
+    const details = await resolvePlaybackDetails({ type: 'movie', tmdbId: '123' });
+    expect(details.entitlements).toBeUndefined();
+    expect(details.adPolicy).toBeUndefined();
   });
   it('accepts same-origin catalogs, exposes optional policy and sends bearer only to the bridge', async () => {
     mock.getSession.mockResolvedValue({ data: { session: { access_token: 'fixture-token' } }, error: null });
     const response = { sources: [{ id: 'direct', label: 'Direct', kind: 'hls', consentRequired: false,
       url: '/api/vidnest?stream=auto', streamCatalogUrl: '/api/vidnest?metadata=1' }],
-      subtitleCatalogUrl: '/api/subtitles?tmdbId=123&type=movie', adPolicy: { enabled: false }, entitlement: { resolved: false } };
+      subtitleCatalogUrl: '/api/subtitles?tmdbId=123&type=movie',
+      adPolicy: { enabled: false, firstBreakSeconds: 900, intervalSeconds: 900, maxBreaks: 3, allowSkip: true, skipAfterSeconds: 5 },
+      entitlements: { resolved: true, adFree: true, maxProfiles: 4, status: 'active', planId: 'plan-fixture',
+        planName: 'Premium', accessUntil: '2027-01-01T00:00:00Z' } } satisfies PlaybackResponse;
     mock.fetch.mockResolvedValue(new Response(JSON.stringify(response)));
     const result = await resolvePlaybackDetails({ type: 'movie', tmdbId: '123' });
     expect(result.sources[0]?.streamCatalogUrl).toBe(`${origin}/api/vidnest?metadata=1`);
     expect(result.subtitleCatalogUrl).toBe(`${origin}/api/subtitles?tmdbId=123&type=movie`);
-    expect(result.adPolicy).toEqual({ enabled: false });
+    expect(result.adPolicy).toEqual(response.adPolicy);
+    expect(result.entitlements).toEqual(response.entitlements);
+    expect(result).not.toHaveProperty('entitlement');
     expect(mock.fetch.mock.calls[0]?.[1]).toEqual({ headers: { Authorization: 'Bearer fixture-token' } });
+  });
+  it('preserves unresolved commerce without manufacturing an active or ad-free entitlement', async () => {
+    const response = { sources: [], entitlements: { resolved: false, adFree: false, maxProfiles: 1, status: 'unavailable' },
+      adPolicy: { enabled: false, firstBreakSeconds: 900, intervalSeconds: 900, maxBreaks: 3, allowSkip: true, skipAfterSeconds: 5 } } satisfies PlaybackResponse;
+    mock.fetch.mockResolvedValue(new Response(JSON.stringify(response)));
+    const result = await resolvePlaybackDetails({ type: 'tv', tmdbId: '123', season: 2, episode: 3 });
+    expect(result.entitlements).toEqual(response.entitlements);
+    expect(result.adPolicy?.enabled).toBe(false);
+    const url = new URL(mock.fetch.mock.calls[0]![0]);
+    expect(url.searchParams.get('season')).toBe('2');
+    expect(url.searchParams.get('episode')).toBe('3');
   });
   it('rejects external/credentialed catalogs and sidecars', async () => {
     expect(sameOriginPlaybackUrl('https://evil.test/api/vidnest?token=x')).toBeNull();

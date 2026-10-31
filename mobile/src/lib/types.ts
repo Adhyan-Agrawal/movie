@@ -68,6 +68,7 @@ export interface MediaRow {
   reason?: string;
   titles: Title[];
   href?: string;
+  collectionId?: string;
   filters?: TitleFilters;
 }
 
@@ -135,19 +136,44 @@ export interface StreamCatalog {
 export interface PlaybackResponse {
   sources: PlaybackSource[];
   subtitleCatalogUrl?: string;
+  introCatalogUrl?: string;
   adPolicy?: NativeAdPolicy;
-  entitlements?: { resolved: boolean; adFree: boolean; status: string; maxProfiles: number };
-  entitlement?: Record<string, unknown>;
+  entitlements?: ViewerEntitlements;
+}
+
+export interface IntroMarker {
+  startSeconds: number;
+  endSeconds: number;
+}
+
+/** Mirrors the public commerce DTO; missing entitlements never imply ad eligibility. */
+export interface ViewerEntitlements {
+  resolved: boolean;
+  adFree: boolean;
+  maxProfiles: number;
+  status: 'free' | 'active' | 'expired' | 'unavailable';
+  planId?: string;
+  planName?: string;
+  accessUntil?: string;
 }
 
 export interface NativeAdPolicy {
-  enabled: boolean; firstBreakSeconds: number; intervalSeconds: number; maxBreaks: number;
-  allowSkip: boolean; skipAfterSeconds: number;
+  enabled: boolean;
+  firstBreakSeconds: number;
+  intervalSeconds: number;
+  maxBreaks: number;
+  allowSkip: boolean;
+  skipAfterSeconds: number;
 }
 
+export type NativeVastTrackingEvent = 'impression' | 'start' | 'firstQuartile' | 'midpoint' | 'thirdQuartile' | 'complete' | 'skip' | 'error';
+
 export interface NativeVastCreative {
-  id: string; mediaUrl: string; durationSeconds: number; skipAfterSeconds: number | null;
-  tracking: Partial<Record<'impression' | 'start' | 'firstQuartile' | 'midpoint' | 'thirdQuartile' | 'complete' | 'skip' | 'error', string[]>>;
+  id: string;
+  mediaUrl: string;
+  durationSeconds: number;
+  skipAfterSeconds: number | null;
+  tracking: Partial<Record<NativeVastTrackingEvent, string[]>>;
   clickThrough?: string;
   clickTracking?: string[];
 }

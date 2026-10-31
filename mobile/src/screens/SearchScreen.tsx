@@ -102,7 +102,7 @@ export default function SearchScreen() {
     const id = ++searchRequest.current;
     setState('searching');
     try {
-      const [foundTitles, foundPeople] = await Promise.all([searchTitles(q), searchPeople(q)]);
+      const [foundTitles, foundPeople] = await Promise.all([searchTitles(q), searchPeople(q).catch(() => [])]);
       if (id !== searchRequest.current) return; // a newer query already won
       setTitles(foundTitles);
       setPeople(foundPeople);
