@@ -15,11 +15,13 @@ import { createVastSchedule } from '@/features/ads/vast/scheduler';
 import { VastAdBreak, type VastBreakResult } from '@/features/ads/vast/VastAdBreak';
 import type { VastCreative } from '@/features/ads/vast/types';
 import { requestCasting, type CastingHandle, type CastingProgress } from './casting';
+import type { IntroMarker } from './intro-markers';
 import { aggregateStreamOptions, chooseStream, preferencesForStream, qualityKey, trackKey, type StreamPreferences, type StreamOption } from './stream-options';
 
 export interface NativePlayerProps {
   source: { url: string; kind: 'mp4' | 'hls' | 'dash'; streamCatalogUrl?: string };
   subtitleCatalogUrl?: string;
+  introCatalogUrl?: string;
   upNext?: { name: string; href: string; posterUrl?: string };
   adPolicy?: PlaybackAdPolicy;
   titleId: string;
@@ -60,6 +62,21 @@ interface PendingPosition { position: number; playing: boolean; rate: number }
 const REPORT_INTERVAL_MS = 5000;
 const INITIAL_PREFERENCES: StreamPreferences = { quality: 'auto', audio: '', subtitle: 'off' };
 const CONTROL_TARGETS = 'button, select, input, textarea, a, [role="button"], [role="slider"], .vjs-control-bar, .vjs-modal-dialog, [data-player-ui]';
+
+function validIntro(value: unknown): value is IntroMarker {
+  if (!value || typeof value !== 'object') return false;
+  const marker = value as IntroMarker;
+  return typeof marker.startSeconds === 'number' && typeof marker.endSeconds === 'number'
+    && Number.isFinite(marker.startSeconds) && Number.isFinite(marker.endSeconds)
+    && marker.startSeconds >= 0 && marker.startSeconds < marker.endSeconds;
+}
+
+function introTarget(marker: IntroMarker | null, position: number | undefined, duration: number | undefined): number | null {
+  return validIntro(marker) && typeof position === 'number' && Number.isFinite(position)
+    && typeof duration === 'number' && Number.isFinite(duration) && duration > 0
+    && marker.endSeconds <= duration && position >= marker.startSeconds && position < marker.endSeconds
+    ? marker.endSeconds : null;
+}
 
 function entries<T>(list: EventList<T>): T[] {
   const result: T[] = [];
@@ -120,8 +137,36 @@ export function NativePlayer(props: NativePlayerProps) {
   const [adBreak, setAdBreak] = useState<{ creative: VastCreative; policy: PlaybackAdPolicy; volume: number; muted: boolean } | null>(null);
   const [adLoading, setAdLoading] = useState(false);
   const adDoneRef = useRef<(result: VastBreakResult) => void>(() => {});
+  const [introCatalog, setIntroCatalog] = useState<{ url?: string; marker: IntroMarker | null }>({ marker: null });
+  const introRef = useRef<IntroMarker | null>(null);
+  introRef.current = introCatalog.url === props.introCatalogUrl ? introCatalog.marker : null;
+  const refreshIntroRef = useRef<() => void>(() => {});
+  const skipIntroRef = useRef<() => void>(() => {});
+  const [introVisible, setIntroVisible] = useState(false);
+  const [introPending, setIntroPending] = useState(false);
+  const [introNotice, setIntroNotice] = useState<string | null>(null);
+  const skipIntroButtonRef = useRef<HTMLButtonElement | null>(null);
   const hasCoordinates = seasonNumber !== undefined && episodeNumber !== undefined;
   const mediaKey = playbackMediaKey(titleId, hasCoordinates ? undefined : episodeId, seasonNumber, episodeNumber);
+
+  useEffect(() => {
+    const url = props.introCatalogUrl;
+    const controller = new AbortController();
+    let active = true;
+    setIntroCatalog({ url, marker: null });
+    if (url) {
+      void fetch(url, { signal: controller.signal, credentials: 'same-origin', cache: 'no-store' })
+        .then(async (response): Promise<unknown> => response.ok ? response.json() : null)
+        .then((body) => {
+          if (!active || controller.signal.aborted || latestProps.current.introCatalogUrl !== url) return;
+          const marker = body && typeof body === 'object' && 'intro' in body ? body.intro : null;
+          setIntroCatalog({ url, marker: validIntro(marker) ? { startSeconds: marker.startSeconds, endSeconds: marker.endSeconds } : null });
+        }).catch(() => { /* Missing or unavailable markers never interrupt playback. */ });
+    }
+    return () => { active = false; controller.abort(); };
+  }, [props.introCatalogUrl]);
+
+  useEffect(() => { refreshIntroRef.current(); }, [introCatalog, props.introCatalogUrl]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -177,6 +222,10 @@ export function NativePlayer(props: NativePlayerProps) {
     let fatalReported = false;
     let switchTimer: ReturnType<typeof setTimeout> | undefined;
     let castHandle: CastingHandle | null = null;
+    let castConnecting = false;
+    let contentLoading = true;
+    let introCommand: symbol | null = null;
+    let introCommandTimer: ReturnType<typeof setTimeout> | undefined;
     let lastRemote: CastingProgress | null = null;
     let lastCastReportAt = 0;
     let adActive = false;
@@ -189,6 +238,7 @@ export function NativePlayer(props: NativePlayerProps) {
     setProgress({ position: resumePosition, duration: local?.durationSeconds ?? 0 });
     setSwitching(false); setSeekFeedback(null); setSelectionNotice(null); setFastestAvailable(false); setCastStatus({ state: 'idle' }); setRemoteProgress(null); setAdBreak(null); setAdLoading(false);
     setCatalogStatus(source.streamCatalogUrl ? 'loading' : 'ready');
+    setIntroVisible(false); setIntroPending(false); setIntroNotice(null);
 
     // React owns only this container. Video.js owns its imperative element, including fullscreen.
     const videoElement = document.createElement('video-js');
@@ -242,6 +292,29 @@ export function NativePlayer(props: NativePlayerProps) {
       let queuedReport: { positionSeconds: number; durationSeconds?: number; checkpoint: PlaybackCheckpoint | null } | null = null;
       let refreshQueued = false;
       let suppressClicksUntil = 0;
+
+      const currentIntroTarget = () => {
+        if (cancelled || videoPlayer.isDisposed() || !sourceReady || !resumed || pendingPosition || adActive || castConnecting
+          || (!castHandle && (contentLoading || videoPlayer.readyState() < 2 || videoPlayer.seeking())) || videoPlayer.error()) return null;
+        return castHandle
+          ? introTarget(introRef.current, lastRemote?.positionSeconds, lastRemote?.durationSeconds)
+          : introTarget(introRef.current, videoPlayer.currentTime(), videoPlayer.duration());
+      };
+      function refreshIntro() {
+        setIntroVisible(currentIntroTarget() !== null);
+      }
+      const cancelIntroCommand = () => {
+        const returnFocus = document.activeElement === skipIntroButtonRef.current;
+        introCommand = null;
+        clearTimeout(introCommandTimer); introCommandTimer = undefined;
+        if (!cancelled) setIntroPending(false);
+        if (returnFocus && !videoPlayer.isDisposed()) {
+          const playerElement = videoPlayer.el() as HTMLElement;
+          playerElement.setAttribute('tabindex', '-1');
+          playerElement.focus({ preventScroll: true });
+        }
+      };
+      refreshIntroRef.current = refreshIntro;
 
       const sendReports = async () => {
         if (reporting || !queuedReport) return;
@@ -424,6 +497,7 @@ export function NativePlayer(props: NativePlayerProps) {
         flush();
         pendingPosition = pendingPosition ?? { position: resumed ? videoPlayer.currentTime() ?? 0 : resumePosition, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
         sourceReady = false;
+        cancelIntroCommand(); refreshIntro();
         clearSidecars();
         currentUrl = stream.url;
         currentCatalogId = stream.id;
@@ -479,6 +553,7 @@ export function NativePlayer(props: NativePlayerProps) {
         lastRemote = remote;
         setRemoteProgress(remote);
         setProgress({ position: remote.positionSeconds, duration: remote.durationSeconds ?? 0 });
+        refreshIntro();
         const now = Date.now();
         if (!force && now - lastCastReportAt < 5_000) return;
         lastCastReportAt = now;
@@ -501,14 +576,19 @@ export function NativePlayer(props: NativePlayerProps) {
       };
       const disconnectCast = (stop: boolean) => {
         if (lastRemote) saveRemote(lastRemote, true);
+        if (introCommand && !stop) setIntroNotice('Casting ended before the intro could be skipped.');
         const handle = castHandle;
         castHandle = null;
+        castConnecting = false;
+        cancelIntroCommand();
         if (stop) handle?.stop(); else handle?.dispose();
         restoreLocal();
         setRemoteProgress(null);
         setCastStatus({ state: 'idle' });
+        refreshIntro();
       };
       castActionRef.current = () => {
+        if (castConnecting) return;
         if (castHandle) {
           disconnectCast(true);
           return;
@@ -516,6 +596,8 @@ export function NativePlayer(props: NativePlayerProps) {
         const mediaElement = videoPlayer.el().querySelector('video');
         if (!(mediaElement instanceof HTMLVideoElement)) return;
         const castSource = currentUrl;
+        castConnecting = true;
+        cancelIntroCommand(); refreshIntro();
         setCastStatus({ state: 'connecting', message: 'Choose a device' });
         void requestCasting(mediaElement, {
           url: castSource, contentType: mimeType(source.kind),
@@ -543,20 +625,72 @@ export function NativePlayer(props: NativePlayerProps) {
         }, (remote) => saveRemote(remote), () => disconnectCast(false))
           .then((handle) => {
             if (cancelled || videoPlayer.isDisposed()) { handle?.dispose(); return; }
-            if (!handle) { setCastStatus({ state: 'idle', message: 'Device picker opened' }); return; }
+            castConnecting = false;
+            if (!handle) { setCastStatus({ state: 'idle', message: 'Device picker opened' }); refreshIntro(); return; }
             castHandle = handle;
             videoPlayer.pause();
             videoPlayer.controls(false);
             setActivePanel(null);
             setCastStatus({ state: 'connected', message: handle.deviceName });
+            refreshIntro();
           })
-          .catch((error: unknown) => setCastStatus({ state: 'error', message: error instanceof Error ? error.message : 'Casting could not start.' }));
+          .catch((error: unknown) => {
+            castConnecting = false;
+            setCastStatus({ state: 'error', message: error instanceof Error ? error.message : 'Casting could not start.' });
+            if (!cancelled) refreshIntro();
+          });
       };
       castCommandRef.current = (command) => {
         if (!castHandle || !lastRemote) return;
         if (command === 'play') void castHandle.play();
         else if (command === 'pause') void castHandle.pause();
         else void castHandle.seek(Math.max(0, lastRemote.positionSeconds + (command === 'back' ? -10 : 10)));
+      };
+      skipIntroRef.current = () => {
+        const target = currentIntroTarget();
+        if (target === null || introCommand) return;
+        const command = Symbol('skip-intro');
+        introCommand = command;
+        setIntroPending(true); setIntroNotice(null);
+        if (castHandle) {
+          const receiver = castHandle;
+          const commandSource = currentUrl;
+          const commandCatalog = latestProps.current.introCatalogUrl;
+          const marker = introRef.current;
+          const current = () => !cancelled && !videoPlayer.isDisposed() && castHandle === receiver
+            && currentUrl === commandSource && latestProps.current.introCatalogUrl === commandCatalog && introRef.current === marker;
+          const timeout = new Promise<never>((_resolve, reject) => {
+            introCommandTimer = setTimeout(() => reject(new Error('Cast intro seek timed out')), 10_000);
+          });
+          void Promise.race([Promise.resolve().then(() => {
+            if (current() && introCommand === command) return receiver.seek(target);
+          }), timeout])
+            .then(() => {
+              // Cast publishes acknowledged receiver progress before resolving seek(). Never invent a remote position.
+              if (current() && introCommand === command && lastRemote) saveRemote(lastRemote, true);
+            }).catch(() => {
+              if (current()) setIntroNotice('The device could not skip the intro. Try again.');
+            }).finally(() => {
+              if (!cancelled && introCommand === command) { cancelIntroCommand(); refreshIntro(); }
+            });
+          return;
+        }
+        try {
+          adSchedule.update({ contentTimeSeconds: target, paused: videoPlayer.paused(), seeking: true, adPlaying: false });
+          introCommandTimer = setTimeout(() => {
+            if (cancelled || introCommand !== command) return;
+            cancelIntroCommand();
+            setIntroNotice('The intro could not be skipped. Try again.');
+            refreshIntro();
+          }, 10_000);
+          // Seeking preserves pause and playback rate. The existing seeked listener flushes content checkpoints and captions.
+          videoPlayer.currentTime(target);
+          refreshIntro();
+        } catch {
+          cancelIntroCommand();
+          setIntroNotice('The intro could not be skipped. Try again.');
+          refreshIntro();
+        }
       };
       const finishAd = () => {
         if (!adActive || cancelled || videoPlayer.isDisposed()) return;
@@ -570,12 +704,14 @@ export function NativePlayer(props: NativePlayerProps) {
           if (adResume.playing) void videoPlayer.play()?.catch(() => {});
         }
         adResume = null;
+        refreshIntro();
       };
       adDoneRef.current = finishAd;
       const beginAd = () => {
         const policy = latestProps.current.adPolicy;
         if (!policy?.enabled || !readConsent()?.ads || adActive || cancelled || castHandle) { adSchedule.finish(); return; }
         adActive = true;
+        cancelIntroCommand(); refreshIntro();
         flush();
         adResume = { position: videoPlayer.currentTime() ?? 0, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
         videoPlayer.pause(); videoPlayer.controls(false); setActivePanel(null); setAdLoading(true);
@@ -599,6 +735,7 @@ export function NativePlayer(props: NativePlayerProps) {
           lastRenderedSecond = Math.floor(position); lastDuration = duration;
           setProgress({ position, duration });
         }
+        refreshIntro();
       };
       const handleMetadata = () => {
         clearTimeout(switchTimer); switchTimer = undefined;
@@ -639,6 +776,8 @@ export function NativePlayer(props: NativePlayerProps) {
         })) beginAd();
       };
       const handleSeeked = () => {
+        if (!castHandle) cancelIntroCommand();
+        contentLoading = videoPlayer.readyState() < 2;
         adSchedule.update({
           contentTimeSeconds: videoPlayer.currentTime() ?? 0,
           paused: videoPlayer.paused() || document.visibilityState === 'hidden',
@@ -649,6 +788,8 @@ export function NativePlayer(props: NativePlayerProps) {
       };
       const handleHidden = () => { if (document.visibilityState === 'hidden') flush(); };
       const handlePause = () => { if (!cancelled) flush(); };
+      const handleContentLoading = () => { contentLoading = true; refreshIntro(); };
+      const handleContentReady = () => { contentLoading = false; refreshIntro(); };
       const handleSkip = (event: Event) => {
         const target = event.target as Element;
         if (target.closest('.vjs-skip-backward-10')) showSeek('left');
@@ -698,6 +839,9 @@ export function NativePlayer(props: NativePlayerProps) {
       for (const list of [audioList, textList]) for (const event of ['addtrack', 'removetrack', 'change']) list.on(event, scheduleRefresh);
       videoPlayer.on('loadedmetadata', handleMetadata);
       videoPlayer.on('loadeddata', scheduleRefresh);
+      videoPlayer.on(['loadstart', 'waiting', 'emptied'], handleContentLoading);
+      videoPlayer.on(['loadeddata', 'canplay', 'playing'], handleContentReady);
+      videoPlayer.on('seeking', refreshIntro);
       videoPlayer.on('durationchange', updateProgress);
       videoPlayer.on('ratechange', () => setPlaybackRate(videoPlayer.playbackRate() ?? 1));
       videoPlayer.on('fullscreenchange', handleFullscreen);
@@ -720,6 +864,7 @@ export function NativePlayer(props: NativePlayerProps) {
         adRequest?.abort();
         clearTimeout(feedbackTimer);
         clearTimeout(switchTimer);
+        clearTimeout(introCommandTimer);
         for (const event of ['addqualitylevel', 'removequalitylevel', 'change']) qualityList.off(event, scheduleRefresh);
         for (const list of [audioList, textList]) for (const event of ['addtrack', 'removetrack', 'change']) list.off(event, scheduleRefresh);
         document.removeEventListener('visibilitychange', handleHidden);
@@ -793,6 +938,8 @@ export function NativePlayer(props: NativePlayerProps) {
       castActionRef.current = () => {};
       castCommandRef.current = () => {};
       adDoneRef.current = () => {};
+      refreshIntroRef.current = () => {};
+      skipIntroRef.current = () => {};
       if (playerRef.current === player) playerRef.current = null;
       const disposedTarget = player?.el();
       setPortalTarget((current) => current === disposedTarget ? null : current);
@@ -865,6 +1012,8 @@ export function NativePlayer(props: NativePlayerProps) {
         <button type="button" aria-label="Cast forward 10 seconds" onClick={() => castCommandRef.current('forward')}>+10</button>
         <button type="button" aria-label="Stop casting" onClick={() => castActionRef.current()}>Stop</button>
       </div> : null}
+      {introVisible && introRef.current && !switching && !adBreak && !adLoading && castStatus.state !== 'connecting' ? <button ref={skipIntroButtonRef} type="button" data-player-ui="" className={`lumora-player-skip-intro${castStatus.state === 'connected' ? ' is-casting' : ''}`} disabled={introPending} aria-busy={introPending} onClick={() => skipIntroRef.current()}>Skip intro<span aria-hidden="true">&gt;|</span></button> : null}
+      {introNotice ? <div className="lumora-player-intro-notice" data-player-ui="" role="status">{introNotice}</div> : null}
       {upNextVisible && props.upNext ? <a href={props.upNext.href} className="lumora-player-up-next" data-player-ui=""><span className="lumora-player-eyebrow">Up next</span><strong>{props.upNext.name}</strong><span>Play next episode</span></a> : null}
       {switching ? <div className="lumora-player-switch-status" role="status">Updating playback<span>Your position is preserved</span></div> : null}
       {adLoading ? <div className="lumora-vast-loading" role="status">Loading advertisement</div> : null}

@@ -18,6 +18,7 @@ import { getAdSlot } from '@/features/ads/config';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
 import { getPlaybackCommerceContext } from '@/features/commerce/queries';
+import { introCatalogPath } from '@/features/player/intro-markers';
 
 /**
  * Watch route (Spec Section 3 & 9). Server component: loads the title, resolves
@@ -157,6 +158,12 @@ export default async function WatchPage({
 
   // The title's own TMDB/IMDb ids from the catalog row drive playback resolution.
   const external = resolveTitleExternalIds(title);
+  const introCatalogUrl = introCatalogPath({
+    type: title.type,
+    imdbId: external.imdbId,
+    season,
+    episode,
+  });
 
   const request: PlaybackRequest = {
     titleId: title.id,
@@ -258,6 +265,7 @@ export default async function WatchPage({
           {...(title.type === 'tv' && episode !== undefined ? { episodeNumber: episode } : {})}
           {...(episodeNav?.next ? { nextEpisode: episodeNav.next } : {})}
           {...(resumePos ? { initialPosition: resumePos.positionSeconds, resumeUpdatedAt: resumePos.updatedAt } : {})}
+          {...(introCatalogUrl ? { introCatalogUrl } : {})}
           preroll={preroll}
         />
 

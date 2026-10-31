@@ -4,6 +4,7 @@ import { features } from '@/lib/env';
 import { listProviderConfigs } from '@/lib/providers/config';
 import { resolvePlayback } from '@/lib/providers/registry';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
+import { introCatalogPath } from '@/features/player/intro-markers';
 
 /**
  * Playback bridge for the native app (Spec Section 9).
@@ -28,6 +29,8 @@ import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
 function toIndex(value: string | null): number | undefined {
   if (value === null || value === '') return undefined;
   const n = Number(value);
@@ -43,14 +46,16 @@ export async function GET(request: NextRequest) {
 
   const tmdbId = sp.get('tmdbId') ?? undefined;
   const imdbId = sp.get('imdbId') ?? undefined;
-  if (!tmdbId && !imdbId) {
+  const titleIdParam = sp.get('titleId');
+  const episodeIdParam = sp.get('episodeId');
+  const titleId = titleIdParam && UUID_RE.test(titleIdParam) ? titleIdParam : undefined;
+  const episodeId = episodeIdParam && UUID_RE.test(episodeIdParam) ? episodeIdParam : undefined;
+  if ((!tmdbId && !imdbId && !titleId) || (titleIdParam !== null && !titleId) || (episodeIdParam !== null && !episodeId)) {
     return NextResponse.json({ sources: [], error: 'invalid-request' }, { status: 400 });
   }
 
   const season = type === 'tv' ? toIndex(sp.get('season')) : undefined;
   const episode = type === 'tv' ? toIndex(sp.get('episode')) : undefined;
-  const titleId = sp.get('titleId') ?? undefined;
-  const episodeId = sp.get('episodeId') ?? undefined;
   const start = toIndex(sp.get('start'));
 
   const playbackRequest: PlaybackRequest = {
@@ -90,6 +95,8 @@ export async function GET(request: NextRequest) {
     if (type === 'tv') { subtitleParams.set('season', String(season)); subtitleParams.set('episode', String(episode)); }
     subtitleCatalogUrl = `${origin}/api/subtitles?${subtitleParams.toString()}`;
   }
+  const introPath = introCatalogPath({ type, imdbId, season, episode });
+  const introCatalogUrl = introPath ? new URL(introPath, origin).href : undefined;
   // Resume first (needs the real provider id), THEN anonymize — so the public
   // payload never carries an upstream identity.
   let fallbackIndex = 0;
@@ -106,5 +113,6 @@ export async function GET(request: NextRequest) {
   });
 
   return NextResponse.json({ sources: publicSources, adPolicy: commerceContext.ads, entitlements: commerceContext.entitlements,
-    ...(subtitleCatalogUrl ? { subtitleCatalogUrl } : {}) }, { headers: { 'Cache-Control': 'no-store' } });
+    ...(subtitleCatalogUrl ? { subtitleCatalogUrl } : {}),
+    ...(introCatalogUrl ? { introCatalogUrl } : {}) }, { headers: { 'Cache-Control': 'no-store' } });
 }

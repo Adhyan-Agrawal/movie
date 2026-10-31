@@ -74,6 +74,8 @@ export interface PlayerShellProps {
   resumeUpdatedAt?: number;
   viewerKey?: string;
   adPolicy?: PlaybackAdPolicy;
+  /** Same-origin, episode-bound intro marker catalog. Native playback fetches it lazily. */
+  introCatalogUrl?: string;
   /**
    * Pre-roll ad zone (Spec Section 11). Resolved server-side from env and
    * passed here — env vars are stripped from client bundles. Null = no pre-roll.
@@ -131,6 +133,7 @@ export function PlayerShell({
   resumeUpdatedAt,
   viewerKey = 'guest',
   adPolicy,
+  introCatalogUrl,
   preroll = null,
   nextEpisode,
 }: PlayerShellProps) {
@@ -387,6 +390,7 @@ export function PlayerShell({
                 titleName={title.name}
                 viewerKey={viewerKey}
                 adPolicy={adPolicy}
+                introCatalogUrl={introCatalogUrl}
                 subtitleCatalogUrl={subtitleCatalogUrl}
                 upNext={nextEpisode ? {
                   name: [nextEpisode.label, nextEpisode.name].filter(Boolean).join(' - '),
