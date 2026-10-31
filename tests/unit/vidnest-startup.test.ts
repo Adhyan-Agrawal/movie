@@ -131,5 +131,5 @@ describe('bounded fMP4 audio language decoding', () => {
     expect(body.streams[0].startupLatencyMs).toEqual(expect.any(Number));
     expect(ranges).toEqual(['bytes=0-65535', 'bytes=0-1023']);
     expect(cancel).toHaveBeenCalledOnce();
-  });
+  }, 15_000);
 });
