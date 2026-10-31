@@ -278,7 +278,10 @@ function scheduleCachePut(
 
 function defaultServices(): WorkerServices {
   const storage = globalThis.caches as CacheStorage & { default: Cache };
-  return { cache: storage.default as unknown as EdgeCache, fetch: globalThis.fetch };
+  return {
+    cache: storage.default as unknown as EdgeCache,
+    fetch: (input, init) => globalThis.fetch(input, init),
+  };
 }
 
 export async function handleRequest(

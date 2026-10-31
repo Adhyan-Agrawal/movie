@@ -82,10 +82,27 @@ function services(fetchMock: ReturnType<typeof vi.fn>, cache = new MemoryCache()
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe('VidNest CDN Worker authorization and caching', () => {
+  it('preserves the Cloudflare global receiver when calling the platform fetch implementation', async () => {
+    const cache = new MemoryCache();
+    const platformFetch = vi.fn(function (this: unknown) {
+      expect(this).toBe(globalThis);
+      return Promise.resolve(new Response(new Uint8Array([0x47, 1]), {
+        headers: { 'Content-Length': '2', 'Content-Type': 'video/mp2t' },
+      }));
+    });
+    vi.stubGlobal('fetch', platformFetch);
+    vi.stubGlobal('caches', { default: cache });
+
+    const response = await handleRequest(edgeRequest(capability(validPayload())), ENV, new TestContext());
+    expect(response.status).toBe(200);
+    expect(platformFetch).toHaveBeenCalledOnce();
+  });
+
   it('reuses one canonical media cache entry across capabilities with random nonces', async () => {
     const payload = validPayload();
     const firstToken = capability(payload);
