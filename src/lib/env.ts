@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+const emptyToUndefined = (value: unknown) => value === '' ? undefined : value;
+const optionalString = z.preprocess(emptyToUndefined, z.string().min(1).optional());
+const optionalUrl = z.preprocess(emptyToUndefined, z.string().url().optional());
+
 /**
  * Typed, validated environment (Section 6).
  * Public vars are safe for the browser bundle; server vars must never be
@@ -11,18 +15,18 @@ import { z } from 'zod';
 const publicSchema = z.object({
   NEXT_PUBLIC_APP_NAME: z.string().min(1).default('Lumora'),
   NEXT_PUBLIC_APP_URL: z.string().url().default('http://localhost:3000'),
-  NEXT_PUBLIC_SUPABASE_URL: z.string().url().optional(),
-  NEXT_PUBLIC_SUPABASE_ANON_KEY: z.string().min(1).optional(),
+  NEXT_PUBLIC_SUPABASE_URL: optionalUrl,
+  NEXT_PUBLIC_SUPABASE_ANON_KEY: optionalString,
 });
 
 const serverSchema = z.object({
-  SUPABASE_SERVICE_ROLE_KEY: z.string().min(1).optional(),
-  TMDB_API_KEY: z.string().min(1).optional(),
+  SUPABASE_SERVICE_ROLE_KEY: optionalString,
+  TMDB_API_KEY: optionalString,
   TMDB_API_BASE_URL: z.string().url().default('https://api.themoviedb.org/3'),
   /** Adsterra zone keys (Spec Section 11) — one per ad format/placement. */
-  ADSTERRA_KEY_LEADERBOARD: z.string().min(1).optional(),
-  ADSTERRA_KEY_RECTANGLE: z.string().min(1).optional(),
-  ADSTERRA_KEY_PREROLL: z.string().min(1).optional(),
+  ADSTERRA_KEY_LEADERBOARD: optionalString,
+  ADSTERRA_KEY_RECTANGLE: optionalString,
+  ADSTERRA_KEY_PREROLL: optionalString,
 });
 
 type PublicEnv = z.infer<typeof publicSchema>;

@@ -1,0 +1,67 @@
+name: Deploy VidNest CDN Worker
+
+on:
+  pull_request:
+    paths:
+      - 'workers/vidnest-cdn/**'
+      - '.github/workflows/deploy-vidnest-cdn.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'workers/vidnest-cdn/**'
+      - '.github/workflows/deploy-vidnest-cdn.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vidnest-cdn-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/vidnest-cdn
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workers/vidnest-cdn/package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run dry-run
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    needs: validate
+    runs-on: ubuntu-latest
+    environment: production
+    defaults:
+      run:
+        working-directory: workers/vidnest-cdn
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: workers/vidnest-cdn/package-lock.json
+      - run: npm ci
+      - name: Provision secret and deploy Worker
+        run: npm run deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          VIDNEST_API_SECRET: ${{ secrets.VIDNEST_API_SECRET }}
+          VIDNEST_ORIGIN_URL: ${{ vars.VIDNEST_ORIGIN_URL }}
+          VIDNEST_CDN_PUBLIC_URL: ${{ vars.VIDNEST_CDN_PUBLIC_URL }}

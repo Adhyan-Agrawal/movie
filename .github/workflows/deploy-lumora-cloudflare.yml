@@ -1,0 +1,119 @@
+name: Deploy Lumora to Cloudflare Workers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-lumora-cloudflare-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Validate, build, and deploy
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm run test
+
+      - name: Build OpenNext Worker
+        run: npm run cf:build
+        env:
+          NEXTJS_ENV: production
+          NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME || 'Lumora' }}
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+
+      - name: Validate Worker upload
+        run: npm run cf:dry-run:built
+
+      - name: Validate bindings and deploy production Worker
+        shell: bash
+        env:
+          NEXTJS_ENV: production
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NEXT_PUBLIC_APP_NAME: ${{ vars.NEXT_PUBLIC_APP_NAME || 'Lumora' }}
+          NEXT_PUBLIC_APP_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+          NEXT_PUBLIC_SUPABASE_URL: ${{ vars.NEXT_PUBLIC_SUPABASE_URL }}
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ vars.NEXT_PUBLIC_SUPABASE_ANON_KEY }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+          TMDB_API_BASE_URL: ${{ vars.TMDB_API_BASE_URL || 'https://api.themoviedb.org/3' }}
+          WYZIE_API_KEY: ${{ secrets.WYZIE_API_KEY }}
+          WYZIE_SUBTITLE_TOKEN_SECRET: ${{ secrets.WYZIE_SUBTITLE_TOKEN_SECRET }}
+          VIDNEST_API_URL: ${{ vars.VIDNEST_API_URL || 'https://vidnest-pi.vercel.app' }}
+          VIDNEST_API_SECRET: ${{ secrets.VIDNEST_API_SECRET }}
+          VIDNEST_CDN_BASE_URL: ${{ vars.VIDNEST_CDN_BASE_URL }}
+          ADSTERRA_KEY_LEADERBOARD: ${{ vars.ADSTERRA_KEY_LEADERBOARD }}
+          ADSTERRA_KEY_RECTANGLE: ${{ vars.ADSTERRA_KEY_RECTANGLE }}
+          ADSTERRA_KEY_PREROLL: ${{ vars.ADSTERRA_KEY_PREROLL }}
+          RUNTIME_SECRETS_FILE: ${{ runner.temp }}/lumora-runtime-secrets.json
+        run: |
+          set -euo pipefail
+          trap 'rm -f "$RUNTIME_SECRETS_FILE"' EXIT
+          node <<'NODE'
+          const fs = require('node:fs');
+          const required = [
+            'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN', 'NEXT_PUBLIC_APP_NAME',
+            'NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY',
+            'SUPABASE_SERVICE_ROLE_KEY', 'TMDB_API_KEY', 'TMDB_API_BASE_URL',
+            'VIDNEST_API_URL', 'VIDNEST_API_SECRET',
+          ];
+          const missing = required.filter((name) => !process.env[name]?.trim());
+          if (missing.length) throw new Error(`Missing required GitHub production variables/secrets: ${missing.join(', ')}`);
+          const runtimeNames = [
+            'NEXTJS_ENV', 'NEXT_PUBLIC_APP_NAME', 'NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_SUPABASE_URL',
+            'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'TMDB_API_KEY',
+            'TMDB_API_BASE_URL', 'WYZIE_API_KEY', 'WYZIE_SUBTITLE_TOKEN_SECRET',
+            'VIDNEST_API_URL', 'VIDNEST_API_SECRET', 'VIDNEST_CDN_BASE_URL',
+            'ADSTERRA_KEY_LEADERBOARD', 'ADSTERRA_KEY_RECTANGLE', 'ADSTERRA_KEY_PREROLL',
+          ];
+          for (const name of runtimeNames) {
+            if (/[\r\n\0]/.test(process.env[name] ?? '')) throw new Error(`${name} must be a single-line value`);
+          }
+          if (process.env.VIDNEST_API_SECRET.length < 32) throw new Error('VIDNEST_API_SECRET must contain at least 32 characters');
+          const httpsUrl = (name, originOnly = false) => {
+            const url = new URL(process.env[name]);
+            if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error(`${name} must be a safe HTTPS URL`);
+            if (originOnly && (url.pathname !== '/' || url.search)) throw new Error(`${name} must be an HTTPS origin`);
+            return url;
+          };
+          httpsUrl('NEXT_PUBLIC_APP_URL', true);
+          httpsUrl('NEXT_PUBLIC_SUPABASE_URL', true);
+          httpsUrl('TMDB_API_BASE_URL');
+          httpsUrl('VIDNEST_API_URL', true);
+          if (process.env.VIDNEST_CDN_BASE_URL) {
+            const cdn = httpsUrl('VIDNEST_CDN_BASE_URL');
+            if (cdn.pathname !== '/media' || cdn.search) throw new Error('VIDNEST_CDN_BASE_URL must end exactly in /media');
+          }
+          const bindings = Object.fromEntries(runtimeNames.map((name) => [name, process.env[name] ?? '']));
+          fs.writeFileSync(process.env.RUNTIME_SECRETS_FILE, JSON.stringify(bindings), { mode: 0o600 });
+          NODE
+          npm run cf:deploy:built -- --secrets-file="$RUNTIME_SECRETS_FILE"

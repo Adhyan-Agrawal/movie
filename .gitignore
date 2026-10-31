@@ -6,6 +6,7 @@
 
 # next.js
 /.next/
+/.open-next/
 /out/
 next-env.d.ts
 
@@ -14,14 +15,27 @@ next-env.d.ts
 
 # testing
 /coverage
+**/coverage/
 
 # env
-.env
+.env*
+!.env.example
+!**/.env.example
 .env*.local
+.dev.vars*
+!.dev.vars.example
+/.wrangler/
+/workers/vidnest-cdn/.dev.vars
+/workers/vidnest-cdn/.wrangler/
+**/.wrangler/
 
 # misc
 .DS_Store
 *.pem
+*.apk
+*.aab
+*.keystore
+*.jks
 .vscode/*
 !.vscode/extensions.json
 
@@ -32,3 +46,5 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+/cloudflare-env.d.ts
+/mobile/android-cxx.init.gradle

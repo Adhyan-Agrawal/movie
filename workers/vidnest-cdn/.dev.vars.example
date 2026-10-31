@@ -1,0 +1,10 @@
+# Copy to .dev.vars for local deployment. The real file is ignored by Git.
+VIDNEST_ORIGIN_URL=https://replace-me.invalid
+VIDNEST_CDN_PUBLIC_URL=https://lumora-vidnest-cdn.replace-me.workers.dev/media
+VIDNEST_API_SECRET=replace-me
+
+# Keep Cloudflare authentication in the process environment, never in .dev.vars.
+# Existing `wrangler login` OAuth also works.
+
+# After deployment, configure the application (not this Worker) with:
+# VIDNEST_CDN_BASE_URL must equal VIDNEST_CDN_PUBLIC_URL above.

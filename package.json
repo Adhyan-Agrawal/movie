@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "description": "Lumora OTT streaming platform",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -10,9 +13,20 @@
     "lint": "next lint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "cf:build": "opennextjs-cloudflare build",
+    "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
+    "cf:dry-run": "opennextjs-cloudflare build && wrangler deploy --dry-run",
+    "cf:dry-run:built": "wrangler deploy --dry-run",
+    "cf:deploy": "node scripts/deploy-cloudflare.mjs",
+    "cf:deploy:validate": "node scripts/deploy-cloudflare.mjs --dry-run",
+    "cf:deploy:built": "opennextjs-cloudflare deploy -- --keep-vars --strict",
+    "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
+    "cf:whoami": "wrangler whoami",
+    "cf:secret": "wrangler secret put"
   },
   "dependencies": {
+    "@opennextjs/cloudflare": "1.20.14",
     "@supabase/ssr": "^0.7.0",
     "@supabase/supabase-js": "^2.115.0",
     "clsx": "2.1.1",
@@ -29,6 +43,7 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@next/env": "15.5.28",
     "@types/node": "22.12.0",
     "@types/nodemailer": "^8.0.1",
     "@types/react": "19.0.7",
@@ -42,7 +57,8 @@
     "supabase": "^2.117.0",
     "tailwindcss": "3.4.17",
     "typescript": "5.7.3",
-    "vitest": "4.1.12"
+    "vitest": "4.1.12",
+    "wrangler": "4.156.0"
   },
   "overrides": {
     "postcss": "$postcss"

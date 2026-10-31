@@ -4,5 +4,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-28",
   "workers_dev": true,
-  "preview_urls": false
+  "preview_urls": false,
+  "secrets": {
+    "required": [
+      "VIDNEST_API_SECRET",
+      "VIDNEST_ORIGIN_URL"
+    ]
+  }
 }

@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lumora",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-10-30",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "global_fetch_strictly_public"
+  ],
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "services": [
+    {
+      "binding": "WORKER_SELF_REFERENCE",
+      "service": "lumora"
+    }
+  ],
+  "secrets": {
+    "required": [
+      "NEXTJS_ENV",
+      "NEXT_PUBLIC_APP_NAME",
+      "NEXT_PUBLIC_APP_URL",
+      "NEXT_PUBLIC_SUPABASE_URL",
+      "NEXT_PUBLIC_SUPABASE_ANON_KEY",
+      "SUPABASE_SERVICE_ROLE_KEY",
+      "TMDB_API_KEY",
+      "TMDB_API_BASE_URL",
+      "WYZIE_API_KEY",
+      "WYZIE_SUBTITLE_TOKEN_SECRET",
+      "VIDNEST_API_URL",
+      "VIDNEST_API_SECRET",
+      "VIDNEST_CDN_BASE_URL",
+      "ADSTERRA_KEY_LEADERBOARD",
+      "ADSTERRA_KEY_RECTANGLE",
+      "ADSTERRA_KEY_PREROLL"
+    ]
+  },
+  "observability": {
+    "enabled": true
+  }
+}

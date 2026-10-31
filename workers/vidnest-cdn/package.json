@@ -1,0 +1,22 @@
+{
+  "name": "@lumora/vidnest-cdn-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "packageManager": "npm@11.17.0",
+  "scripts": {
+    "test": "vitest run --config vitest.config.mts",
+    "typecheck": "tsc -p tsconfig.json",
+    "dry-run": "wrangler deploy --dry-run --strict --outdir .wrangler/dry-run --var VIDNEST_ORIGIN_URL:https://origin.invalid",
+    "deploy": "node scripts/deploy.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.12.0",
+    "typescript": "5.7.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.154.0"
+  }
+}
