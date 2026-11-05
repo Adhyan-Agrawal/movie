@@ -21,6 +21,8 @@ const RUNTIME_ONLY = args.includes('--runtime-only');
 const MANUAL_ONLY = args.includes('--manual-only');
 const TITLES_ONLY = args.includes('--titles-only');
 const TRACE_HYDRATION = args.includes('--trace-hydration');
+const TRACE_SEQUENCE = args.includes('--trace-sequence');
+const HYDRATION_TRACE_ONLY = TITLES_ONLY && TRACE_HYDRATION;
 const TITLE_PASSES = Number(argument('--title-passes', '1'));
 const SELECTED_VIEWPORTS = VIEWPORTS === 'both' ? ['desktop', 'mobile'] : [VIEWPORTS];
 const TEMP_ROOT = process.platform === 'win32'
@@ -39,6 +41,8 @@ const assetCache = new Map();
 const fixtureRequests = [];
 const deniedWorkerHosts = new Set();
 const runtimeLogs = [];
+const hydrationFrames = [];
+const titleBrowserErrors = [];
 let reportDirectory;
 let worker;
 let tmdbServer;
@@ -339,6 +343,7 @@ async function diagnostics(page) {
         frames: video.getVideoPlaybackQuality?.().totalVideoFrames ?? -1 } : null,
       levels: Array.from({ length: levels?.length ?? 0 }, (_, index) => ({ height: levels[index].height, enabled: levels[index].enabled })),
       csp: (window.__acceptanceCsp ?? []).map((entry) => ({ directive: entry.directive, disposition: entry.disposition })),
+      motion: (window.__acceptanceMotion ?? []).slice(-20),
       events: (window.__acceptanceEvents ?? []).slice(-35),
       choices: Array.from(surface?.querySelectorAll('select') ?? [], (select) => ({
         label: select.getAttribute('aria-label') ?? select.labels?.[0]?.textContent?.trim(),
@@ -541,7 +546,13 @@ async function browserCase(streams, viewport, opaqueAudio) {
   page.on('framenavigated', (frame) => {
     if (frame !== page.mainFrame()) return;
     traffic.navigations += 1;
-    traffic.documents.push({ catalogs: 0, unsignedRoots: 0, streams: [] });
+  });
+  page.on('request', (request) => {
+    // Next's same-document history updates also emit framenavigated; only a
+    // top-level document request starts a new per-page resolution budget.
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      traffic.documents.push({ catalogs: 0, unsignedRoots: 0, streams: [] });
+    }
   });
   page.on('pageerror', (error) => {
     traffic.pageErrors.push(safeError(error));
@@ -677,7 +688,7 @@ async function browserCase(streams, viewport, opaqueAudio) {
     await check(`${name}: built assets, browser errors, and required CSP`, async () => {
       assert(traffic.failedAssets.length === 0, `fixture/built asset failures: ${traffic.failedAssets.join('; ')}`);
       assert(traffic.pageErrors.length === 0, `browser unhandled errors: ${traffic.pageErrors.join('; ')}`);
-      assert(traffic.documents.length === traffic.navigations && traffic.documents.every((entry) => entry.catalogs === 1 && entry.unsignedRoots === 0), 'each consented page must use exactly one catalog and zero unsigned resolver lookups');
+      assert(traffic.documents.length === (opaqueAudio ? 1 : 4) && traffic.documents.every((entry) => entry.catalogs === 1 && entry.unsignedRoots === 0), 'each consented page must use exactly one catalog and zero unsigned resolver lookups');
       assert(await page.evaluate(() => !window.__acceptanceCsp.some((entry) => entry.disposition === 'enforce' && /worker-src|media-src/.test(entry.directive))), 'media/worker CSP failure after state changes');
       return { mutationRequestsBlocked: traffic.mutations, mediaRequests: traffic.media, catalogRequests: traffic.catalogs, unsignedResolverRequests: traffic.unsignedRoots, subtitleRequests: traffic.subtitles, documents: traffic.documents, externalBrowserRequestsBlocked: traffic.external };
     });
@@ -745,9 +756,10 @@ async function motionCase(viewport, reducedMotion) {
       assert(response?.ok() && response.headers()['content-security-policy'], 'homepage did not return HTTP 200 with enforcing CSP');
       await page.getByRole('link', { name: /FAKE TEST Inception/i }).first().waitFor();
       const next = page.getByRole('button', { name: 'Next trending title', exact: true });
-      await until(() => next.evaluate((element) => Object.keys(element).some((key) => key.startsWith('__reactProps') && typeof element[key]?.onClick === 'function')), 'homepage navigation never hydrated', UI_TIMEOUT);
+      const trailer = page.getByRole('button', { name: 'Trailer', exact: true }).first();
+      await until(() => trailer.evaluate((element) => Object.keys(element).some((key) => key.startsWith('__reactProps') && typeof element[key]?.onClick === 'function')), 'homepage controls never hydrated', UI_TIMEOUT);
       const links = await page.locator('a[href^="/title/"]').count();
-      const bounds = await layout(page, '.hero-slide:not([inert]) .hero-title');
+      const bounds = await layout(page, '.hero-slide:not([inert]) .hero-title, .discovery-home > .discovery-hero .hero-title');
       let motion;
       if (reducedMotion) {
         motion = await page.evaluate(() => {
@@ -761,9 +773,21 @@ async function motionCase(viewport, reducedMotion) {
         });
         assert(motion.reduced && motion.elements > 0 && motion.moving === 0 && motion.pending === 0 && motion.meaningfulAnimations === 0,
           'reduced motion left nonessential animation, transforms, or pending content');
-        const previous = await page.locator('.hero-slide:not([inert])').getAttribute('aria-label');
-        await next.click();
-        await until(async () => await page.locator('.hero-slide:not([inert])').getAttribute('aria-label') !== previous, 'reduced motion disabled manual carousel navigation', UI_TIMEOUT);
+        if (await next.count()) {
+          const previous = await page.locator('.hero-slide:not([inert])').getAttribute('aria-label');
+          await next.click();
+          await until(async () => await page.locator('.hero-slide:not([inert])').getAttribute('aria-label') !== previous, 'reduced motion disabled manual carousel navigation', UI_TIMEOUT);
+          motion.manualNavigation = 'carousel';
+        } else {
+          // Null artwork deliberately selects the application's single-Hero fallback.
+          const explore = page.locator('.hero-info-link').first();
+          const destination = await explore.getAttribute('href');
+          assert(destination?.startsWith('/title/'), 'single Hero is missing its title navigation');
+          await explore.click();
+          await page.waitForURL(`${ORIGIN}${destination}`);
+          await page.getByRole('heading', { name: 'FAKE TEST Inception', exact: true }).waitFor();
+          motion.manualNavigation = 'single-hero-title-link';
+        }
       } else {
         const entrance = await until(() => page.evaluate(() => {
           const hero = window.__acceptanceMotion.find((entry) => entry.className.includes('hero-title') && entry.finished && entry.maxY - entry.minY >= 8);
@@ -793,10 +817,26 @@ async function motionCase(viewport, reducedMotion) {
   }
 }
 
+const valueOptions = new Set(['--port', '--viewports', '--expect-artifact', '--title-passes']);
+const flagOptions = new Set(['--runtime-only', '--manual-only', '--titles-only', '--trace-hydration', '--trace-sequence', '--fingerprint-only']);
+for (let index = 0; index < args.length; index++) {
+  if (valueOptions.has(args[index])) {
+    assert(args[index + 1] && !args[index + 1].startsWith('--'), 'missing acceptance option value');
+    index++;
+  } else assert(flagOptions.has(args[index]), 'unknown acceptance option');
+}
+if (args.includes('--fingerprint-only')) {
+  const current = await fingerprint();
+  assert(!EXPECTED_ARTIFACT || EXPECTED_ARTIFACT === current.sha256, 'candidate artifact does not match --expect-artifact');
+  await new Promise((done, reject) => process.stdout.write(`ARTIFACT ${JSON.stringify(current)}\nFINGERPRINT_ONLY_NOT_ACCEPTANCE\n`, (error) => error ? reject(error) : done()));
+  process.exit(0);
+}
+
 let accepted = false;
 try {
   assert(Number.isInteger(PORT) && PORT >= 1024 && PORT <= 65535 && PORT !== 8791, 'invalid/nonisolated port');
   assert(['both', 'desktop', 'mobile'].includes(VIEWPORTS), '--viewports must be both, desktop, or mobile');
+  assert(!TRACE_SEQUENCE || HYDRATION_TRACE_ONLY, '--trace-sequence requires --titles-only and --trace-hydration');
   assert(Number.isInteger(TITLE_PASSES) && TITLE_PASSES >= 1 && TITLE_PASSES <= 12, 'title diagnostic passes must be between 1 and 12');
   assert((await stat(TEMP_ROOT)).isDirectory(), 'approved temporary parent is absent');
   reportDirectory = await mkdtemp(join(TEMP_ROOT, 'lumora-workerd-acceptance-'));
@@ -871,11 +911,30 @@ try {
               if (frame) {
                 const result = await debuggerSession.send('Debugger.evaluateOnCallFrame', {
                   callFrameId: frame.callFrameId,
-                  expression: `JSON.stringify((()=>{const chain=[];let f=arguments[0];for(let i=0;f&&i<16;i++,f=f.return){const p=f.pendingProps;chain.push({tag:f.tag,type:typeof f.type==='function'?f.type.name:typeof f.type==='string'?f.type:String(f.type),className:p?.className,id:p?.id,childrenType:typeof p?.children,node:f.stateNode?.nodeName,html:f.stateNode?.outerHTML?.slice(0,800)});}return {chain,body:document.body.innerHTML.slice(0,3500)};})())`,
+                  expression: `JSON.stringify((()=>{const shape=(value,depth=0)=>{if(value==null||typeof value==='boolean'||typeof value==='number')return value;if(typeof value==='string')return value.slice(0,600);if(depth>2)return {truncated:true};if(Array.isArray(value))return value.slice(0,10).map(item=>shape(item,depth+1));return {type:typeof value.type==='function'?value.type.name:typeof value.type==='string'?value.type:typeof value.type,className:value.props?.className,id:value.props?.id,children:shape(value.props?.children,depth+1)};};const chain=[];let f=arguments[0];for(let i=0;f&&i<16;i++,f=f.return){const p=f.pendingProps;chain.push({tag:f.tag,type:typeof f.type==='function'?f.type.name:typeof f.type==='string'?f.type:typeof f.type,className:p?.className,id:p?.id,childrenType:typeof p?.children,children:shape(p?.children),node:f.stateNode?.nodeName,html:f.stateNode?.outerHTML?.slice(0,1800)});}return {chain,body:document.body.innerHTML.slice(0,3500)};})())`,
                   returnByValue: true,
                 });
-                print(`HYDRATION_FRAME ${result.result?.value ?? '<unavailable>'}`);
+                const observation = { viewport, path: new URL(page.url()).pathname, pass: Math.floor(rendered.length / 2) + 1,
+                  frame: result.result?.value ? JSON.parse(result.result.value) : { unavailable: true }, serverCandidates: [] };
+                for (const scope of frame.scopeChain.filter((entry) => entry.type === 'closure' || entry.type === 'local').slice(0, 3)) {
+                  const properties = await debuggerSession.send('Runtime.getProperties', { objectId: scope.object.objectId, ownProperties: true, generatePreview: false });
+                  for (const property of properties.result.filter((entry) => entry.value?.subtype === 'node').slice(0, 6)) {
+                    const candidate = await debuggerSession.send('Runtime.callFunctionOn', {
+                      objectId: property.value.objectId,
+                      functionDeclaration: `function(){return {node:this.nodeName,text:this.nodeValue,html:this.outerHTML?.slice(0,2500),parent:this.parentElement?.outerHTML.slice(0,6000),previous:this.previousSibling?.outerHTML?.slice(0,1800)??this.previousSibling?.nodeValue,next:this.nextSibling?.outerHTML?.slice(0,1800)??this.nextSibling?.nodeValue};}`,
+                      returnByValue: true,
+                    });
+                    observation.serverCandidates.push({ scope: scope.type, name: property.name, ...(candidate.result?.value ?? { unavailable: true }) });
+                  }
+                }
+                hydrationFrames.push(observation);
+                await writeFile(join(reportDirectory, 'hydration-frames.json'), JSON.stringify(hydrationFrames, null, 2));
+                print(`HYDRATION_FRAME ${JSON.stringify(observation)}`);
               }
+            } catch (error) {
+              const observation = { viewport, path: new URL(page.url()).pathname, captureError: safeError(error) };
+              hydrationFrames.push(observation);
+              print(`HYDRATION_FRAME_CAPTURE_ERROR ${JSON.stringify(observation)}`);
             } finally {
               await debuggerSession.send('Debugger.resume').catch(() => {});
             }
@@ -891,6 +950,7 @@ try {
             stack: String(error.stack ?? '').replace(/https?:\/\/[^\s)]*/g, '<asset-url>').slice(0, 3000),
           };
           pageErrors.push(detail);
+          titleBrowserErrors.push(detail);
           print(`TITLE_BROWSER_ERROR ${JSON.stringify(detail)}`);
         });
         const titleCases = [
@@ -909,6 +969,7 @@ try {
           await page.waitForLoadState('networkidle');
           rendered.push({ path, layout: await layout(page, '#title-heading') });
           await page.screenshot({ path: join(reportDirectory, `${viewport}-title-${path.includes('/tv/') ? 'tv' : 'movie'}.png`) });
+          if (HYDRATION_TRACE_ONLY) assert(pageErrors.length === 0 && hydrationFrames.length === 0, 'hydration trace stopped at the first mismatch; see hydration-frames.json and report.json');
         }
         assert(pageErrors.length === 0, `public detail pages emitted a browser rendering exception: ${pageErrors.map((entry) => entry.message).join('; ')}`);
         return { rendered, unhandledBrowserErrors: 0, authenticationConfigured: false };
@@ -917,8 +978,10 @@ try {
         activePage = null;
       }
     });
-    await motionCase(viewport, false);
-    await motionCase(viewport, true);
+    if (!HYDRATION_TRACE_ONLY || TRACE_SEQUENCE) {
+      await motionCase(viewport, false);
+      await motionCase(viewport, true);
+    }
     }
     if (!TITLES_ONLY) {
       const streams = await makeStreams();
@@ -949,9 +1012,10 @@ try {
   }
   const report = {
     status: accepted ? (RUNTIME_ONLY ? 'RUNTIME_ONLY_PASS_NOT_BROWSER_ACCEPTANCE'
-      : TITLES_ONLY ? 'TITLES_ONLY_PASS_NOT_PLAYBACK_ACCEPTANCE'
-        : MANUAL_ONLY ? 'MANUAL_ONLY_PASS_NOT_NUMBERED_AUDIO' : 'PASS') : 'FAIL',
-    artifact, results,
+      : HYDRATION_TRACE_ONLY ? 'HYDRATION_TRACE_NO_MISMATCH_CAPTURED_NOT_RELEASE_ACCEPTANCE'
+        : TITLES_ONLY ? 'TITLES_ONLY_PASS_NOT_PLAYBACK_ACCEPTANCE'
+         : MANUAL_ONLY ? 'MANUAL_ONLY_PASS_NOT_NUMBERED_AUDIO' : 'PASS') : 'FAIL',
+    artifact, results, hydrationFrames, titleBrowserErrors,
     assumptions: {
       actualBuiltOpenNext: true, rawTmdb: 'loopback HTTP synthetic metadata, stable real IDs',
       media: 'licensed public Shaka Angel One; browser requests rewritten/intercepted same-origin',
@@ -960,13 +1024,14 @@ try {
       supabase: 'empty test bindings; browser mutations blocked; external worker egress denied',
       cspBypassed: false, nodeEnv: 'production', viewports: VIEWPORTS, port: PORT,
       titleHydrationPassesPerViewport: RUNTIME_ONLY ? 0 : TITLE_PASSES,
-      normalAndReducedMotionTested: !RUNTIME_ONLY,
+      normalAndReducedMotionTested: !RUNTIME_ONLY && (!HYDRATION_TRACE_ONLY || TRACE_SEQUENCE),
+      hydrationSequenceDiagnostic: TRACE_SEQUENCE,
       numberedAudioTested: !RUNTIME_ONLY && !TITLES_ONLY && !MANUAL_ONLY,
     },
     fixtureHttpRequests: fixtureRequests, deniedWorkerHostCount: deniedWorkerHosts.size, runtimeErrorLogs: runtimeLogs.length,
   };
   if (reportDirectory) await writeFile(join(reportDirectory, 'report.json'), JSON.stringify(report, null, 2));
-  print(`\n${RUNTIME_ONLY ? 'RUNTIME ONLY' : TITLES_ONLY ? 'TITLES AND MOTION ONLY (NOT PLAYBACK ACCEPTANCE)' : MANUAL_ONLY ? 'MANUAL BROWSER ACCEPTANCE (NOT NUMBERED AUDIO)' : 'BROWSER ACCEPTANCE'} ${accepted ? 'PASS' : 'FAIL'} passed=${results.filter((entry) => entry.status === 'PASS').length} failed=${results.filter((entry) => entry.status === 'FAIL').length}`);
+  print(`\n${RUNTIME_ONLY ? 'RUNTIME ONLY' : HYDRATION_TRACE_ONLY ? 'HYDRATION TRACE (NOT RELEASE ACCEPTANCE)' : TITLES_ONLY ? 'TITLES AND MOTION ONLY (NOT PLAYBACK ACCEPTANCE)' : MANUAL_ONLY ? 'MANUAL BROWSER ACCEPTANCE (NOT NUMBERED AUDIO)' : 'BROWSER ACCEPTANCE'} ${accepted ? 'PASS' : 'FAIL'} passed=${results.filter((entry) => entry.status === 'PASS').length} failed=${results.filter((entry) => entry.status === 'FAIL').length}`);
   if (reportDirectory) print(`REPORT ${join(reportDirectory, 'report.json')}`);
   process.exitCode = accepted ? 0 : 1;
 }
