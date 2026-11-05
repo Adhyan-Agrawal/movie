@@ -1,6 +1,8 @@
 'use server';
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { features } from '@/lib/env';
+import { isStoredCatalogId } from '@/features/account/availability';
 
 /**
  * Playback issue reporting (Spec Sections 9, 14).
@@ -24,26 +26,26 @@ export interface PlaybackReportInput {
 }
 
 export async function reportPlaybackIssueAction(input: PlaybackReportInput): Promise<{ ok: boolean }> {
+  if (!features.supabaseConfigured || !isStoredCatalogId(input.titleId)
+    || (input.episodeId && !isStoredCatalogId(input.episodeId))) return { ok: false };
   try {
     const db = await getSupabaseServerClient();
     const { data: user } = await db.auth.getUser();
 
-    const message = input.message?.trim().slice(0, 2000);
+    const message = input.message?.trim().replace(/https?:\/\/\S+/g, '[redacted URL]').slice(0, 2000);
+    const serverLabel = /^(?:Direct|Server \d{1,3})$/.test(input.serverLabel?.trim() ?? '') ? input.serverLabel!.trim() : undefined;
     // Table added in migration 0008 — not in the generated types yet, cast.
     const { error } = await (db as any).from('playback_reports').insert({
       ...(user.user ? { account_id: user.user.id } : {}),
       title_id: input.titleId,
       ...(input.episodeId ? { episode_id: input.episodeId } : {}),
-      ...(input.serverLabel?.trim() ? { server_label: input.serverLabel.trim().slice(0, 40) } : {}),
+      ...(serverLabel ? { server_label: serverLabel } : {}),
       ...(input.playerState?.trim() ? { player_state: input.playerState.trim().slice(0, 40) } : {}),
       ...(message ? { message } : {}),
     });
     if (error) throw error;
     return { ok: true };
-  } catch (err) {
-    console.warn('playback.report failed', {
-      message: err instanceof Error ? err.message : String(err),
-    });
+  } catch {
     return { ok: false };
   }
 }

@@ -1,11 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('server-only', () => ({}));
 vi.mock('@/lib/env', () => ({ serverEnv: () => ({ TMDB_API_BASE_URL: 'https://api.themoviedb.org/3', TMDB_API_KEY: 'unit-test-only' }) }));
-import { getTmdbTitle, listTmdbTitles } from '@/features/catalog/tmdb-catalog';
+import { clearTmdbPublicDataCache, getTmdbTitle, listTmdbTitles, tmdbCast } from '@/features/catalog/tmdb-catalog';
 
 const fixture = (id: number, language: string | undefined = 'hi') => ({ id, title: `Fixture ${id}`, name: `Fixture ${id}`, original_title: `Original ${id}`, original_language: language, overview: '', release_date: '2024-01-01', first_air_date: '2024-01-01', genre_ids: [35], vote_average: 8 });
 const fetchMock = vi.fn<typeof fetch>();
 beforeEach(() => {
+  clearTmdbPublicDataCache();
   vi.stubGlobal('fetch', fetchMock);
   fetchMock.mockReset().mockImplementation(async (input) => {
     const url = new URL(String(input));
@@ -13,7 +14,7 @@ beforeEach(() => {
     return Response.json({ results: [fixture(1)], total_results: 1 });
   });
 });
-afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
+afterEach(() => { clearTmdbPublicDataCache(); vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('TMDB discovery filters and metadata', () => {
   it('maps actual language/original name but leaves missing country unknown', async () => {
@@ -33,7 +34,8 @@ describe('TMDB discovery filters and metadata', () => {
     const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/discover/'))!;
     expect(new URL(String(call[0])).searchParams.get('with_origin_country')).toBe('KR');
     expect(call[1]?.signal).toBeInstanceOf(AbortSignal);
-    expect(call[1]).toMatchObject({ next: { revalidate: 21600 } });
+    expect(call[1]).toMatchObject({ credentials: 'omit', redirect: 'manual', next: { revalidate: 3600 } });
+    expect(call[1]?.next?.tags).toEqual(['tmdb-public', 'tmdb:discover:tv']);
   });
 
   it('queries each South Indian language separately, not an invalid TMDB pipe value', async () => {
@@ -93,6 +95,36 @@ describe('TMDB discovery filters and metadata', () => {
     expect((await listTmdbTitles({ type: 'movie' })).titles).toHaveLength(1);
   });
 
+  it('reuses settled public reads until expiry, cutting six identical listings from 12 fetches to 2', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    for (let i = 0; i < 6; i++) await listTmdbTitles({ type: 'movie', originalLanguage: 'hi' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/genre/'))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/discover/'))).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    await listTmdbTitles({ type: 'movie', originalLanguage: 'hi' });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/genre/'))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/discover/'))).toHaveLength(2);
+  });
+
+  it('expires valid empty discovery results on the shorter negative TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    fetchMock.mockImplementation(async (input) => String(input).includes('/genre/')
+      ? Response.json({ genres: [{ id: 35, name: 'Comedy' }] })
+      : Response.json({ results: [], total_results: 0 }));
+
+    await listTmdbTitles({ type: 'movie' });
+    await vi.advanceTimersByTimeAsync(299_999);
+    await listTmdbTitles({ type: 'movie' });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/trending/'))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await listTmdbTitles({ type: 'movie' });
+    expect(fetchMock.mock.calls.filter(([url]) => String(url).includes('/trending/'))).toHaveLength(2);
+  });
+
   it('passes genre aliases, top-rated vote floor and a released-only upper date', async () => {
     await listTmdbTitles({ type: 'tv', genre: 'Action', sort: 'score' });
     const url = new URL(String(fetchMock.mock.calls.find(([url]) => String(url).includes('/discover/'))![0]));
@@ -138,5 +170,24 @@ describe('TMDB discovery filters and metadata', () => {
     fetchMock.mockImplementation(async () => Response.json({ id: 1, title: 'Fixture', original_title: 'Fixture', overview: 'A unit-test film.', release_date: '2024-01-01', runtime: 90, poster_path: '/fixture.jpg', backdrop_path: '/fixture-backdrop.jpg', original_language: null, genres: [], production_countries: [{ iso_3166_1: 'IN' }], release_dates: { results: [] } }));
     expect(await getTmdbTitle('movie', 'fixture-1')).toMatchObject({ originCountries: ['IN'] });
     expect(await getTmdbTitle('movie', 'fixture-1')).not.toHaveProperty('originalLanguage');
+  });
+
+  it('shares one appended title detail fetch with cast instead of calling a second credits endpoint', async () => {
+    fetchMock.mockImplementation(async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname !== '/3/movie/1') throw new Error(`Unexpected TMDB path ${url.pathname}`);
+      return Response.json({
+        id: 1, imdb_id: null, title: 'Fixture', original_title: 'Fixture', overview: 'A unit-test film.',
+        release_date: '2024-01-01', runtime: 90, poster_path: '/fixture.jpg', backdrop_path: '/fixture-backdrop.jpg',
+        original_language: 'en', vote_average: 8, genres: [], release_dates: { results: [] },
+        credits: { cast: [{ id: 7, name: 'Actor', character: 'Lead', known_for_department: 'Acting', profile_path: '/actor.jpg', order: 0 }] },
+      });
+    });
+    const title = { id: 'tmdb:movie:1', type: 'movie' as const, slug: 'fixture-1', name: 'Fixture', synopsis: '', releaseYear: 2024, maturity: 'PG-13' as const, genres: [], tmdbId: '1' };
+    const [detail, cast] = await Promise.all([getTmdbTitle('movie', 'fixture-1'), tmdbCast(title)]);
+    expect(detail?.tmdbId).toBe('1');
+    expect(cast[0]).toMatchObject({ personId: 'tmdb:person:7', profileUrl: 'https://image.tmdb.org/t/p/w185/actor.jpg' });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0]?.[0])).not.toContain('/credits');
   });
 });

@@ -205,26 +205,79 @@ describe('VidNest stream catalog', () => {
     expect(fetchMock).toHaveBeenCalledTimes(34); // Resolver plus master, media manifest, and first media bytes per stream.
   });
 
-  it('deduplicates concurrent resolver/catalog requests and expires catalogs before resolver data', async () => {
+  it('never shares pending request I/O but caches completed resolver data only', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async (url: unknown, _init?: RequestInit) => isResolver(url) ? resolved([{ url: 'https://cdn.example/master.m3u8' }]) : playbackResponse(url));
     vi.stubGlobal('fetch', fetchMock);
     const responses = await Promise.all([GET(request()), GET(request())]);
-    expect(await catalog(responses[0]!)).toEqual(await catalog(responses[1]!));
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    const firstCatalog = await catalog(responses[0]!);
+    const secondCatalog = await catalog(responses[1]!);
+    expect(firstCatalog.map(({ url: _url, ...stream }) => stream))
+      .toEqual(secondCatalog.map(({ url: _url, ...stream }) => stream));
+    expect(fetchMock).toHaveBeenCalledTimes(8);
     await GET(request('type=movie&tmdbId=27205&metadata=1&ignoredViewerId=personal', { headers: { Cookie: 'viewer=private', Authorization: 'viewer-private' } }));
-    expect(fetchMock).toHaveBeenCalledTimes(4);
-    await vi.advanceTimersByTimeAsync(30001);
-    await GET(request());
-    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock).toHaveBeenCalledTimes(8);
     await vi.advanceTimersByTimeAsync(30001);
     await GET(request());
     expect(fetchMock).toHaveBeenCalledTimes(11);
+    await vi.advanceTimersByTimeAsync(30001);
+    await GET(request());
+    expect(fetchMock).toHaveBeenCalledTimes(15);
     for (const call of fetchMock.mock.calls.filter(([url]) => isResolver(url))) {
       const headers = new Headers((call[1] as RequestInit).headers);
       expect(headers.get('cookie')).toBeNull();
       expect(headers.get('authorization')).toBe(`Bearer ${SECRET}`);
     }
+  });
+
+  it('reports the issued capability reuse deadline without extending it on a warm catalog read', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 10, 5));
+    const issuedAt = Date.now();
+    const fetchMock = vi.fn(async (url: unknown) => isResolver(url) ? resolved([
+      { url: `https://cdn.example/master.m3u8?expires=${(issuedAt + 90_000) / 1000}`,
+        subtitles: [{ url: `https://subs.example/en.vtt?exp=${(issuedAt + 45_000) / 1000}`, language: 'en' }] },
+      { url: 'https://cdn.example/other.m3u8' },
+    ]) : playbackResponse(url));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const first = await GET(request());
+    expect(first.headers.get('cache-control')).toBe('private, no-store');
+    const body = await first.json() as { streams: DirectStream[]; expiresAt: number };
+    expect(body.expiresAt).toBe(issuedAt + 45_000);
+    expect(body.streams[0]!.expiresAt).toBe(issuedAt + 45_000);
+    expect(body.streams[1]!.expiresAt).toBe(issuedAt + 4 * 60 * 60 * 1000);
+    const calls = fetchMock.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    const warm = await (await GET(request())).json() as typeof body;
+    expect(warm).toEqual(body);
+    expect(fetchMock).toHaveBeenCalledTimes(calls);
+  });
+
+  it('switches through issued stream URLs without resolving again or consuming the resolver rate limit', async () => {
+    vi.useFakeTimers();
+    const address = { 'cf-connecting-ip': '203.0.113.10' };
+    const fetchMock = vi.fn(async (url: unknown) => isResolver(url) ? resolved([
+      { url: 'https://cdn.example/first.m3u8' }, { url: 'https://cdn.example/second.m3u8' },
+    ]) : playbackResponse(url));
+    vi.stubGlobal('fetch', fetchMock);
+    const streams = await catalog(await GET(request(undefined, { headers: address })));
+
+    for (let index = 0; index < 25; index++) {
+      const selected = streams[index % streams.length]!;
+      const response = await GET(new NextRequest(new URL(selected.url, 'https://app.example'), { headers: address }));
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('/api/vidnest?token=');
+    }
+    expect(fetchMock.mock.calls.filter(([url]) => isResolver(url))).toHaveLength(1);
+    // The limiter remains enforced for new resolution requests, not issued media capabilities.
+    for (let index = 0; index < 19; index++) {
+      expect((await GET(request(undefined, { headers: address }))).status).toBe(200);
+    }
+    expect((await GET(request(undefined, { headers: address }))).status).toBe(429);
+    expect((await GET(new NextRequest(new URL(streams[1]!.url, 'https://app.example'), { headers: address }))).status).toBe(200);
+    expect(fetchMock.mock.calls.filter(([url]) => isResolver(url))).toHaveLength(1);
   });
 
   it('bounds total catalog discovery time while retaining streams that could not be probed', async () => {
@@ -390,17 +443,17 @@ describe('VidNest stream catalog', () => {
     expect(cancel).toHaveBeenCalledOnce();
   });
 
-  it('bounds resolver time, deduplicates its timeout, and retries after timeout', async () => {
+  it('bounds each resolver request independently and retries after timeout', async () => {
     vi.useFakeTimers();
-    const fetchMock = vi.fn().mockImplementationOnce(() => new Promise<Response>(() => undefined));
+    const fetchMock = vi.fn(() => new Promise<Response>(() => undefined));
     vi.stubGlobal('fetch', fetchMock);
     const first = GET(request());
     const second = GET(request());
-    await vi.advanceTimersByTimeAsync(10001);
+    await vi.advanceTimersByTimeAsync(15001);
     expect((await first).status).toBe(504);
     expect((await second).status).toBe(504);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    fetchMock.mockResolvedValueOnce(resolved([]));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    fetchMock.mockReset().mockResolvedValueOnce(resolved([]));
     expect(await catalog(await GET(request()))).toEqual([]);
   });
 
@@ -427,6 +480,34 @@ describe('VidNest stream catalog', () => {
     count = 2;
     await vi.advanceTimersByTimeAsync(10001);
     expect(await catalog(await GET(request()))).toHaveLength(2);
+  });
+
+  it('expires captured child manifests before catalog TTL and signed roots before resolver TTL', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 10, 4));
+    const fetchMock = vi.fn(async (url: unknown) => {
+      const target = new URL(String(url));
+      if (isResolver(url)) return resolved([{ url: `https://cdn.example/master.m3u8?expires=${(Date.now() + 2000) / 1000}` }]);
+      if (target.pathname.endsWith('master.m3u8')) return new Response(
+        `#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en"\n`
+        + `#EXT-X-STREAM-INF:BANDWIDTH=1400000,AUDIO="a"\nvideo.m3u8?exp=${(Date.now() + 1000) / 1000}`,
+      );
+      return new Response(target.pathname.endsWith('.ts') ? muxedAudio(['eng']) : MEDIA);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const first = await catalog(await GET(request()));
+    expect(first[0]!.startupLatencyMs).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await catalog(await GET(request()))).toHaveLength(1);
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    expect(fetchMock.mock.calls.filter(([url]) => isResolver(url))).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(await catalog(await GET(request()))).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => isResolver(url))).toHaveLength(2);
+    const before = fetchMock.mock.calls.length;
+    expect((await GET(new NextRequest(new URL(first[0]!.url, 'https://app.example')))).status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledTimes(before);
   });
 
   it.each(['tmdbId=0&type=movie', 'tmdbId=27205&type=tv', 'tmdbId=27205&type=movie&stream=-1', 'tmdbId=27205&type=movie&stream=Infinity'])('rejects invalid catalog/playback parameters without network calls (%s)', async (params) => {

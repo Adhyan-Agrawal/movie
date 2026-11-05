@@ -2,6 +2,8 @@
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { getDefaultProfileId } from './queries';
+import { features } from '@/lib/env';
+import { ACCOUNT_SERVICES_UNAVAILABLE, isStoredCatalogId } from '@/features/account/availability';
 
 /**
  * Watchlist mutations (Spec Sections 4, 7, 8). All runs as the signed-in
@@ -27,6 +29,9 @@ export async function toggleWatchlistAction(
   titleId: string,
   currentlyInList: boolean,
 ): Promise<WatchlistToggleResult> {
+  if (!features.supabaseConfigured) return { ok: false, inWatchlist: currentlyInList, signedIn: false, error: ACCOUNT_SERVICES_UNAVAILABLE };
+  if (!isStoredCatalogId(titleId)) return { ok: false, inWatchlist: currentlyInList, signedIn: false, error: 'Saving this public title is unavailable.' };
+  try {
   const db = await getSupabaseServerClient();
   const { data: user } = await db.auth.getUser();
   if (!user.user) {
@@ -51,7 +56,7 @@ export async function toggleWatchlistAction(
       { onConflict: 'profile_id,name' },
     );
   if (ensureErr) {
-    return { ok: false, inWatchlist: currentlyInList, signedIn: true, error: ensureErr.message };
+    return { ok: false, inWatchlist: currentlyInList, signedIn: true, error: 'Could not update your watchlist. Please try again.' };
   }
 
   const { data: list, error: listErr } = await db
@@ -64,7 +69,7 @@ export async function toggleWatchlistAction(
       ok: false,
       inWatchlist: currentlyInList,
       signedIn: true,
-      error: listErr?.message ?? 'Watchlist not found.',
+      error: 'Could not read your watchlist. Please try again.',
     };
   }
 
@@ -75,7 +80,7 @@ export async function toggleWatchlistAction(
       .eq('watchlist_id', list.id)
       .eq('title_id', titleId);
     if (delErr) {
-      return { ok: false, inWatchlist: true, signedIn: true, error: delErr.message };
+      return { ok: false, inWatchlist: true, signedIn: true, error: 'Could not update your watchlist. Please try again.' };
     }
     return { ok: true, inWatchlist: false, signedIn: true };
   }
@@ -84,7 +89,10 @@ export async function toggleWatchlistAction(
     .from('watchlist_items')
     .upsert({ watchlist_id: list.id, title_id: titleId }, { onConflict: 'watchlist_id,title_id' });
   if (addErr) {
-    return { ok: false, inWatchlist: false, signedIn: true, error: addErr.message };
+    return { ok: false, inWatchlist: false, signedIn: true, error: 'Could not update your watchlist. Please try again.' };
   }
   return { ok: true, inWatchlist: true, signedIn: true };
+  } catch {
+    return { ok: false, inWatchlist: currentlyInList, signedIn: false, error: ACCOUNT_SERVICES_UNAVAILABLE };
+  }
 }

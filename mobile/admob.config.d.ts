@@ -1,5 +1,5 @@
-export interface AdMobConfiguration { appId: string; bannerId: string; interstitialId: string; testAds: boolean }
-export const TEST_IDS: Readonly<Omit<AdMobConfiguration, 'testAds'>>;
+export interface AdMobConfiguration { appId: string; iosAppId: string; bannerId: string; interstitialId: string; testAds: boolean; enabled: boolean }
+export const TEST_IDS: Readonly<Omit<AdMobConfiguration, 'testAds' | 'enabled'>>;
 export function resolveAdMobConfig(input?: {
-  appId?: string; bannerId?: string; interstitialId?: string; testAds?: string; development?: boolean;
+  appId?: string; iosAppId?: string; bannerId?: string; interstitialId?: string; testAds?: string; development?: boolean;
 }): AdMobConfiguration;

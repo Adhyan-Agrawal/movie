@@ -9,6 +9,10 @@ import { GuestContinueWatchingRow } from '@/features/catalog/components/GuestCon
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
 import { DiscoveryNav } from '@/features/catalog/components/DiscoveryNav';
+import { Container } from '@/components/ui/Container';
+import { Icon } from '@/components/ui/Icon';
+import { features } from '@/lib/env';
+import { SectionReveal } from '@/components/ui/SectionReveal';
 
 export default async function HomePage() {
   const { hero, heroTitles, continueWatching, rows, collections, forYou, degraded, signedIn } = await getHomeData();
@@ -17,9 +21,9 @@ export default async function HomePage() {
   if (!hero) {
     return (
       <div className="flex flex-col gap-8 py-16">
-        {signedIn ? <ContinueWatchingRow entries={continueWatching} /> : <GuestContinueWatchingRow />}
+        {signedIn ? <ContinueWatchingRow entries={continueWatching} /> : <GuestContinueWatchingRow accountsAvailable={features.supabaseConfigured} />}
         {forYou ? <MediaRow row={forYou} /> : null}
-        <div className="px-4 md:px-8">
+        <Container>
         {degraded ? (
           <EmptyState
             icon="⚠"
@@ -38,53 +42,48 @@ export default async function HomePage() {
             }
           />
         )}
-        </div>
+        </Container>
       </div>
     );
   }
 
   return (
-    <div className="discovery-home flex flex-col gap-8 pb-12 md:gap-10">
-      {/* Rotating hero: auto-advances through the top trending titles so the
-          banner shows fresh movies/series on every visit. */}
+    <div className="discovery-home">
       {heroTitles.length > 1 ? (
         <HeroCarousel>{heroTitles.map((t, index) => <Hero key={t.id} title={t} priority={index === 0} />)}</HeroCarousel>
       ) : (
         <Hero title={hero} />
       )}
 
-      <div className="flex flex-col gap-4 px-4 md:px-8">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <p className="text-sm text-content-muted">Your world of movies and series.</p>
-          <div className="flex gap-4 text-sm font-semibold">
-            <Link href="/movies" className="min-h-11 content-center hover:text-primary">Movies</Link>
-            <Link href="/tv" className="min-h-11 content-center hover:text-primary">Series</Link>
-            <Link href="/account/watchlist" className="min-h-11 content-center hover:text-primary">My watchlist</Link>
-          </div>
+      <Container className="home-discovery-intro">
+        <div className="home-intro-heading">
+          <div><p className="site-eyebrow">The collection</p><h2 className="home-intro-title">A world of stories.<br /><span>Find yours.</span></h2></div>
+          <Link href="/account/watchlist" prefetch={false} className="home-watchlist-link"><Icon name="bookmark" width="18" height="18" />My watchlist<Icon name="arrow-right" width="18" height="18" /></Link>
         </div>
         <DiscoveryNav collections={collections ?? []} />
-      </div>
-      <div className="flex flex-col gap-10">
+      </Container>
+      <div className="home-shelves">
         {/* Continue watching: server-side row for signed-in viewers; guests get
             a browser-local row instead (localStorage) — one or the other, never
             another user's history. */}
         {signedIn ? (
           <ContinueWatchingRow entries={continueWatching} />
         ) : (
-          <GuestContinueWatchingRow />
+          <GuestContinueWatchingRow accountsAvailable={features.supabaseConfigured} />
         )}
         {/* Personalized row (Spec Section 13): titles matched to this viewer's
             taste — shown only when there's enough history to recommend from. */}
-        {forYou ? <MediaRow row={forYou} /> : null}
+        {forYou ? <SectionReveal><MediaRow row={forYou} variant="landscape" /></SectionReveal> : null}
         {/* Ad (Spec Section 11): one leaderboard below the fold — after the first
             content rows, before the rest. Low density by design. */}
         {rows.map((row, index) => (
-          <div key={row.id} className="flex flex-col gap-10">
-            <MediaRow row={row} />
+          <div key={row.id} className="home-shelf-group">
+            <SectionReveal><MediaRow row={row} number={index + 1} variant={index % 4 === 2 ? 'landscape' : 'poster'} /></SectionReveal>
             {index === 0 && rows.length > 1 ? <ConsentGate><AdSlot slot="homeLeaderboard" /></ConsentGate> : null}
           </div>
         ))}
       </div>
+      <Container><SectionReveal className="home-closing"><p className="site-eyebrow">Keep exploring</p><h2>There is always<br />another story.</h2><Link href="/browse" prefetch={false} className="home-closing-link">Explore the full catalog<Icon name="arrow-right" /></Link></SectionReveal></Container>
     </div>
   );
 }

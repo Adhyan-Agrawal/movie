@@ -38,6 +38,21 @@ const PROVIDER_FRAME_HOSTS = [
  * embed and are fully enforced today.
  */
 const isDev = process.env.NODE_ENV !== 'production';
+
+export function watchPartyConnectSource(value) {
+  if (!value || value !== value.trim() || /[\r\n\0]/.test(value)) return null;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.pathname !== '/' || url.search || url.hash) return null;
+    if (url.protocol === 'https:') return `wss://${url.host}`;
+    const local = url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]';
+    return isDev && local && url.protocol === 'http:' ? `ws://${url.host}` : null;
+  } catch {
+    return null;
+  }
+}
+
+const WATCH_PARTY_CONNECT_SOURCE = watchPartyConnectSource(process.env.WATCH_PARTY_WORKER_URL);
 const SCRIPT_SRC = isDev
   ? "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://www.highperformanceformat.com https://www.gstatic.com"
   : "script-src 'self' 'unsafe-inline' https://www.highperformanceformat.com https://www.gstatic.com";
@@ -62,7 +77,7 @@ const CONTENT_SECURITY_POLICY = [
   // admin-configured remote streams. https: is required because remote
   // licensed CDN hosts are not known ahead of time; hls.js fetches segments
   // over XHR, so connect-src must allow them too.
-  "connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.themoviedb.org https:",
+  `connect-src 'self' https://*.supabase.co wss://*.supabase.co https://api.themoviedb.org https:${WATCH_PARTY_CONNECT_SOURCE ? ` ${WATCH_PARTY_CONNECT_SOURCE}` : ''}`,
   "media-src 'self' blob: https:",
 ].join('; ');
 

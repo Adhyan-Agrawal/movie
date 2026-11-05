@@ -1,46 +1,44 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  ActivityIndicator,
-  AccessibilityInfo,
-  useWindowDimensions,
-  Pressable,
   RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
   View,
 } from 'react-native';
-import { useFocusEffect, useNavigation } from '@react-navigation/native';
+import { useFocusEffect, useNavigation, type CompositeNavigationProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
+import type { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
-import { colors, radius, spacing, type } from '../theme';
-import { Button, EmptyState, Loading, Screen, SectionTitle } from '../components/ui';
+import { colors, spacing, type } from '../theme';
+import { EmptyState, FilterChip, IconButton, Notice, Screen, SectionTitle } from '../components/ui';
+import { Skeletons } from '../components/Skeletons';
+import { BROWSE_GAP, useBrowseLayout } from '../components/layout';
 import { Hero } from '../components/Hero';
 import { Row } from '../components/Row';
 import { MediaCard } from '../components/MediaCard';
 import { HomeAdMobBanner } from '../ads/AdMobProvider';
 import { currentUser, fetchContinueWatching, listAllGenres } from '../lib/api';
-import { fetchHome, getTitleBySlug, listTitles } from '../lib/catalog-bridge';
+import { fetchHome, getCachedHome, getTitleBySlug, listTitles } from '../lib/catalog-bridge';
 import { readGuestEntries } from '../lib/guest';
 import type { ContinueEntry, HomeData, MediaRow, Title, TitleFilters } from '../lib/types';
-import type { RootStackParamList } from '../navigation';
+import type { RootStackParamList, TabParamList } from '../navigation';
 
 /**
- * Home — the catalog landing surface.
+ * Home: real catalog shelves and account or device-local continue watching.
  *
- * Loads `fetchHome()` on mount and renders the auto-advancing hero carousel
- * followed by one shelf per returned row. Pull-to-refresh re-fetches the whole
- * payload. The screen is deliberately honest about state: a failed fetch or an
+ * Uses recently verified public home data on focus and renders the manually paged
+ * hero followed by one shelf per returned row. Pull-to-refresh bypasses that
+ * cache; account/device history is always read separately. A failed fetch or an
  * empty catalog shows an EmptyState (with a retry) instead of placeholder
  * titles, so nothing on screen is invented data.
  *
  * "Browse by genre" chips come from `listAllGenres()`; tapping one filters the
  * catalog with `listTitles({ genre })` and renders the results inline in a
- * three-column grid below the chips. Tapping again clears the selection.
+ * responsive grid below the chips. Tapping again clears the selection.
  */
 
-const COLUMN_GAP = spacing(3);
 const MAX_GENRES = 18;
 
 type Collection = NonNullable<HomeData['collections']>[number];
@@ -49,13 +47,17 @@ type LoadState = 'loading' | 'ready' | 'error';
 type GenreState = 'idle' | 'loading' | 'ready' | 'error';
 
 export default function HomeScreen() {
-  const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
+  const navigation = useNavigation<CompositeNavigationProp<BottomTabNavigationProp<TabParamList>, NativeStackNavigationProp<RootStackParamList>>>();
   const insets = useSafeAreaInsets();
-  const { width } = useWindowDimensions();
-  const cardWidth = Math.floor((width - spacing(4) * 2 - COLUMN_GAP * 2) / 3);
+  const layout = useBrowseLayout();
   const scroll = useRef<ScrollView>(null);
   const filterTop = useRef(0);
+  const filterScrollRequested = useRef(false);
   const homeRequest = useRef(0);
+  const genreListRequest = useRef(0);
+  const hasLoaded = useRef(false);
+  const mounted = useRef(true);
+  const selectedFilters = useRef<TitleFilters>({});
 
   const [state, setState] = useState<LoadState>('loading');
   const [hero, setHero] = useState<Title[]>([]);
@@ -63,7 +65,8 @@ export default function HomeScreen() {
   const [collections, setCollections] = useState<Collection[]>([]);
   const [continueEntries, setContinueEntries] = useState<ContinueEntry[]>([]);
   const [refreshing, setRefreshing] = useState(false);
-  const [reducedMotion, setReducedMotion] = useState(true);
+  const [refreshFailed, setRefreshFailed] = useState(false);
+  const [resumeFailed, setResumeFailed] = useState(false);
 
   const [genres, setGenres] = useState<string[]>([]);
   const [activeGenre, setActiveGenre] = useState<string | null>(null);
@@ -85,11 +88,13 @@ export default function HomeScreen() {
    */
   const playEntry = useCallback(
     async (entry: ContinueEntry) => {
+      setResumeFailed(false);
       let t = entry.title;
       if (!t.tmdbId && !t.imdbId) {
         const fresh = await getTitleBySlug(t.type, t.slug).catch(() => null);
         if (fresh) t = fresh;
       }
+      if (!mounted.current) return;
       navigation.navigate('Player', {
         titleId: t.id,
         type: t.type,
@@ -107,39 +112,38 @@ export default function HomeScreen() {
     [navigation],
   );
 
-  /** Fetch the full home payload. Errors become an explicit error state. */
+  /** Public catalog and private/device history have separate lifetimes. */
   const loadHome = useCallback(async (isRefresh: boolean) => {
-    const request = ++homeRequest.current;
+    const request = homeRequest.current + 1;
+    homeRequest.current = request;
     setRefreshing(isRefresh);
-    if (!isRefresh) setState('loading');
+    setContinueEntries([]);
+    if (!isRefresh && !hasLoaded.current) setState('loading');
+    // A cached public home must not wait for account or guest history. Never
+    // reuse that history across focus loads or a viewer-identity transition.
+    void (async () => {
+      let entries: ContinueEntry[] = [];
+      try {
+        const user = await currentUser();
+        entries = user ? await fetchContinueWatching(12) : await readGuestEntries();
+      } catch { /* History failure cannot hide the public catalog. */ }
+      if (request === homeRequest.current && mounted.current) setContinueEntries(entries);
+    })();
     try {
-      // Continue Watching lives on Home (not just the Account tab) — signed-in
-      // viewers read their server rows, guests their device-local store. A
-      // failure here must not sink the catalog, so it degrades to no shelf.
-      const [data, continueEntries] = await Promise.all([
-        fetchHome(),
-        (async () => {
-          try {
-            const user = await currentUser();
-            return user ? await fetchContinueWatching(12) : await readGuestEntries();
-          } catch {
-            return [];
-          }
-        })(),
-      ]);
+      const cached = isRefresh ? null : getCachedHome();
+      const data = cached ?? await fetchHome({ refresh: isRefresh });
       if (request !== homeRequest.current) return;
       setHero(data.hero);
       setRows(data.rows.filter((row) => row.titles.length > 0));
       setCollections(data.collections ?? []);
-      setContinueEntries(continueEntries);
+      hasLoaded.current = true;
+      setRefreshFailed(false);
       setState('ready');
     } catch {
       if (request !== homeRequest.current) return;
-      setHero([]);
-      setRows([]);
-      setCollections([]);
       setContinueEntries([]);
-      setState('error');
+      setRefreshFailed(hasLoaded.current);
+      setState(hasLoaded.current ? 'ready' : 'error');
     } finally {
       if (request === homeRequest.current) setRefreshing(false);
     }
@@ -147,28 +151,30 @@ export default function HomeScreen() {
 
   /** Genres are a secondary section — a failure just hides the chips. */
   const loadGenres = useCallback(async () => {
+    const request = genreListRequest.current + 1;
+    genreListRequest.current = request;
     try {
-      setGenres(await listAllGenres());
+      const list = await listAllGenres();
+      if (request === genreListRequest.current) setGenres(list);
     } catch {
-      setGenres([]);
+      if (request === genreListRequest.current) setGenres([]);
     }
   }, []);
 
   useEffect(() => {
+    mounted.current = true;
     void loadGenres();
-    let mounted = true;
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReducedMotion);
-    void AccessibilityInfo.isReduceMotionEnabled().then((value) => { if (mounted) setReducedMotion(value); }).catch(() => {});
     return () => {
-      mounted = false;
+      mounted.current = false;
       homeRequest.current++;
       genreRequest.current++;
-      subscription.remove();
+      genreListRequest.current++;
     };
   }, [loadGenres]);
 
   useFocusEffect(useCallback(() => {
     void loadHome(false);
+    return () => { homeRequest.current++; };
   }, [loadHome]));
 
   const onRefresh = useCallback(() => {
@@ -178,8 +184,8 @@ export default function HomeScreen() {
 
   /** Toggle a genre chip and swap the inline grid for its titles. */
   const onPressGenre = useCallback(
-    async (genre: string, filters: TitleFilters = { genre }, collectionId = `genre:${genre}`) => {
-      if (collectionId === activeFilterId) {
+    async (genre: string, filters: TitleFilters = { genre }, collectionId = `genre:${genre}`, retry = false) => {
+      if (collectionId === activeFilterId && !retry) {
         genreRequest.current += 1; // drop any in-flight load for the old chip
         setActiveGenre(null);
         setActiveFilterId(null);
@@ -188,6 +194,8 @@ export default function HomeScreen() {
         return;
       }
       const id = ++genreRequest.current;
+      filterScrollRequested.current = true;
+      selectedFilters.current = filters;
       setActiveGenre(genre);
       setActiveFilterId(collectionId);
       setGenreTitles([]);
@@ -209,29 +217,36 @@ export default function HomeScreen() {
   const hasContent = hero.length > 0 || rows.length > 0 || continueEntries.length > 0;
 
   const discoverySection = genres.length > 0 || collections.length > 0 || activeFilterId ? (
-    <View style={styles.genreSection} onLayout={(event) => { filterTop.current = event.nativeEvent.layout.y; }}>
-      <SectionTitle>Find your next favorite</SectionTitle>
-      {collections.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.collectionChips}>
-        {collections.map((item) => <Chip key={item.id} label={item.label} active={item.id === activeFilterId} onPress={() => void onPressGenre(item.label, item.filters, item.id)} />)}
+    <View style={styles.genreSection} onLayout={(event) => {
+      filterTop.current = event.nativeEvent.layout.y;
+      if (filterScrollRequested.current) {
+        filterScrollRequested.current = false;
+        scroll.current?.scrollTo({ y: filterTop.current, animated: false });
+      }
+    }}>
+      <SectionTitle description="Follow a genre. Find a new story.">Explore</SectionTitle>
+      {collections.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[styles.collectionChips, { paddingHorizontal: layout.gutter }]}>
+        {collections.map((item) => <FilterChip key={item.id} label={item.label} active={item.id === activeFilterId} accessibilityLabel={`Browse ${item.label}`} onPress={() => void onPressGenre(item.label, item.filters, item.id)} />)}
       </ScrollView> : null}
-      <View style={styles.chips}>
-        {genres.slice(0, MAX_GENRES).filter((genre) => !collections.some((item) => item.filters.genre === genre)).map((genre) => <Chip key={genre} label={genre} active={`genre:${genre}` === activeFilterId} onPress={() => void onPressGenre(genre)} />)}
-      </View>
-      {genreState === 'loading' ? <InlineLoading label={`Loading ${activeGenre}...`} /> : null}
-      {genreState === 'error' ? <EmptyState title="Couldn't load that collection" description="Select it again to clear, then retry." /> : null}
-      {genreState === 'ready' ? <Text accessibilityRole="header" accessibilityLiveRegion="polite" style={styles.resultsLabel}>{activeGenre} / {genreTitles.length} titles</Text> : null}
-      {genreState === 'ready' && !genreTitles.length ? <EmptyState title="No matching titles right now" /> : null}
-      {genreState === 'ready' && genreTitles.length > 0 ? <View style={styles.grid}>
-        {genreTitles.map((title) => <MediaCard key={title.id} title={title} width={cardWidth} onPress={() => openTitle(title)} />)}
+      {genres.length ? <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={[styles.collectionChips, { paddingHorizontal: layout.gutter }]}>
+        {genres.slice(0, MAX_GENRES).filter((genre) => !collections.some((item) => item.filters.genre === genre)).map((genre) => <FilterChip key={genre} label={genre} active={`genre:${genre}` === activeFilterId} accessibilityLabel={`Browse ${genre}`} onPress={() => void onPressGenre(genre)} />)}
+      </ScrollView> : null}
+      {activeGenre && genreState !== 'idle' ? <SectionTitle description={genreState === 'ready' ? `${genreTitles.length} ${genreTitles.length === 1 ? 'title' : 'titles'}` : undefined} actionLabel="Clear filter" onAction={() => void onPressGenre(activeGenre, selectedFilters.current, activeFilterId ?? undefined)}>{activeGenre}</SectionTitle> : null}
+      {genreState === 'loading' ? <Skeletons label={`Loading ${activeGenre}`} /> : null}
+      {genreState === 'error' ? <EmptyState compact title="This collection didn't load" description="Check your connection, then try again." actionLabel="Try again" onAction={() => activeGenre && void onPressGenre(activeGenre, selectedFilters.current, activeFilterId ?? undefined, true)} /> : null}
+      {genreState === 'ready' && !genreTitles.length ? <EmptyState compact title="No titles here right now" description="Explore another collection or genre." /> : null}
+      {genreState === 'ready' && genreTitles.length > 0 ? <View style={[styles.grid, { paddingHorizontal: layout.gutter }]}>
+        {genreTitles.map((title) => <MediaCard key={title.id} title={title} width={layout.cardWidth} onPress={() => openTitle(title)} />)}
       </View> : null}
     </View>
   ) : null;
 
   return (
-    <Screen>
+    <Screen safeSides>
       <ScrollView
         ref={scroll}
-        contentContainerStyle={[styles.scroll, { paddingTop: insets.top + spacing(4) }]}
+        style={{ width: '100%', maxWidth: layout.width, alignSelf: 'center' }}
+        contentContainerStyle={[styles.scroll, { paddingTop: insets.top + spacing(4), paddingBottom: spacing(10) + insets.bottom }]}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
@@ -243,49 +258,50 @@ export default function HomeScreen() {
           />
         }
       >
-        <Text style={styles.wordmark} accessibilityRole="header">
-          Lumora
-        </Text>
+        <View style={[styles.header, { paddingHorizontal: layout.gutter }]}>
+          <View style={styles.headerCopy}><Text style={styles.wordmark} accessibilityRole="header">Lumora</Text><Text style={styles.headerCaption}>A world of stories.</Text></View>
+          <IconButton icon="search" label="Search films, series, and people" onPress={() => navigation.navigate('Search')} />
+        </View>
 
-        {state === 'loading' ? <Loading label="Loading Lumora…" /> : null}
+        {state === 'loading' ? <Skeletons kind="home" label="Loading Lumora" /> : null}
+        {state === 'ready' && refreshFailed ? <View style={[styles.notice, { marginHorizontal: layout.gutter }]}><Notice title="You're viewing the last loaded titles" description="We couldn't refresh. Check your connection and try again." actionLabel="Retry" onAction={() => void loadHome(true)} /></View> : null}
 
         {state === 'error' ? (
-          <>
-            <EmptyState title="Couldn’t load Lumora" description="Check your connection and pull down to retry." />
-            <Button label="Try again" onPress={() => void loadHome(false)} style={styles.retry} />
-          </>
+          <EmptyState title="Your next watch is a moment away" description="We couldn't connect. If you're offline, reconnect and try again." actionLabel="Try again" onAction={() => void loadHome(true)} />
         ) : null}
 
         {state === 'ready' && !hasContent ? (
-          <EmptyState title="Nothing to watch yet" description="No titles are available from the catalog right now." />
+          <EmptyState title="New stories are on their way" description="There are no titles to show right now. Try again in a little while." actionLabel="Refresh" onAction={() => void loadHome(true)} />
         ) : null}
 
         {state === 'ready' && hasContent ? (
           <>
-            {/* Continue Watching first: it's the most likely thing a returning
-                viewer wants, and it only renders when there's real history. */}
+            <Hero titles={hero} onPressTitle={openTitle} />
+            {/* Only show this shelf when there's real account or guest history. */}
             {continueEntries.length > 0 ? (
               <Row
                 heading="Continue watching"
+                variant="landscape"
                 titles={continueEntries.map((e) => e.title)}
                 onPressTitle={(t) => {
                   const entry = continueEntries.find((e) => e.title.id === t.id);
-                  if (entry) void playEntry(entry);
+                  if (entry) void playEntry(entry).catch(() => { if (mounted.current) setResumeFailed(true); });
                 }}
                 progressById={Object.fromEntries(continueEntries.map((e) => [e.title.id, e.progress]))}
+                captionById={Object.fromEntries(continueEntries.map((entry) => [entry.title.id, entry.seasonNumber !== undefined && entry.episodeNumber !== undefined ? `Resume S${entry.seasonNumber} E${entry.episodeNumber}` : 'Continue watching']))}
               />
             ) : null}
-            <Hero key={reducedMotion ? 'still' : 'carousel'} titles={reducedMotion ? hero.slice(0, 1) : hero} onPressTitle={openTitle} />
-            <HomeAdMobBanner />
+            {resumeFailed ? <View style={[styles.notice, { marginHorizontal: layout.gutter }]}><Notice title="We couldn't open that title" description="Check your connection and try the title again." /></View> : null}
+            <View style={styles.banner}><HomeAdMobBanner /></View>
             {discoverySection}
             {rows.map((row) => (
               <View key={row.id}>
-                {row.filters ? <Pressable onPress={() => void onPressGenre(row.heading, row.filters, row.collectionId ?? row.id)} accessibilityRole="button" accessibilityLabel={`View all ${row.heading}`} style={styles.viewAll}><Text style={styles.viewAllText}>View all / {row.heading}</Text></Pressable> : null}
                 <Row
                   heading={row.heading}
                   reason={row.reason}
                   titles={row.titles}
                   onPressTitle={openTitle}
+                  onPressAll={row.filters ? () => void onPressGenre(row.heading, row.filters, row.collectionId ?? row.id) : undefined}
                 />
               </View>
             ))}
@@ -298,61 +314,20 @@ export default function HomeScreen() {
   );
 }
 
-/** Genre filter chip — toggles the inline grid below the row of chips. */
-function Chip({ label, active, onPress }: { label: string; active: boolean; onPress: () => void }) {
-  return (
-    <Pressable
-      onPress={onPress}
-      accessibilityRole="button"
-      accessibilityState={{ selected: active }}
-      accessibilityLabel={`Browse ${label} titles`}
-      style={({ pressed }) => [styles.chip, active && styles.chipActive, { opacity: pressed ? 0.8 : 1 }]}
-    >
-      <Text style={[styles.chipLabel, active && styles.chipLabelActive]}>{label}</Text>
-    </Pressable>
-  );
-}
-
-/** Compact spinner sized for inline sections (the shared `Loading` fills space). */
-function InlineLoading({ label }: { label: string }) {
-  return (
-    <View style={styles.inlineLoading} accessibilityRole="progressbar" accessibilityLabel={label}>
-      <ActivityIndicator color={colors.primary} />
-      <Text style={styles.inlineLoadingLabel}>{label}</Text>
-    </View>
-  );
-}
-
 const styles = StyleSheet.create({
-  scroll: { flexGrow: 1, paddingBottom: spacing(8) },
-  wordmark: { ...type.h1, color: colors.content, paddingHorizontal: spacing(4), marginBottom: spacing(3) },
-  retry: { marginHorizontal: spacing(4), alignSelf: 'center', minWidth: 160 },
-  genreSection: { marginTop: spacing(2) },
-  collectionChips: { gap: spacing(2), paddingHorizontal: spacing(4), paddingBottom: spacing(3) },
-  resultsLabel: { ...type.small, color: colors.contentMuted, paddingHorizontal: spacing(4), paddingTop: spacing(3) },
-  viewAll: { minHeight: 44, justifyContent: 'center', alignItems: 'flex-end', paddingHorizontal: spacing(4), marginTop: spacing(2) },
-  viewAllText: { ...type.small, color: colors.primary, fontWeight: '600' },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing(2), paddingHorizontal: spacing(4) },
-  chip: {
-    minHeight: 44,
-    justifyContent: 'center',
-    paddingHorizontal: spacing(3),
-    paddingVertical: spacing(2),
-    borderRadius: radius.pill,
-    backgroundColor: colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: colors.border,
-  },
-  chipActive: { backgroundColor: colors.primary, borderColor: colors.primary },
-  chipLabel: { ...type.small, color: colors.contentMuted, fontWeight: '600' },
-  chipLabelActive: { color: colors.primaryContrast },
+  scroll: { flexGrow: 1 },
+  header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: spacing(3), marginBottom: spacing(6) },
+  headerCopy: { flex: 1, gap: spacing(1) },
+  wordmark: { ...type.h1, fontSize: 28, lineHeight: 34, color: colors.primary },
+  headerCaption: { ...type.small, color: colors.contentMuted },
+  genreSection: { marginBottom: spacing(8) },
+  collectionChips: { gap: spacing(2), paddingBottom: spacing(3) },
+  notice: { marginBottom: spacing(6) },
+  banner: { marginBottom: spacing(6) },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: COLUMN_GAP,
-    paddingHorizontal: spacing(4),
-    marginTop: spacing(3),
+    gap: BROWSE_GAP,
+    rowGap: spacing(6),
   },
-  inlineLoading: { flexDirection: 'row', alignItems: 'center', gap: spacing(2), padding: spacing(4) },
-  inlineLoadingLabel: { ...type.small, color: colors.contentMuted },
 });

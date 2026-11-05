@@ -1,12 +1,13 @@
 import Link from 'next/link';
 import { buttonClasses } from '@/components/ui/Button';
 import { cn } from '@/lib/cn';
+import { ACCOUNT_SERVICES_UNAVAILABLE } from './availability';
 
 /**
  * Reusable "not signed in" panel (Section 0: every feature needs an
  * unauthorized state). Links to the real sign-in / sign-up routes.
  */
-export function UnauthorizedState({ className, next }: { className?: string; next?: string }) {
+export function UnauthorizedState({ className, next, unavailable = false }: { className?: string; next?: string; unavailable?: boolean }) {
   const signinHref = next ? `/signin?next=${encodeURIComponent(next)}` : '/signin';
 
   return (
@@ -24,20 +25,19 @@ export function UnauthorizedState({ className, next }: { className?: string; nex
         🔒
       </span>
       <div className="flex flex-col gap-1.5">
-        <h2 className="text-lg font-semibold">Sign in to continue</h2>
+        <h2 className="text-lg font-semibold">{unavailable ? 'Accounts are unavailable' : 'Sign in to continue'}</h2>
         <p className="max-w-sm text-sm text-content-muted">
-          Your profiles, watchlist, history, and preferences live in your Lumora account. Sign in to pick up right
-          where you left off.
+          {unavailable ? ACCOUNT_SERVICES_UNAVAILABLE : 'Your profiles, watchlist, history, and preferences live in your Lumora account. Sign in to pick up right where you left off.'}
         </p>
       </div>
-      <div className="flex flex-wrap items-center justify-center gap-2">
+      {unavailable ? <Link href="/browse" className={buttonClasses({ variant: 'primary' })}>Browse titles</Link> : <div className="flex flex-wrap items-center justify-center gap-2">
         <Link href={signinHref} className={buttonClasses({ variant: 'primary' })}>
           Sign in
         </Link>
         <Link href="/signup" className={buttonClasses({ variant: 'secondary' })}>
           Create account
         </Link>
-      </div>
+      </div>}
     </div>
   );
 }

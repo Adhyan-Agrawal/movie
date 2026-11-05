@@ -18,7 +18,11 @@ const mock = vi.hoisted(() => {
     app: { currentState: 'active', addEventListener: vi.fn(() => ({ remove: vi.fn() })) },
     getItem: vi.fn(), setItem: vi.fn(), fetch: vi.fn(), intro: vi.fn(), bridge: vi.fn(), vast: vi.fn(),
     subtitles: vi.fn(), streams: vi.fn(), resetObservation: vi.fn(), adDue: false, orientation: vi.fn(),
+    context: vi.fn(), episodes: vi.fn(), replace: vi.fn(), guestWatch: vi.fn(), guestPosition: vi.fn(),
     route: { params: { titleId: 'show', type: 'tv', slug: 'show', name: 'Show', tmdbId: '123', season: 1, episode: 1 } } as any,
+    partyServiceAvailable: false,
+    party: { state: { phase: 'idle', participants: [], self: null, room: null, playback: null },
+      registerPlayerPort: vi.fn(), notifySourceChange: vi.fn() },
   };
 });
 
@@ -46,7 +50,10 @@ vi.mock('../../mobile/node_modules/react', async (original) => ({ ...await origi
 }));
 vi.mock('../../mobile/node_modules/react-native', () => ({ AppState: mock.app,
   BackHandler: { addEventListener: () => ({ remove: vi.fn() }) },
+  Platform: { OS: 'android', Version: 35 },
   Pressable: 'Pressable', ScrollView: 'ScrollView', Text: 'Text', View: 'View', useWindowDimensions: () => mock.dimensions,
+  ActivityIndicator: 'ActivityIndicator', Animated: { View: 'AnimatedView', Value: class { interpolate() { return 0; } },
+    timing: () => ({ start: vi.fn(), stop: vi.fn() }) },
   StyleSheet: { create: (value: unknown) => value, absoluteFill: {} },
 }));
 vi.mock('../../mobile/node_modules/react-native-safe-area-context', () => ({ useSafeAreaInsets: () => mock.insets }));
@@ -60,27 +67,43 @@ vi.mock('../../mobile/node_modules/expo-video', () => ({ VideoView: 'VideoView',
   return mock.player;
 } }));
 vi.mock('../../mobile/src/player/VastAdBreak', () => ({ default: 'NativeVastAd' }));
+vi.mock('../../mobile/src/watch-party/WatchPartySheet', () => ({ default: 'WatchPartySheet' }));
+vi.mock('../../mobile/src/watch-party/useWatchPartySession', () => ({ useWatchPartySession: () => mock.party }));
+vi.mock('../../mobile/src/watch-party/config', () => ({
+  get WATCH_PARTY_SERVICE_AVAILABLE() { return mock.partyServiceAvailable; },
+}));
 vi.mock('../../mobile/src/player/policy', async (original) => ({ ...await original<typeof import('../../mobile/src/player/policy')>(),
   createNativeAdSchedule: () => ({ sample: () => mock.adDue, resetObservation: mock.resetObservation, finish: vi.fn() }),
 }));
 vi.mock('../../mobile/src/lib/api', () => ({
   fetchIntroCatalog: mock.intro, resolvePlaybackDetails: mock.bridge, fetchVastCreative: mock.vast,
   fetchSubtitleCatalog: mock.subtitles, fetchStreamCatalog: mock.streams,
-  sameOriginPlaybackUrl: (url: string) => new URL(url, 'https://hulkofyt.eu.org').href,
-  getPlaybackContext: async () => ({ viewerKey: 'guest', resume: null }), listSeasons: async () => [],
+  fetchEpisodeNavigation: mock.episodes, PLAYBACK_CONTEXT_TIMEOUT_MS: 1500,
+  sameOriginPlaybackUrl: (url: unknown) => typeof url === 'string' ? new URL(url, 'https://hulkofyt.eu.org').href : null,
+  getPlaybackContext: mock.context,
+  withPlaybackDeadline: async (operation: (signal: AbortSignal) => unknown, timeoutMs: number, signal?: AbortSignal) => {
+    const controller = new AbortController(); const abort = () => controller.abort();
+    signal?.addEventListener('abort', abort);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([Promise.resolve().then(() => operation(controller.signal)), new Promise((_, reject) => {
+        timer = setTimeout(() => { controller.abort(); reject(new Error('timed out')); }, timeoutMs);
+      })]);
+    } finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+  },
   recordPlaybackSession: vi.fn(), reportProgress: vi.fn(),
 }));
-vi.mock('../../mobile/src/lib/guest', () => ({ getGuestResume: async () => null, recordGuestWatch: vi.fn(), updateGuestPosition: vi.fn() }));
+vi.mock('../../mobile/src/lib/guest', () => ({ getGuestResume: async () => null, recordGuestWatch: mock.guestWatch, updateGuestPosition: mock.guestPosition }));
 vi.mock('../../mobile/src/components/ui', () => ({ Button: 'Button' }));
 vi.mock('../../mobile/node_modules/@react-navigation/native', () => ({ useRoute: () => mock.route,
-  useNavigation: () => ({ canGoBack: () => true, goBack: vi.fn(), navigate: vi.fn(), replace: vi.fn() }),
+  useNavigation: () => ({ canGoBack: () => true, goBack: vi.fn(), navigate: vi.fn(), replace: mock.replace }),
 }));
 
 // Avoid pulling native JSX into the web TypeScript project's different React type universe.
 const nativePath = '../../mobile/src/player/NativePlayer';
 const screenPath = '../../mobile/src/screens/PlayerScreen';
 const { default: NativePlayer, canSkipIntro } = await import(nativePath);
-const { default: PlayerScreen } = await import(screenPath);
+const { default: PlayerScreen, AUTO_NEXT_KEY } = await import(screenPath);
 import { mediaKey, readCheckpoint, writeCheckpoint } from '../../mobile/src/player/checkpoint';
 
 const source = { id: 'direct', label: 'Direct', kind: 'hls', consentRequired: false, url: 'https://hulkofyt.eu.org/api/vidnest?token=fixture' };
@@ -109,7 +132,16 @@ function nodes(value: any = tree): any[] {
   }
   return walk(value);
 }
-const action = (label: string) => nodes().find((node) => node.props?.label === label);
+const rawAction = (label: string) => nodes().find((node) => node.props?.label === label);
+function action(label: string) {
+  const group = /^[\d.]+x$/.test(label) ? 'Speed' : label.startsWith('Subtitles:') ? 'Subtitles' : null;
+  if (group) {
+    const heading = nodes().find((node) => node.props?.label === group && typeof node.props.expanded === 'boolean');
+    if (heading && !heading.props.expanded) { heading.props.onPress(); render(); }
+  }
+  return rawAction(label);
+}
+const nativeSurface = () => nodes().find((node) => node.type === NativePlayer);
 function tick(position: number) { mock.player.currentTime = position; emit('timeUpdate', { currentTime: position }); render(); }
 async function mountNative(overrides: any = {}) {
   component = NativePlayer;
@@ -135,6 +167,9 @@ beforeEach(() => {
   mock.getItem.mockResolvedValue(null); mock.setItem.mockResolvedValue(undefined); mock.orientation.mockReturnValue(vi.fn());
   mock.streams.mockResolvedValue({ streams: [] }); mock.subtitles.mockResolvedValue([]); mock.intro.mockResolvedValue(null);
   mock.vast.mockResolvedValue(null); mock.bridge.mockResolvedValue({ sources: [source], introCatalogUrl: introUrl });
+  mock.context.mockResolvedValue({ viewerKey: 'guest', resume: null }); mock.episodes.mockResolvedValue({ previous: null, next: null });
+  mock.partyServiceAvailable = false;
+  mock.party.state = { phase: 'idle', participants: [], self: null, room: null, playback: null };
   mock.route = { params: { titleId: 'show', type: 'tv', slug: 'show', name: 'Show', tmdbId: '123', season: 1, episode: 1 } };
   mock.fetch.mockResolvedValue(new Response('WEBVTT\n\n00:00:00.000 --> 00:01:00.000\nCaption\n'));
   vi.stubGlobal('fetch', mock.fetch);
@@ -142,6 +177,128 @@ beforeEach(() => {
 afterEach(() => {
   mock.effects.forEach((effect) => effect.cleanup?.());
   vi.useRealTimers(); vi.unstubAllGlobals();
+});
+
+describe('Android public startup and verified episode screen contract', () => {
+  const url = (episode = 1, tmdbId = '123') => `https://hulkofyt.eu.org/api/episode-navigation?type=tv&tmdbId=${tmdbId}&season=1&episode=${episode}`;
+  const target = (seasonNumber: number, episodeNumber: number) => ({ seasonNumber, episodeNumber, name: `Episode ${episodeNumber}`,
+    href: `/watch/tv/show?season=${seasonNumber}&episode=${episodeNumber}` });
+  it('starts the bridge before optional identity settles, bounds that wait, and does not write guest data for unavailable identity', async () => {
+    mock.context.mockReturnValue(new Promise(() => {}));
+    await mountScreen(); expect(mock.bridge).toHaveBeenCalledOnce(); expect(nativeSurface()).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(1501); await settle();
+    expect(nativeSurface()).toBeDefined();
+    nativeSurface().props.onCheckpoint({ positionSeconds: 25, durationSeconds: 180, playing: true });
+    await settle();
+    expect(mock.guestWatch).not.toHaveBeenCalled(); expect(mock.guestPosition).not.toHaveBeenCalled();
+    expect(mock.setItem.mock.calls.some(([key]) => String(key).includes(':checkpoint:guest:'))).toBe(false);
+  });
+  it('keeps VAST policy disabled for unavailable identity even if the public response claims resolved free entitlements', async () => {
+    const policy = { enabled: true, firstBreakSeconds: 60, intervalSeconds: 60, maxBreaks: 1, allowSkip: true, skipAfterSeconds: 5 };
+    mock.context.mockResolvedValue({ viewerKey: 'unavailable', resume: null });
+    mock.bridge.mockResolvedValue({ sources: [source], entitlements: { resolved: true, adFree: false }, adPolicy: policy });
+    await mountScreen(); expect(nativeSurface().props.adPolicy).toBeUndefined();
+  });
+  it('does not delay video for neighbors and never uses guessed nextSeason/nextEpisode route hints', async () => {
+    mock.route.params = { ...mock.route.params, nextSeason: 9, nextEpisode: 99, nextEpisodeName: 'Unverified' };
+    await mountScreen();
+    expect(nativeSurface().props.episodes).toMatchObject({ previous: null, next: null, autoNext: false });
+    expect(mock.episodes).not.toHaveBeenCalled();
+    const lookup = deferred<any>(); mock.episodes.mockReturnValue(lookup.promise);
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    mock.route.params = { ...mock.route.params, episode: 2 }; mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url(2) });
+    render(); await settle();
+    expect(nativeSurface()).toBeDefined(); expect(nativeSurface().props.episodes.loading).toBe(true);
+    lookup.resolve({ previous: target(1, 1), next: target(2, 1) }); await settle();
+    const next = nativeSurface().props.episodes.next;
+    next.onPress(); next.onPress();
+    expect(mock.replace).toHaveBeenCalledExactlyOnceWith('Player', expect.objectContaining({ season: 2, episode: 1, episodeName: 'Episode 1', slug: 'show' }));
+    expect(mock.replace.mock.calls[0]![1]).not.toHaveProperty('episodeId');
+  });
+  it('defaults Auto Next OFF, restores only a real true preference, and lets a user action win a late preference read', async () => {
+    const stored = deferred<string | null>();
+    mock.getItem.mockImplementation((key: string) => key === AUTO_NEXT_KEY ? stored.promise : Promise.resolve(null));
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    mock.episodes.mockResolvedValue({ previous: null, next: target(1, 2) });
+    await mountScreen(); expect(nativeSurface().props.episodes.autoNext).toBe(false);
+    nativeSurface().props.episodes.onAutoNextChange(true); render(); await settle();
+    expect(mock.setItem).toHaveBeenCalledWith(AUTO_NEXT_KEY, 'true');
+    stored.resolve('false'); await settle(); expect(nativeSurface().props.episodes.autoNext).toBe(true);
+    nativeSurface().props.episodes.onAutoNextChange(false); render(); await settle();
+    expect(mock.setItem).toHaveBeenLastCalledWith(AUTO_NEXT_KEY, 'false');
+  });
+  it.each(['missing', 'empty', 'loading', 'error'])('ignores Auto Next changes with %s episode neighbors', async (status) => {
+    if (status !== 'missing') mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    if (status === 'loading') mock.episodes.mockReturnValue(new Promise(() => {}));
+    if (status === 'error') mock.episodes.mockRejectedValue(new Error('unavailable'));
+    await mountScreen();
+    expect(mock.episodes).toHaveBeenCalledTimes(status === 'missing' ? 0 : 1);
+    expect(nativeSurface().props.episodes.next).toBeNull();
+    expect(nativeSurface().props.episodes.loading).toBe(status === 'loading');
+    if (status === 'error') expect(nativeSurface().props.episodes.onRetry).toEqual(expect.any(Function));
+    nativeSurface().props.episodes.onAutoNextChange(true); render(); await settle();
+    expect(nativeSurface().props.episodes.autoNext).toBe(false);
+    expect(mock.setItem).not.toHaveBeenCalled();
+  });
+  it.each(['true', 'false', 'not-a-boolean'])('restores persisted Auto Next %s safely', async (stored) => {
+    mock.getItem.mockImplementation(async (key: string) => key === AUTO_NEXT_KEY ? stored : null);
+    await mountScreen(); expect(nativeSurface().props.episodes.autoNext).toBe(stored === 'true');
+  });
+  it.each(['host', 'member', 'connecting'])('disables manual episode changes and Auto Next changes for party %s without local desync', async (role) => {
+    mock.partyServiceAvailable = true;
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    mock.episodes.mockResolvedValue({ previous: null, next: target(1, 2) });
+    await mountScreen(); const retained = nativeSurface().props.episodes.next;
+    mock.party.state = { phase: role === 'connecting' ? 'connecting' : 'connected', participants: [], self: { id: 'self' },
+      room: role === 'connecting' ? null : { hostId: role === 'host' ? 'self' : 'other' }, playback: null } as any;
+    render();
+    expect(nativeSurface().props.episodes.blocked).toBe(true);
+    retained.onPress(); nativeSurface().props.episodes.onAutoNextChange(true); render(); await settle();
+    expect(mock.replace).not.toHaveBeenCalled(); expect(nativeSurface().props.episodes.autoNext).toBe(false);
+    expect(mock.setItem).not.toHaveBeenCalled();
+  });
+  it('keeps local episode controls usable when the party service is disabled despite a stale party session', async () => {
+    mock.partyServiceAvailable = false;
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    mock.episodes.mockResolvedValue({ previous: null, next: target(1, 2) });
+    mock.party.state = { phase: 'connected', participants: [], self: { id: 'self' }, room: { hostId: 'self' }, playback: null } as any;
+    await mountScreen(); const episodes = nativeSurface().props.episodes;
+    expect(episodes.blocked).toBe(false); expect(nativeSurface().props.partyConnected).toBe(false);
+    episodes.onAutoNextChange(true); render(); await settle();
+    expect(nativeSurface().props.episodes.autoNext).toBe(true);
+    expect(mock.setItem).toHaveBeenCalledWith(AUTO_NEXT_KEY, 'true');
+    episodes.next.onPress();
+    expect(mock.replace).toHaveBeenCalledExactlyOnceWith('Player', expect.objectContaining({ season: 1, episode: 2 }));
+  });
+  it('does not apply stale episode metadata after the media identity changes', async () => {
+    const old = deferred<any>(); const next = deferred<any>();
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    mock.episodes.mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise);
+    await mountScreen(); const signal = mock.episodes.mock.calls[0]![1];
+    mock.route.params = { ...mock.route.params, episode: 2 };
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url(2) });
+    render(false); expect(nativeSurface()).toBeUndefined();
+    while (mock.jobs.length) mock.jobs.shift()!(); await settle(); expect(signal.aborted).toBe(true);
+    next.resolve({ previous: target(1, 1), next: target(1, 3) }); await settle();
+    expect(nativeSurface().props.episodes.next.label).toBe('S1 E3');
+    old.resolve({ previous: null, next: target(1, 2) }); await settle();
+    expect(nativeSurface().props.episodes.next.label).toBe('S1 E3');
+  });
+  it('retries unavailable neighbors explicitly without re-resolving or remounting video', async () => {
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url() });
+    mock.episodes.mockRejectedValueOnce(new Error('unavailable')).mockResolvedValue({ previous: null, next: target(1, 2) });
+    await mountScreen(); const key = nativeSurface().key;
+    expect(nativeSurface().props.episodes.next).toBeNull();
+    nativeSurface().props.episodes.onRetry(); render(); await settle();
+    expect(nativeSurface().key).toBe(key); expect(mock.bridge).toHaveBeenCalledOnce(); expect(mock.episodes).toHaveBeenCalledTimes(2);
+    expect(nativeSurface().props.episodes.next.label).toBe('S1 E2');
+  });
+  it('rejects an episode lookup for another series and omits all controls for movies', async () => {
+    mock.bridge.mockResolvedValue({ sources: [source], episodeNavigationUrl: url(1, '999') });
+    await mountScreen(); expect(mock.episodes).not.toHaveBeenCalled(); expect(nativeSurface().props.episodes.next).toBeNull();
+    mock.route.params = { ...mock.route.params, type: 'movie', season: undefined, episode: undefined };
+    render(); await settle(); expect(nativeSurface().props.episodes).toBeUndefined(); expect(mock.episodes).not.toHaveBeenCalled();
+  });
 });
 
 describe('Android intro interval predicate', () => {
@@ -275,7 +432,7 @@ describe('Android Skip intro content player action', () => {
     expect(layer.props.children[0].props.children.props.label).toBe('Skip intro');
     expect(layer.props.children[1].props.children.props.children).toBe('Caption');
     expect(layer.props.style[1].bottom).toBe(202);
-    const footer = nodes().find((node) => node.props?.style?.[0]?.backgroundColor === 'rgba(0,0,0,0.78)');
+    const footer = nodes().find((node) => node.props?.style?.[0]?.backgroundColor === 'rgba(0,0,0,0.72)');
     footer.props.onLayout({ nativeEvent: { layout: { height: 240 } } }); render();
     const updated = nodes().find((node) => node.props?.children?.[0]?.props?.style?.alignSelf === 'flex-end');
     expect(updated.props.style[1].bottom).toBe(252);
@@ -293,9 +450,9 @@ describe('Android Skip intro content player action', () => {
 describe('Android lazy intro lookup episode/URL lifecycle', () => {
   it('shows a ready local source without waiting for intro metadata; null leaves playback intact', async () => {
     const lookup = deferred<IntroMarker | null>(); mock.intro.mockReturnValue(lookup.promise);
-    await mountScreen(); expect(tree.type).toBe(NativePlayer); expect(tree.props.intro).toBeNull();
+    await mountScreen(); expect(nativeSurface().type).toBe(NativePlayer); expect(nativeSurface().props.intro).toBeNull();
     expect(mock.intro).toHaveBeenCalledExactlyOnceWith(introUrl, expect.any(AbortSignal));
-    lookup.resolve(null); await settle(); expect(tree.type).toBe(NativePlayer); expect(tree.props.intro).toBeNull();
+    lookup.resolve(null); await settle(); expect(nativeSurface().type).toBe(NativePlayer); expect(nativeSurface().props.intro).toBeNull();
   });
 
   it.each([introUrl, 'https://hulkofyt.eu.org/api/intro?episode=2'])('resets immediately on episode change and ignores old results for URL %s', async (nextUrl) => {
@@ -304,27 +461,40 @@ describe('Android lazy intro lookup episode/URL lifecycle', () => {
     await mountScreen(); const oldSignal = mock.intro.mock.calls[0]![1];
     mock.route = { params: { ...mock.route.params, episode: 2 } };
     mock.bridge.mockResolvedValue({ sources: [source], introCatalogUrl: nextUrl });
-    render(false); expect(tree.props.intro).toBeNull();
+    render(false); expect(nativeSurface()).toBeUndefined();
     while (mock.jobs.length) mock.jobs.shift()!(); await settle();
     expect(oldSignal.aborted).toBe(true);
     next.resolve({ startSeconds: 10, endSeconds: 30 }); await settle();
-    expect(tree.props.intro).toEqual({ startSeconds: 10, endSeconds: 30 });
-    old.resolve(marker); await settle(); expect(tree.props.intro).toEqual({ startSeconds: 10, endSeconds: 30 });
+    expect(nativeSurface().props.intro).toEqual({ startSeconds: 10, endSeconds: 30 });
+    old.resolve(marker); await settle(); expect(nativeSurface().props.intro).toEqual({ startSeconds: 10, endSeconds: 30 });
   });
 
   it('resets an already shown marker synchronously for a new episode', async () => {
-    mock.intro.mockResolvedValue(marker); await mountScreen(); expect(tree.props.intro).toEqual(marker);
+    mock.intro.mockResolvedValue(marker); await mountScreen(); expect(nativeSurface().props.intro).toEqual(marker);
     mock.route = { params: { ...mock.route.params, episode: 2 } };
-    render(false); expect(tree.props.intro).toBeNull();
+    render(false); expect(nativeSurface()).toBeUndefined();
   });
 
   it('rejects a stale old URL response after retrying the same episode', async () => {
     const old = deferred<IntroMarker | null>(); const next = deferred<IntroMarker | null>();
     mock.intro.mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise);
-    await mountScreen(); tree.props.onError(); render(); action('Retry').props.onPress();
+    mock.bridge.mockResolvedValue({ sources: [{ ...source, kind: 'embed' }], introCatalogUrl: introUrl });
+    await mountScreen(); nodes().find((node) => node.type === 'WebView').props.onError(); render(); action('Retry').props.onPress();
     mock.bridge.mockResolvedValue({ sources: [source], introCatalogUrl: `${introUrl}&retry=1` });
     render(); await settle(); next.resolve({ startSeconds: 2, endSeconds: 20 }); await settle();
-    expect(tree.props.intro).toEqual({ startSeconds: 2, endSeconds: 20 });
-    old.resolve(marker); await settle(); expect(tree.props.intro).toEqual({ startSeconds: 2, endSeconds: 20 });
+    expect(nativeSurface().props.intro).toEqual({ startSeconds: 2, endSeconds: 20 });
+    old.resolve(marker); await settle(); expect(nativeSurface().props.intro).toEqual({ startSeconds: 2, endSeconds: 20 });
+  });
+
+  it('delegates all direct stream errors to the same NativePlayer instead of remounting into Auto', async () => {
+    mock.intro.mockResolvedValue(marker); await mountScreen();
+    const native = nativeSurface();
+    expect(native.props.onError).toBeUndefined(); render(); await settle();
+    expect(nativeSurface().type).toBe(NativePlayer);
+    expect(nativeSurface().key).toBe(native.key);
+    expect(nativeSurface().props).toMatchObject({ source, intro: marker, registerPartyPlayerPort: mock.party.registerPlayerPort });
+    expect(nodes().filter((node) => node.type === 'WatchPartySheet')).toHaveLength(1);
+    expect(action('Retry')).toBeUndefined();
+    expect(nativeSurface()).toBeDefined();
   });
 });

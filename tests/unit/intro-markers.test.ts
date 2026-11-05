@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createIntroResolver,
   introCatalogPath,
@@ -41,6 +41,10 @@ function providerPayload(input: IntroCatalogRequest = episode, intro: ReturnType
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
 }
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe('intro marker request and DTO normalization', () => {
   it('accepts canonical TV coordinates including season zero and builds only a relative same-origin path', () => {
@@ -107,7 +111,7 @@ describe('IntroDB resolver cache policy', () => {
         episode: Number(url.searchParams.get('episode')),
       };
       expect(url.origin + url.pathname).toBe('https://api.introdb.app/segments');
-      expect(init).toMatchObject({ method: 'GET', redirect: 'error', cache: 'no-store', credentials: 'omit' });
+      expect(init).toMatchObject({ method: 'GET', redirect: 'manual', cache: 'no-store', credentials: 'omit' });
       expect(init?.headers).toEqual({ Accept: 'application/json', 'Accept-Encoding': 'identity' });
       return jsonResponse(providerPayload(inputEpisode));
     });
@@ -118,6 +122,38 @@ describe('IntroDB resolver cache policy', () => {
     await resolver.resolve({ ...episode, episode: 2 });
     await resolver.resolve({ ...episode, imdbId: 'tt2861424' });
     expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
+  it('supports a successful manual response with the Cloudflare global fetch receiver', async () => {
+    const fetchImpl = vi.fn(function platformFetch(this: unknown, _input: string | URL, init?: RequestInit) {
+      if (this !== globalThis) throw new TypeError('Illegal invocation');
+      if (init?.redirect === 'error') throw new TypeError('Unsupported redirect mode: error');
+      expect(init?.redirect).toBe('manual');
+      return Promise.resolve(jsonResponse(providerPayload()));
+    });
+    vi.stubGlobal('fetch', fetchImpl);
+
+    await expect(createIntroResolver().resolve(episode)).resolves.toEqual({
+      status: 'positive', intro: { startSeconds: 2.5, endSeconds: 58 },
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([301, 302, 303, 307, 308])('rejects and cancels a manual %i response without following Location', async (status) => {
+    const cancel = vi.fn();
+    const fetchImpl = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      if (init?.redirect === 'error') throw new TypeError('Unsupported redirect mode: error');
+      expect(init?.redirect).toBe('manual');
+      return new Response(new ReadableStream<Uint8Array>({ cancel }), {
+        status, headers: { Location: 'https://127.0.0.1/private', 'Content-Type': 'application/json' },
+      });
+    });
+    await expect(createIntroResolver({ fetchImpl }).resolve(episode)).resolves.toEqual({
+      status: 'unavailable', intro: null, retryAfterMs: 5_000,
+    });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(new URL(String(fetchImpl.mock.calls[0]![0])).origin).toBe('https://api.introdb.app');
+    expect(cancel).toHaveBeenCalledTimes(1);
   });
 
   it('caches marker results, leaves uncertainty uncached, and briefly backs off provider failures', async () => {

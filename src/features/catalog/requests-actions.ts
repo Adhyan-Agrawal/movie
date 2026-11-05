@@ -2,6 +2,8 @@
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import type { TitleRequestState } from './request-state';
+import { features } from '@/lib/env';
+import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
 
 /**
  * Request-a-title server action (Spec Section 4: "request a movie/series not
@@ -23,6 +25,7 @@ export async function submitTitleRequestAction(
   _prev: TitleRequestState,
   formData: FormData,
 ): Promise<TitleRequestState> {
+  if (!features.supabaseConfigured) return { status: 'error', message: ACCOUNT_SERVICES_UNAVAILABLE };
   const titleName = String(formData.get('title_name') ?? '').trim();
   const mediaType = String(formData.get('media_type') ?? '').trim();
   const yearRaw = String(formData.get('year') ?? '').trim();
@@ -44,6 +47,7 @@ export async function submitTitleRequestAction(
     year = parsed;
   }
 
+  try {
   const db = await getSupabaseServerClient();
 
   // Require a signed-in session up front — the form is a public route but the
@@ -65,8 +69,9 @@ export async function submitTitleRequestAction(
     note: note || null,
   });
   if (error) {
-    return { status: 'error', message: `Could not save your request: ${error.message}` };
+    return { status: 'error', message: 'Could not save your request. Please try again.' };
   }
 
   return { status: 'ok', message: 'Got it — we will look into adding it.' };
+  } catch { return { status: 'error', message: ACCOUNT_SERVICES_UNAVAILABLE }; }
 }

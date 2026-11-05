@@ -35,16 +35,16 @@ vi.mock('../../mobile/node_modules/react-native', () => ({ AppState: mock.app, P
 vi.mock('../../mobile/node_modules/@react-navigation/native/lib/module/index.js', () => ({ useIsFocused: () => mock.focused }));
 vi.mock('../../mobile/node_modules/@react-native-async-storage/async-storage/lib/commonjs/index.js', () => ({ default: { getItem: mock.getItem, setItem: mock.setItem } }));
 vi.mock('../../mobile/src/components/ui', () => ({ Button: 'Button' }));
-vi.mock('../../mobile/src/lib/supabase', () => ({ supabase: { auth: {
+vi.mock('../../mobile/src/lib/supabase', () => ({ supabaseConfigured: true, supabase: { auth: {
   onAuthStateChange: (callback: typeof mock.authCallback) => { mock.authCallback = callback; return { data: { subscription: { unsubscribe: vi.fn() } } }; },
 } } }));
 vi.mock('../../mobile/src/ads/entitlements', () => ({ fetchAdMobEntitlements: mock.fetchProfile }));
-vi.mock('../../mobile/node_modules/react-native-google-mobile-ads/lib/module/index.js', () => ({
+vi.mock('../../mobile/src/ads/native-admob', () => ({ getNativeAdMobSdk: () => ({
   default: () => ({ initialize: mock.initialize }), AdsConsent: { requestInfoUpdate: mock.updateConsent, gatherConsent: mock.gatherConsent,
     showPrivacyOptionsForm: mock.gatherConsent }, AdsConsentPrivacyOptionsRequirementStatus: { REQUIRED: 'REQUIRED' },
   BannerAd: 'BannerAd', BannerAdSize: { INLINE_ADAPTIVE_BANNER: 'INLINE' },
   InterstitialAd: { createForAdRequest: mock.createAd }, AdEventType: { LOADED: 'loaded', ERROR: 'error', CLOSED: 'closed' },
-}));
+}) }));
 vi.stubGlobal('__DEV__', false);
 const componentPath = '../../mobile/src/ads/AdMobProvider';
 const { AdMobProvider, HomeAdMobBanner } = await import(componentPath);

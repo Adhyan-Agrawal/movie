@@ -2,6 +2,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import type { DirectStream } from '@/lib/providers/types';
 
+const lifetime = vi.hoisted(() => ({ pending: [] as Promise<unknown>[] }));
+vi.mock('@opennextjs/cloudflare', () => ({ getCloudflareContext: () => ({
+  ctx: { waitUntil(promise: Promise<unknown>) { lifetime.pending.push(promise); } },
+}) }));
+
 const SECRET = 'vidnest-auto-test-secret-at-least-32-characters';
 const MEDIA = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n';
 const BYTES = new Uint8Array(1024);
@@ -205,13 +210,59 @@ describe('VidNest receiver playback CORS', () => {
   });
 });
 
-afterEach(() => {
+afterEach(async () => {
+  if (vi.isFakeTimers()) await vi.runAllTimersAsync();
+  await Promise.allSettled(lifetime.pending);
+  lifetime.pending.length = 0;
   vi.useRealTimers();
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
 });
 
 describe('VidNest automatic healthy startup', () => {
+  it('does not fall back to a manifest whose signed startup resource expired during the probe', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 10, 4));
+    const deadline = Date.now() + 1000;
+    vi.stubGlobal('fetch', vi.fn(async (input: unknown) => {
+      const url = String(input);
+      if (url.startsWith('https://resolver.example')) return resolution(['fast']);
+      if (url.endsWith('master.m3u8')) return new Response(master().replace('video.m3u8', `video.m3u8?exp=${deadline / 1000}`));
+      if (url.includes('video.m3u8')) return new Response(MEDIA);
+      return new Promise<Response>((resolve) => setTimeout(() => resolve(new Response(BYTES)), 1500));
+    }));
+    const pending = GET(request());
+    await vi.advanceTimersByTimeAsync(1501);
+    const response = await pending;
+    expect(response.status).toBe(502);
+    expect(response.headers.get('x-vidnest-stream-id')).toBeNull();
+  });
+
+  it('does not recommend or cache a startup that expired while the rest of the catalog was settling', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 10, 4));
+    const fetchMock = vi.fn(async (input: unknown, init?: RequestInit) => {
+      const url = String(input);
+      if (url.startsWith('https://resolver.example')) return resolution(['fast', 'stalled']);
+      if (url.includes('/stalled/')) return new Promise<Response>((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => reject(new DOMException('Synthetic abort.', 'AbortError')), { once: true });
+      });
+      if (url.endsWith('master.m3u8')) return new Response(master().replace('video.m3u8',
+        `video.m3u8?exp=${Math.floor((Date.now() + 1000) / 1000)}`));
+      return new Response(url.includes('video.m3u8') ? MEDIA : BYTES);
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    const pending = GET(request('metadata'));
+    await vi.advanceTimersByTimeAsync(4001);
+    const body = await (await pending).json() as Catalog;
+    expect(body.recommendedStreamId).toBeUndefined();
+    expect(body.streams[0]!.startupLatencyMs).toBeUndefined();
+    expect(body.streams.map((stream) => stream.id)).toEqual(['0', '1']);
+    const before = fetchMock.mock.calls.length;
+    expect((await GET(request())).status).toBe(200);
+    expect(fetchMock.mock.calls.length).toBeGreaterThan(before);
+  });
+
   it('returns the first verified healthy start while slow candidates remain pending and rejects fast HTML', async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async (url: unknown) => {
@@ -236,7 +287,7 @@ describe('VidNest automatic healthy startup', () => {
     const body = await (await metadata).json() as Catalog;
     expect(body.recommendedStreamId).toBe('1');
     expect(body.streams.map((stream) => stream.startupLatencyMs)).toEqual([undefined, 90, undefined]);
-    expect(fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === '/api/resolve')).toHaveLength(1);
+    expect(fetchMock.mock.calls.filter(([url]) => new URL(String(url)).pathname === '/api/resolve')).toHaveLength(2);
     const child = GET(proxyRequest(path));
     await vi.advanceTimersByTimeAsync(31);
     expect((await child).status).toBe(200);
@@ -264,7 +315,7 @@ describe('VidNest automatic healthy startup', () => {
     expect(body.streams[0]!.startupLatencyMs).toBe(250);
   });
 
-  it('singleflights auto and catalog requests including all startup data and reuses the cached winner', async () => {
+  it('keeps request-owned probes while reusing only completed resolver data', async () => {
     const fetchMock = vi.fn(async (url: unknown, init?: RequestInit) => {
       const target = new URL(String(url));
       if (target.pathname === '/api/resolve') return resolution(['cached']);
@@ -281,9 +332,9 @@ describe('VidNest automatic healthy startup', () => {
     expect(second.status).toBe(200);
     const body = await metadata.json() as Catalog;
     expect(body.recommendedStreamId).toBe('0');
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(12);
     expect((await GET(request())).status).toBe(200);
-    expect(fetchMock).toHaveBeenCalledTimes(4);
+    expect(fetchMock).toHaveBeenCalledTimes(12);
     const playback = await GET(proxyRequest(body.streams[0]!.url));
     expect(playback.status).toBe(200);
     expect(fetchMock.mock.calls.at(-1)![0]).toBe('https://cdn.example/cached/master.m3u8');
@@ -554,7 +605,7 @@ describe('VidNest automatic healthy startup', () => {
     'never benchmarks private, loopback, or literal-IP resolver targets (%s)', async (target) => {
       const fetchMock = vi.fn(async () => new Response(JSON.stringify({ streams: [{ url: target }] })));
       vi.stubGlobal('fetch', fetchMock);
-      expect((await GET(request())).status).toBe(502);
+      expect((await GET(request())).status).toBe(404);
       expect(fetchMock).toHaveBeenCalledTimes(1);
       const body = await (await GET(request('metadata'))).json() as Catalog;
       expect(body.recommendedStreamId).toBeUndefined();

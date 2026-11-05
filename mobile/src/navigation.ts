@@ -27,6 +27,15 @@ export type RootStackParamList = {
     nextEpisode?: number;
     /** Next episode's title, when the caller knows it (falls back to S# E# only). */
     nextEpisodeName?: string;
+    /** Optional v1 room code supplied by a verified app/deep link. */
+    party?: string;
+  };
+  WatchPartyLink: {
+    type: string;
+    slug: string;
+    party?: string;
+    season?: number;
+    episode?: number;
   };
   Person: { id: string };
   Auth: undefined;

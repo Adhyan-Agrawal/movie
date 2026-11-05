@@ -4,6 +4,8 @@ import { Container } from '@/components/ui/Container';
 import { buttonClasses } from '@/components/ui/Button';
 import { Logo } from '@/components/ui/Logo';
 import { SignInForm } from '@/features/auth/SignInForm';
+import { features } from '@/lib/env';
+import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
 
 export const metadata: Metadata = {
   title: 'Sign in',
@@ -35,13 +37,13 @@ export default async function SignInPage({
             <Logo size={28} />
             <span>Lumora</span>
           </Link>
-          <h1 className="text-xl font-semibold text-content">Sign in to Lumora</h1>
+          <h1 className="text-xl font-semibold text-content">{features.supabaseConfigured ? 'Sign in to Lumora' : 'Accounts are unavailable'}</h1>
           <p className="text-sm text-content-muted">
-            Your profiles, watchlist, and history — right where you left off.
+            {features.supabaseConfigured ? 'Your profiles, watchlist, and history - right where you left off.' : 'Public browsing and guest playback remain available.'}
           </p>
         </div>
 
-        {confirmed ? (
+        {features.supabaseConfigured && confirmed ? (
           <p role="status" className="rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm text-success">
             Check <span className="font-semibold">{email ?? 'your inbox'}</span> to confirm your email, then sign
             in.
@@ -49,7 +51,7 @@ export default async function SignInPage({
         ) : null}
 
         <div className="rounded-lg border border-border bg-surface/40 p-6">
-          <SignInForm next={next} />
+          {features.supabaseConfigured ? <SignInForm next={next} /> : <p role="status" className="text-sm leading-relaxed text-content-muted">{ACCOUNT_SERVICES_UNAVAILABLE}</p>}
         </div>
 
         <Link href="/" className={buttonClasses({ variant: 'ghost', size: 'sm', className: 'self-center' })}>

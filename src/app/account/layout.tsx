@@ -7,6 +7,8 @@ import { SignOutButton } from '@/features/auth/SignOutButton';
 import { features } from '@/lib/env';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 
+export const dynamic = 'force-dynamic';
+
 export const metadata: Metadata = {
   title: 'Account',
   // Authenticated surfaces should not be indexed (Section 16).
@@ -39,7 +41,7 @@ export default async function AccountLayout({ children }: { children: React.Reac
         description={
           user
             ? `Signed in as ${user.email ?? 'your Lumora account'}`
-            : 'Manage your profiles, preferences, and devices.'
+            : features.supabaseConfigured ? 'Manage your profiles, preferences, and devices.' : 'Account services are temporarily unavailable.'
         }
         actions={user ? <SignOutButton /> : undefined}
       />
@@ -51,7 +53,7 @@ export default async function AccountLayout({ children }: { children: React.Reac
         </div>
       ) : (
         <div className="py-10">
-          <UnauthorizedState next="/account" />
+          <UnauthorizedState next="/account" unavailable={!features.supabaseConfigured} />
         </div>
       )}
     </Container>

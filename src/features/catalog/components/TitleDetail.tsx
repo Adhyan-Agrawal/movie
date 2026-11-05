@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { cn } from '@/lib/cn';
-import { publicEnv } from '@/lib/env';
+import { features, publicEnv } from '@/lib/env';
 import { Badge } from '@/components/ui/Badge';
 import { Container } from '@/components/ui/Container';
 import { EmptyState } from '@/components/ui/EmptyState';
@@ -17,6 +17,9 @@ import { getResumablePlayback, isSignedIn } from '@/features/playback/progress-q
 import { RatingControl } from './RatingControl';
 import { ResumePlayButton, type PlayResumeInfo } from './ResumePlayButton';
 import type { MediaRow as MediaRowType, Title } from '../types';
+import { Icon } from '@/components/ui/Icon';
+import { SectionReveal } from '@/components/ui/SectionReveal';
+import { isStoredCatalogId } from '@/features/account/availability';
 
 /** Playback availability, driven by provider/consent policy (Spec Sections 4, 9). */
 export type TitleAvailability = 'available' | 'unavailable' | 'consent-required';
@@ -66,10 +69,15 @@ export async function TitleDetail({
     getSimilarTitles(title),
     title.type === 'tv' ? listSeasonsForTitle(title.id) : Promise.resolve([]),
     listCastForTitle(title.id),
-    getRatingSummary(title.id),
-    getMyRating(title.id),
-    isSignedIn(),
-    getResumablePlayback(title),
+    features.supabaseConfigured ? getRatingSummary(title.id) : Promise.resolve({ average: null, count: 0 }),
+    features.supabaseConfigured ? getMyRating(title.id) : Promise.resolve(null),
+    features.supabaseConfigured ? isSignedIn().catch((err: unknown) => {
+      console.warn('title.isSignedIn: optional read failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }) : Promise.resolve(false),
+    features.supabaseConfigured ? getResumablePlayback(title) : Promise.resolve(null),
   ]);
   const runtime = formatRuntime(title.runtimeMinutes);
   const state = AVAILABILITY[availability];
@@ -95,9 +103,9 @@ export async function TitleDetail({
     state.tone === 'success' ? 'text-success' : state.tone === 'warning' ? 'text-warning' : 'text-info';
 
   return (
-    <article aria-labelledby="title-heading" className="flex flex-col gap-10 pb-8">
+    <article aria-labelledby="title-heading" className="title-detail">
       {/* Backdrop hero band */}
-      <section className="relative overflow-hidden">
+      <section className="title-hero">
         {isRemoteUrl(title.backdropUrl) && title.backdropUrl ? (
           /* Decorative backdrop — the adjacent text carries the meaning. */
           <Image
@@ -105,6 +113,9 @@ export async function TitleDetail({
             alt=""
             fill
             priority
+            unoptimized
+            loading="eager"
+            decoding="async"
             sizes="100vw"
             className="object-cover"
             aria-hidden
@@ -112,94 +123,72 @@ export async function TitleDetail({
         ) : (
           <div
             aria-hidden="true"
-            className="absolute inset-0"
-            style={
-              title.backdropUrl?.startsWith('linear-gradient')
-                ? { backgroundImage: title.backdropUrl }
-                : undefined
-            }
+             className="hero-artwork-fallback"
           />
         )}
         {/* Legibility scrims over artwork (Section 5) */}
-        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-t from-base via-base/80 to-base/30" />
-        <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-base/85 via-base/40 to-transparent" />
+        <div aria-hidden="true" className="title-hero-scrim" />
 
         <Container className="relative z-10">
-          <div className="flex flex-col gap-6 pb-8 pt-10 md:flex-row md:gap-8 md:pb-12 md:pt-16">
+          <div className="title-hero-layout">
             {/* Poster */}
-            <div className="shrink-0">
+            <div className="title-poster">
               <div
-                className="relative aspect-[2/3] w-36 overflow-hidden rounded-lg border border-border shadow-raised sm:w-44 md:w-56"
-                style={
-                  title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined
-                }
+                className="title-poster-artwork"
               >
                 {isRemoteUrl(title.posterUrl) && title.posterUrl ? (
                   <Image
                     src={title.posterUrl}
                     alt={`Poster for ${title.name}`}
                     fill
-                    sizes="(max-width: 640px) 36vw, 224px"
+                    unoptimized
+                    loading="lazy"
+                    decoding="async"
+                     sizes="(max-width: 767px) 1px, (max-width: 1199px) 210px, 270px"
                     className="object-cover"
                   />
                 ) : (
-                  <div
-                    role="img"
-                    aria-label={`Poster art for ${title.name}`}
-                    className="absolute inset-0"
-                    style={title.posterUrl ? { backgroundImage: title.posterUrl } : undefined}
-                  />
+                   <div className="media-card-placeholder"><Icon name={title.type === 'tv' ? 'tv' : 'film'} width="32" height="32" /><span>Artwork unavailable</span></div>
                 )}
               </div>
             </div>
 
             {/* Primary info */}
-            <div className="flex max-w-2xl flex-col gap-4">
-              <div className="flex flex-wrap items-center gap-2">
+            <div className="title-primary-info">
+              <div className="site-eyebrow flex flex-wrap items-center gap-3">
                 {title.featured ? <Badge tone="primary">Featured</Badge> : null}
-                {title.type === 'tv' ? <Badge tone="info">Series</Badge> : <Badge tone="neutral">Film</Badge>}
-                <Badge tone="neutral">{title.maturity}</Badge>
+                <span>{title.type === 'tv' ? 'The series' : 'The film'}</span>
+                {title.maturity ? <span className="hero-maturity">{title.maturity}</span> : null}
               </div>
 
               <div className="flex flex-col gap-1">
-                <h1 id="title-heading" className="font-display text-3xl font-bold tracking-tight md:text-5xl">
+                <h1 id="title-heading" className="title-heading">
                   {title.name}
                 </h1>
                 {title.originalName && title.originalName !== title.name ? (
-                  <p className="text-sm text-content-subtle">{title.originalName}</p>
+                   <p className="title-original-name">{title.originalName}</p>
                 ) : null}
               </div>
 
-              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm text-content-muted">
-                <span>{title.releaseYear}</span>
-                {runtime ? (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span>{runtime}</span>
-                  </>
-                ) : null}
+              <div className="hero-metadata">
+                {title.releaseYear > 0 ? <span>{title.releaseYear}</span> : null}
+                {runtime ? <span>{runtime}</span> : null}
                 {title.genres.length ? (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span>{title.genres.join(', ')}</span>
-                  </>
+                    <span>{title.genres.join(' / ')}</span>
                 ) : null}
                 {typeof title.score === 'number' ? (
-                  <>
-                    <span aria-hidden="true">·</span>
-                    <span className="text-success">{title.score}% score</span>
-                  </>
+                    <span className="hero-rating">{(title.score / 10).toFixed(1)}/10 rating</span>
                 ) : null}
               </div>
 
               {/* Provider / availability status line */}
-              <p className={cn('flex items-center gap-2 text-sm', toneText)}>
+              <p className={cn('title-availability', toneText)}>
                 <span aria-hidden="true" className={cn('h-2 w-2 rounded-full', toneDot)} />
                 {state.label}
               </p>
 
               {/* Primary actions */}
-              <div className="mt-1 flex flex-wrap items-center gap-3">
+              <div className="title-actions">
                 <ResumePlayButton
                   baseHref={watchHref}
                   playable={state.playable}
@@ -207,10 +196,12 @@ export async function TitleDetail({
                   serverResume={serverResume}
                 />
 
-                <WatchlistButton titleId={title.id} titleName={title.name} initialInWatchlist={initialInWatchlist} />
+                <WatchlistButton titleId={title.id} titleName={title.name} initialInWatchlist={initialInWatchlist}
+                  available={features.supabaseConfigured && isStoredCatalogId(title.id)} />
 
-                {title.trailerUrl ? (
-                  <TrailerButton trailerUrl={title.trailerUrl} titleName={title.name} />
+                {title.trailerUrl || title.imdbId || title.tmdbId ? (
+                  <TrailerButton trailerUrl={title.trailerUrl} titleName={title.name}
+                    imdbId={title.imdbId} tmdbId={title.tmdbId} type={title.type} />
                 ) : null}
 
                 <ShareButton url={shareUrl} titleName={title.name} />
@@ -237,10 +228,11 @@ export async function TitleDetail({
                   initialMyRating={myRating}
                   average={ratingSummary.average}
                   count={ratingSummary.count}
+                  available={features.supabaseConfigured && isStoredCatalogId(title.id)}
                 />
               </div>
 
-              <p className="max-w-xl text-sm leading-relaxed text-content-muted md:text-base">{title.synopsis}</p>
+              {title.synopsis ? <p className="title-synopsis">{title.synopsis}</p> : null}
             </div>
           </div>
         </Container>
@@ -248,11 +240,11 @@ export async function TitleDetail({
 
       {/* Details */}
       <Container>
-        <div className="grid grid-cols-1 gap-10 lg:grid-cols-[minmax(0,1fr)_260px]">
+        <SectionReveal><div className="title-details-layout">
           <div className="flex flex-col gap-10">
             {title.type === 'tv' ? (
               <section aria-labelledby="episodes-heading" className="flex flex-col gap-4">
-                <h2 id="episodes-heading" className="text-lg font-semibold tracking-tight">
+                 <h2 id="episodes-heading" className="title-section-heading">
                   Episodes
                 </h2>
                 {seasons.length > 0 ? (
@@ -269,47 +261,45 @@ export async function TitleDetail({
             ) : null}
 
             <section aria-labelledby="credits-heading" className="flex flex-col gap-4">
-              <h2 id="credits-heading" className="text-lg font-semibold tracking-tight">
+               <h2 id="credits-heading" className="title-section-heading">
                 Cast
               </h2>
               {cast.length > 0 ? (
-                <ul className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4">
+                 <ul className="title-cast-grid">
                   {cast.map((member) => (
                     <li
                       key={member.personId}
-                      className="flex items-center gap-3 rounded-md border border-border bg-surface/40 p-3"
-                    >
-                      {member.profileUrl ? (
-                        <Image
+                       className="min-w-0"
+                     >
+                      <Link href={`/person/${member.personId}`} prefetch={false} className="title-cast-card">
+                      <div className="title-cast-photo">
+                       {member.profileUrl ? (
+                         <Image
                           src={member.profileUrl}
                           alt=""
-                          width={56}
-                          height={84}
-                          sizes="56px"
-                          className="h-[84px] w-14 shrink-0 rounded object-cover"
+                           fill
+                          unoptimized
+                          loading="lazy"
+                          decoding="async"
+                           sizes="(max-width: 539px) 40vw, (max-width: 1023px) 20vw, 200px"
+                           className="object-cover"
                         />
                       ) : (
                         <div
                           aria-hidden="true"
-                          className="flex h-[84px] w-14 shrink-0 items-center justify-center rounded bg-surface-raised text-content-subtle"
+                           className="absolute inset-0 grid place-items-center text-content-subtle"
                         >
-                          ◎
+                           <Icon name="user" width="28" height="28" />
                         </div>
                       )}
-                      <div className="flex min-w-0 flex-col">
-                        <p className="truncate text-sm font-semibold text-content">
-                          {/* Actor names link to their real person page. */}
-                          <Link
-                            href={`/person/${member.personId}`}
-                            className="transition-colors hover:underline focus-visible:underline focus-visible:outline-none"
-                          >
-                            {member.name}
-                          </Link>
-                        </p>
-                        {member.character ? (
-                          <p className="truncate text-xs text-content-muted">{member.character}</p>
-                        ) : null}
                       </div>
+                       <div className="min-w-0">
+                         <p className="title-cast-name">{member.name}</p>
+                         {member.character ? (
+                           <p className="title-cast-role">{member.character}</p>
+                        ) : null}
+                       </div>
+                      </Link>
                     </li>
                   ))}
                 </ul>
@@ -325,32 +315,34 @@ export async function TitleDetail({
           </div>
 
           <aside aria-labelledby="details-heading" className="flex flex-col gap-4">
-            <h2 id="details-heading" className="text-lg font-semibold tracking-tight">
+             <h2 id="details-heading" className="title-section-heading">
               Details
             </h2>
-            <dl className="flex flex-col gap-3 rounded-lg border border-border bg-surface/40 p-4 text-sm">
+             <dl className="title-facts">
               <Fact label="Type" value={title.type === 'tv' ? 'TV series' : 'Film'} />
-              <Fact label="Released" value={String(title.releaseYear)} />
+               {title.releaseYear > 0 ? <Fact label="Released" value={String(title.releaseYear)} /> : null}
               {runtime ? <Fact label={title.type === 'tv' ? 'Episode runtime' : 'Runtime'} value={runtime} /> : null}
               <Fact label="Maturity" value={title.maturity} />
               <Fact label="Genres" value={title.genres.join(', ') || '—'} />
-              {typeof title.score === 'number' ? <Fact label="Score" value={`${title.score}%`} /> : null}
+               {typeof title.score === 'number' ? <Fact label="Rating" value={`${(title.score / 10).toFixed(1)}/10`} /> : null}
+               {title.originalLanguage ? <Fact label="Original language" value={title.originalLanguage.toUpperCase()} /> : null}
+               {title.originCountries?.length ? <Fact label="Country of origin" value={title.originCountries.join(', ')} /> : null}
             </dl>
           </aside>
-        </div>
+        </div></SectionReveal>
       </Container>
 
       {/* Similar titles (uses getSimilarTitles + MediaCard via MediaRow) */}
-      <MediaRow row={similarRow} />
+      <SectionReveal><MediaRow row={similarRow} variant="landscape" /></SectionReveal>
     </article>
   );
 }
 
 function Fact({ label, value }: { label: string; value: string }) {
   return (
-    <div className="flex items-start justify-between gap-4">
-      <dt className="text-content-subtle">{label}</dt>
-      <dd className="text-right text-content">{value}</dd>
+    <div>
+      <dt>{label}</dt>
+      <dd>{value}</dd>
     </div>
   );
 }

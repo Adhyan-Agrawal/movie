@@ -49,6 +49,8 @@ export interface DirectAudioTrack {
 export interface DirectStream {
   id: string;
   url: string;
+  /** Epoch milliseconds until the issued stream/sidecar capabilities may be reused. */
+  expiresAt?: number;
   /** Measured manifest-to-verified-startup-data latency, not estimated throughput. */
   startupLatencyMs?: number;
   qualities: Quality[];

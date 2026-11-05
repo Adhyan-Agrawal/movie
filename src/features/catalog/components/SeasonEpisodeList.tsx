@@ -42,7 +42,16 @@ function EpisodeRow({ episode, watchBaseHref }: { episode: Episode; watchBaseHre
         className="relative hidden h-16 w-28 shrink-0 overflow-hidden rounded bg-surface-raised sm:block"
       >
         {episode.stillUrl ? (
-          <Image src={episode.stillUrl} alt="" fill sizes="112px" className="object-cover" />
+          <Image
+            src={episode.stillUrl}
+            alt=""
+            fill
+            unoptimized
+            loading="lazy"
+            decoding="async"
+            sizes="112px"
+            className="object-cover"
+          />
         ) : (
           <div className="flex h-full items-center justify-center text-content-subtle">▦</div>
         )}
@@ -70,6 +79,7 @@ function EpisodeRow({ episode, watchBaseHref }: { episode: Episode; watchBaseHre
         <div className="mt-1">
           <Link
             href={href}
+            prefetch={false}
             className={buttonClasses({ size: 'sm', variant: 'secondary' })}
             aria-label={`Play episode ${episode.episodeNumber}, ${episode.name}`}
           >

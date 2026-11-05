@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentType } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/Button';
 import type { PlaybackError, PlaybackSource } from '@/lib/providers/types';
 import { type PlayerState, playerStateForError } from './player-states';
 import { PlayerControlsBar } from './PlayerControlsBar';
+import { parseEpisodeNavigation, type EpisodeNavigation } from './episode-navigation';
 import { NativePlayer } from './NativePlayer';
 import type { EpisodeNavTarget } from './EpisodeNavLinks';
 import { PreRollAd } from '@/features/ads/PreRollAd';
@@ -20,6 +21,17 @@ import {
 import { reportPlaybackIssueAction } from '@/features/playback/report-actions';
 import { recordGuestWatch } from '@/features/playback/guest-watch';
 import type { PlaybackAdPolicy } from '@/features/commerce/types';
+import type { WatchPartyMediaIdentity } from '@/features/watch-party/protocol';
+import {
+  WatchPartyPanel,
+  useWatchPartySession,
+  type PartyPlayerPortRegistrationProps,
+} from '@/features/watch-party/web';
+import { playbackMediaKey } from '@/features/playback/playback-checkpoint';
+
+const PartyPortNativePlayer = NativePlayer as ComponentType<
+  React.ComponentProps<typeof NativePlayer> & PartyPlayerPortRegistrationProps
+>;
 
 /**
  * Player surface (Spec Section 9). Responsive 16:9 external-provider iframe with
@@ -69,6 +81,8 @@ export interface PlayerShellProps {
    * embeds expose no progress telemetry, so they rely on page-level navigation.
    */
   nextEpisode?: EpisodeNavTarget;
+  /** Same-origin verified previous/next lookup, independent of stream readiness. */
+  episodeNavigationUrl?: string;
   /** Saved resume position (seconds) forwarded to the native player. */
   initialPosition?: number;
   resumeUpdatedAt?: number;
@@ -76,6 +90,11 @@ export interface PlayerShellProps {
   adPolicy?: PlaybackAdPolicy;
   /** Same-origin, episode-bound intro marker catalog. Native playback fetches it lazily. */
   introCatalogUrl?: string;
+  /** Server-validated availability only; service URLs and credentials never reach this component. */
+  reportingAvailable?: boolean;
+  watchPartyConfigured?: boolean;
+  watchPartyMedia?: WatchPartyMediaIdentity | null;
+  initialPartyRoomCode?: string;
   /**
    * Pre-roll ad zone (Spec Section 11). Resolved server-side from env and
    * passed here — env vars are stripped from client bundles. Null = no pre-roll.
@@ -85,6 +104,19 @@ export interface PlayerShellProps {
 
 /** SessionStorage marker so the pre-roll shows once per tab session. */
 const PREROLL_SESSION_KEY = 'lumora:preroll-shown';
+const AUTO_NEXT_STORAGE_KEY = 'lumora:player:auto-next:v1';
+function verifiedEpisodeNavigation(value: unknown, slug: string, season: number, episode: number, origin = 'https://player.invalid'): EpisodeNavigation | null {
+  if (!Number.isSafeInteger(season) || season < 0 || !Number.isSafeInteger(episode) || episode < 1) return null;
+  const navigation = parseEpisodeNavigation(value, origin);
+  if (!navigation) return null;
+  for (const direction of ['previous', 'next'] as const) {
+    const target = navigation[direction];
+    if (!target) continue;
+    const relative = target.seasonNumber === season ? target.episodeNumber - episode : target.seasonNumber - season;
+    if (target.href.split('?', 1)[0] !== `/watch/tv/${slug}` || (direction === 'previous' ? relative >= 0 : relative <= 0)) return null;
+  }
+  return navigation;
+}
 
 /**
  * Playback session recording (Spec Sections 9, 14, 18). The external embed
@@ -134,29 +166,73 @@ export function PlayerShell({
   viewerKey = 'guest',
   adPolicy,
   introCatalogUrl,
+  reportingAvailable = false,
+  watchPartyConfigured = false,
+  watchPartyMedia = null,
+  initialPartyRoomCode,
   preroll = null,
   nextEpisode,
+  episodeNavigationUrl,
 }: PlayerShellProps) {
   const router = useRouter();
 
-  const hasSource = Boolean(source?.url);
-  // Active server: defaults to the highest-priority source; the selector
-  // switches it. Falls back to the default when the selection disappears
-  // (e.g. after a server-side re-resolution).
-  const [activeSourceId, setActiveSourceId] = useState<string | null>(null);
-  const activeSource = sources.find((s) => s.id === activeSourceId) ?? source;
+  const hasCoordinates = seasonNumber !== undefined && episodeNumber !== undefined;
+  const mediaScope = `${viewerKey}:${playbackMediaKey(title.id, hasCoordinates ? undefined : episodeId, seasonNumber, episodeNumber)}`;
+  const [episodeLookup, setEpisodeLookup] = useState<{ scope: string; url: string; navigation: EpisodeNavigation | null } | null>(null);
+  const [autoNext, setAutoNext] = useState(false);
+  const [episodeTransition, setEpisodeTransition] = useState<string | null>(null);
+  const episodeTransitionRef = useRef<string | null>(null);
+  const prepareEpisodeTransitionRef = useRef<{ scope: string; prepare: () => Promise<boolean> } | null>(null);
+  const episodeMountedRef = useRef(true);
+  const [selection, setSelection] = useState<{ mediaScope: string; id: string } | null>(null);
+  const activeSourceId = selection?.mediaScope === mediaScope ? selection.id : null;
+  const activeSourceRef = useRef<PlaybackSource | null>(null);
+  // List churn must not replace an explicit choice with the default server.
+  const activeSource = activeSourceId
+    ? sources.find((candidate) => candidate.id === activeSourceId)
+      ?? (source?.id === activeSourceId ? source : null)
+      ?? (activeSourceRef.current?.id === activeSourceId ? activeSourceRef.current : null)
+    : source;
+  activeSourceRef.current = activeSource;
   const activeHasUrl = Boolean(activeSource?.url);
+  const hasSource = activeHasUrl;
+  const displayedSources = activeSource && !sources.some((candidate) => candidate.id === activeSource.id) ? [...sources, activeSource] : sources;
   // Gate on the ACTIVE source (switching servers re-evaluates consent), with
   // the route-level prop as fallback.
   const gate = activeSource?.consentRequired ?? consentRequired ?? false;
   // Public label only — the upstream provider's real name never renders in the
   // public player (see the watch route's PUBLIC SOURCE LABELING note).
   const providerName = activeSource?.label ?? providerLabel ?? source?.label ?? 'Server 1';
+  const activeConsentKey = (() => {
+    if (!activeSource) return null;
+    let origin = 'invalid';
+    try { origin = new URL(activeSource.url ?? '', 'https://player.invalid').origin; } catch { /* Invalid URLs remain gated. */ }
+    return `${activeSource.id}:${activeSource.providerId ?? ''}:${activeSource.kind}:${origin}`;
+  })();
 
-  const [consented, setConsented] = useState(false);
+  const [consentedProviderKey, setConsentedProviderKey] = useState<string | null>(null);
+  const [partyPanelOpen, setPartyPanelOpen] = useState(Boolean(initialPartyRoomCode));
   const [state, setState] = useState<PlayerState>('loading');
   const [reloadKey, setReloadKey] = useState(0);
-  const [reported, setReported] = useState(false);
+  const [reportState, setReportState] = useState<{ attempt: string; status: 'pending' | 'reported' | 'error' } | null>(null);
+  const reportRequestRef = useRef<{ attempt: string } | null>(null);
+  const reportingAvailableRef = useRef(reportingAvailable);
+  reportingAvailableRef.current = reportingAvailable;
+  const failedAttemptRef = useRef(false);
+  const attemptKey = `${mediaScope}:${activeSource?.id ?? ''}:${reloadKey}`;
+  const attemptRef = useRef(attemptKey);
+  attemptRef.current = attemptKey;
+  const reported = reportState?.attempt === attemptKey && reportState.status === 'reported';
+  const reportPending = reportState?.attempt === attemptKey && reportState.status === 'pending';
+  const reportError = reportState?.attempt === attemptKey && reportState.status === 'error'
+    ? 'Your report could not be sent. Please try again.' : undefined;
+  const reportDisabled = !reportingAvailable || reportPending || reported;
+  useEffect(() => {
+    if (!reportingAvailable) {
+      reportRequestRef.current = null;
+      setReportState(null);
+    }
+  }, [reportingAvailable]);
   // Pre-roll gate: no ad configured = already done. The session-once check
   // runs after mount (sessionStorage is not available during SSR) so the
   // initial render matches the server and hydration never mismatches.
@@ -190,10 +266,10 @@ export function PlayerShell({
   // Gate on the ACTIVE source: if the viewer switched to a server that has no
   // URL (shouldn't happen — the registry only lists resolvable sources), the
   // player renders the unavailable panel for that server.
-  const showConsent = activeHasUrl && gate && !consented;
+  const showConsent = activeHasUrl && gate && consentedProviderKey !== activeConsentKey;
   const showAd = activeHasUrl && !showConsent && preroll !== null && !adDone && adsConsent;
   // The player surface (native or iframe) mounts only after the gates clear.
-  const showPlayer = activeHasUrl && (!gate || consented) && adDone;
+  const showPlayer = activeHasUrl && (!gate || consentedProviderKey === activeConsentKey) && adDone;
   // Native sources (Lumora-hosted mp4/hls/dash) render <video> instead of an
   // embed iframe — same surface, same gates, real telemetry.
   const nativeKind =
@@ -202,6 +278,92 @@ export function PlayerShell({
         ? activeSource.kind
         : null
       : null;
+  const party = useWatchPartySession({
+    configured: watchPartyConfigured,
+    media: watchPartyMedia,
+    surface: !activeHasUrl ? 'unavailable' : nativeKind ? 'native' : 'embed',
+  });
+  const episodeNavigationDisabled = Boolean(party.state.room) || ['ticketing', 'connecting', 'reconnecting'].includes(party.state.phase);
+  const episodeNavigation = title.type !== 'tv' || !hasCoordinates ? null
+    : episodeNavigationUrl ? episodeLookup?.scope === mediaScope && episodeLookup.url === episodeNavigationUrl ? episodeLookup.navigation : null
+      : nextEpisode ? verifiedEpisodeNavigation({ previous: null, next: {
+        seasonNumber: nextEpisode.season, episodeNumber: nextEpisode.episode, name: nextEpisode.name || nextEpisode.label,
+        href: `/watch/tv/${title.slug}?season=${nextEpisode.season}&episode=${nextEpisode.episode}`,
+      } }, title.slug, seasonNumber!, episodeNumber!) : null;
+  const episodeContextRef = useRef({ mediaScope, navigation: episodeNavigation, disabled: episodeNavigationDisabled, autoNext });
+  episodeContextRef.current = { mediaScope, navigation: episodeNavigation, disabled: episodeNavigationDisabled, autoNext };
+
+  useEffect(() => {
+    episodeMountedRef.current = true;
+    return () => { episodeMountedRef.current = false; };
+  }, []);
+
+  useEffect(() => {
+    try { setAutoNext(window.localStorage.getItem(AUTO_NEXT_STORAGE_KEY) === 'true'); }
+    catch { /* Auto Next defaults off when storage is unavailable. */ }
+  }, []);
+
+  useEffect(() => {
+    if (title.type !== 'tv' || !hasCoordinates || !episodeNavigationUrl) return;
+    const controller = new AbortController();
+    let active = true;
+    const timer = setTimeout(() => controller.abort(), 10_000);
+    void (async () => {
+      try {
+        const url = new URL(episodeNavigationUrl, window.location.href);
+        if (url.origin !== window.location.origin || url.username || url.password) return;
+        const response = await fetch(episodeNavigationUrl, { credentials: 'same-origin', cache: 'no-store', redirect: 'error', signal: controller.signal });
+        const body: unknown = response.ok ? await response.json() : null;
+        if (active && !controller.signal.aborted) setEpisodeLookup({ scope: mediaScope, url: episodeNavigationUrl,
+          navigation: verifiedEpisodeNavigation(body, title.slug, seasonNumber!, episodeNumber!, window.location.origin) });
+      } catch { /* Unverified episodes never become navigation targets. */ }
+      finally { clearTimeout(timer); }
+    })();
+    return () => { active = false; clearTimeout(timer); controller.abort(); };
+  }, [mediaScope, title.type, title.slug, hasCoordinates, seasonNumber, episodeNumber, episodeNavigationUrl]);
+
+  const navigateEpisode = useCallback((direction: 'previous' | 'next') => {
+    const context = episodeContextRef.current;
+    const target = context.navigation?.[direction];
+    if (!episodeMountedRef.current || context.mediaScope !== mediaScope || !target || context.disabled
+      || episodeTransitionRef.current === context.mediaScope) return false;
+    episodeTransitionRef.current = context.mediaScope;
+    setEpisodeTransition(context.mediaScope);
+    void (async () => {
+      let navigated = false;
+      try {
+        const transition = prepareEpisodeTransitionRef.current;
+        if (transition?.scope === context.mediaScope && !await transition.prepare()) return;
+        const latest = episodeContextRef.current;
+        if (!episodeMountedRef.current || latest.mediaScope !== context.mediaScope || latest.disabled
+          || latest.navigation?.[direction]?.href !== target.href) return;
+        router.push(target.href);
+        navigated = true;
+      } catch { /* A failed transition leaves the current episode available. */ }
+      finally {
+        if (!navigated && episodeTransitionRef.current === context.mediaScope) {
+          episodeTransitionRef.current = null;
+          if (episodeMountedRef.current) setEpisodeTransition(null);
+        }
+      }
+    })();
+    return true;
+  }, [mediaScope, router]);
+  const registerEpisodeTransition = useCallback((prepare: (() => Promise<boolean>) | null) => {
+    if (prepare) prepareEpisodeTransitionRef.current = { scope: mediaScope, prepare };
+    else if (prepareEpisodeTransitionRef.current?.scope === mediaScope) prepareEpisodeTransitionRef.current = null;
+  }, [mediaScope]);
+  const handleContentEnded = useCallback(() => {
+    if (episodeContextRef.current.mediaScope === mediaScope && episodeContextRef.current.autoNext) navigateEpisode('next');
+  }, [mediaScope, navigateEpisode]);
+  const handleAutoNext = useCallback((enabled: boolean) => {
+    const context = episodeContextRef.current;
+    if (!episodeMountedRef.current || context.mediaScope !== mediaScope || context.disabled) return;
+    episodeContextRef.current = { ...context, autoNext: enabled };
+    setAutoNext(enabled);
+    try { window.localStorage.setItem(AUTO_NEXT_STORAGE_KEY, String(enabled)); }
+    catch { /* The explicit choice still works for this session. */ }
+  }, [mediaScope]);
   const playerFailed = showPlayer && state === 'provider-error';
   const normalizedTmdbId = title.tmdbId?.trim();
   const subtitleCatalogUrl = (() => {
@@ -231,6 +393,10 @@ export function PlayerShell({
     setState('loading');
   }, []);
 
+  useEffect(() => {
+    if (initialPartyRoomCode) setPartyPanelOpen(true);
+  }, [initialPartyRoomCode]);
+
   // Pre-roll safety net: if the creative never calls onDone (blocked zone, ad
   // network failure), auto-continue to the video after 8s. Otherwise a broken
   // ad would strand the player behind the gate forever — and with it the guest
@@ -245,18 +411,21 @@ export function PlayerShell({
   const sessionIdRef = useRef<string | null>(null);
   const [sessionReady, setSessionReady] = useState(false);
 
-  // Overlay safety net: the "Loading player…" overlay only clears on the
-  // iframe's onLoad. Providers that render a blank/slow document never fire
-  // it, leaving a stuck spinner over a working (or blank) player. Clear the
-  // overlay after 12s no matter what — the iframe is present either way and
-  // the server switcher recovers a bad provider.
+  // Only cross-origin embeds lack observable readiness. Native media must
+  // actually supply playable data, not become "ready" because a timer elapsed.
   useEffect(() => {
-    if (!showPlayer) return;
+    if (!showPlayer || nativeKind !== null) return;
     const timer = window.setTimeout(() => {
-      setState((s) => (s === 'loading' ? 'ready' : s));
+      if (attemptRef.current === attemptKey && !failedAttemptRef.current) setState((s) => (s === 'loading' ? 'ready' : s));
     }, 12_000);
     return () => window.clearTimeout(timer);
-  }, [showPlayer, reloadKey, activeSourceId]);
+  }, [showPlayer, nativeKind, attemptKey]);
+
+  useEffect(() => {
+    failedAttemptRef.current = false;
+    setConsentedProviderKey(null);
+    setState('loading');
+  }, [mediaScope]);
 
   useEffect(() => {
     if (!showPlayer) return;
@@ -302,14 +471,16 @@ export function PlayerShell({
   }, [showPlayer, sessionReady]);
 
   function handleConsent() {
-    setConsented(true);
+    setConsentedProviderKey(activeConsentKey);
     setState('loading');
   }
 
   function handleRetry() {
-    setReported(false);
+    reportRequestRef.current = null;
+    setReportState(null);
     if (hasSource) {
-      // Re-mount the iframe (fresh load) without a full navigation.
+      failedAttemptRef.current = false;
+      // Native retries in place; only an iframe needs a fresh mount.
       setState('loading');
       setReloadKey((key) => key + 1);
     } else {
@@ -319,40 +490,61 @@ export function PlayerShell({
   }
 
   function handleReport() {
-    setReported(true);
-    // File a real playback report (migration 0008) with safe diagnostics only —
-    // never the iframe URL, query/token, or upstream provider identity.
-    void reportPlaybackIssueAction({
-      titleId: title.id,
-      ...(episodeId ? { episodeId } : {}),
-      serverLabel: activeSource?.label ?? source?.label,
-      playerState: hasSource ? state : error ? playerStateForError(error.code) : 'blocked',
-    });
+    if (!episodeMountedRef.current || !reportingAvailableRef.current || attemptRef.current !== attemptKey || reportDisabled
+      || reportRequestRef.current?.attempt === attemptKey) return;
+    const request = { attempt: attemptKey };
+    reportRequestRef.current = request;
+    setReportState({ attempt: attemptKey, status: 'pending' });
+    void (async () => {
+      let ok = false;
+      try {
+        // Safe diagnostics only, never a source URL, token, or upstream provider identity.
+        const result = await reportPlaybackIssueAction({
+          titleId: title.id,
+          ...(episodeId ? { episodeId } : {}),
+          serverLabel: activeSource?.label ?? source?.label,
+          playerState: hasSource ? state : error ? playerStateForError(error.code) : 'blocked',
+        });
+        ok = result?.ok === true;
+      } catch { /* A failed action must never become a recorded report. */ }
+      if (reportRequestRef.current !== request) return;
+      reportRequestRef.current = null;
+      if (episodeMountedRef.current && attemptRef.current === request.attempt) {
+        setReportState({ attempt: request.attempt, status: ok ? 'reported' : 'error' });
+      }
+    })();
   }
 
   function handleSelectSource(id: string) {
-    // Switching servers: the active source changes and the player re-mounts
-    // (fresh load) with the newly selected source's URL.
-    if (!id) return;
-    setActiveSourceId(id);
+    if (!id || id === activeSource?.id || !displayedSources.some((candidate) => candidate.id === id && candidate.url)) return;
+    failedAttemptRef.current = false;
+    setConsentedProviderKey(null);
+    setSelection({ mediaScope, id });
     setState('loading');
     setReloadKey((key) => key + 1);
   }
 
-  // Stable callbacks: NativePlayer's media effect depends on these, so they
-  // must not change identity across renders (a new function would reload the
-  // video from scratch on every parent render).
-  const handleNativeReady = useCallback(() => setState('ready'), []);
-  const handleNativeError = useCallback(() => setState('provider-error'), []);
+  const handleNativeReady = useCallback(() => {
+    if (!failedAttemptRef.current) setState('ready');
+  }, []);
+  const handlePlaybackError = useCallback(() => {
+    if (failedAttemptRef.current) return;
+    failedAttemptRef.current = true;
+    setState('provider-error');
+  }, []);
 
   return (
     <section aria-label={`Player for ${title.name}`} className="flex flex-col gap-3">
-      <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-border bg-black shadow-raised">
+      <div className={cn('grid gap-3', partyPanelOpen && 'lg:grid-cols-[minmax(0,1fr)_22rem]')}>
+        <div className="flex min-w-0 flex-col gap-3">
+          <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-border bg-black shadow-raised">
         {!hasSource ? (
           <UnavailablePanel
             message={unavailableMessage(error)}
             onRetry={handleRetry}
             onReport={handleReport}
+            reportingAvailable={reportingAvailable}
+            reportDisabled={reportDisabled}
           />
         ) : showConsent ? (
           <ConsentPanel providerName={providerName} onLoad={handleConsent} />
@@ -366,23 +558,26 @@ export function PlayerShell({
           />
         ) : !showPlayer ? (
           <PlayerLoadingOverlay />
-        ) : playerFailed ? (
+        ) : playerFailed && nativeKind === null ? (
           <UnavailablePanel
-            message={unavailableMessage({ code: 'provider-error', message: '', recoverable: true })}
+            message="The selected source could not play. Retry or choose another source."
             onRetry={handleRetry}
             onReport={handleReport}
+            reportingAvailable={reportingAvailable}
+            reportDisabled={reportDisabled}
           />
         ) : (
           <>
-            {state !== 'ready' ? <PlayerLoadingOverlay /> : null}
+            {state !== 'ready' && !playerFailed ? <PlayerLoadingOverlay /> : null}
 
             {nativeKind !== null ? (
               /* Lumora-hosted media: a real <video> element with native
                  controls, resume support, and honest position telemetry. */
-              <NativePlayer
-                key={`${activeSource!.id}-${reloadKey}`}
+              <PartyPortNativePlayer
+                key={mediaScope}
+                retryKey={reloadKey}
                 source={{ url: activeSource!.url!, kind: nativeKind!, ...(activeSource?.streamCatalogUrl ? { streamCatalogUrl: activeSource.streamCatalogUrl } : {}) }}
-                sources={sources}
+                sources={displayedSources}
                 selectedSourceId={activeSource?.id ?? null}
                 onSelectSource={handleSelectSource}
                 titleId={title.id}
@@ -392,9 +587,16 @@ export function PlayerShell({
                 adPolicy={adPolicy}
                 introCatalogUrl={introCatalogUrl}
                 subtitleCatalogUrl={subtitleCatalogUrl}
-                upNext={nextEpisode ? {
-                  name: [nextEpisode.label, nextEpisode.name].filter(Boolean).join(' - '),
-                  href: `/watch/tv/${title.slug}?season=${nextEpisode.season}&episode=${nextEpisode.episode}`,
+                episodeNavigation={episodeNavigation ?? undefined}
+                episodeNavigationDisabled={episodeNavigationDisabled}
+                episodeNavigationPending={episodeTransition === mediaScope}
+                onNavigateEpisode={navigateEpisode}
+                registerEpisodeTransition={registerEpisodeTransition}
+                onContentEnded={handleContentEnded}
+                {...(title.type === 'tv' ? { autoNext: autoNext && !episodeNavigationDisabled, onAutoNextChange: handleAutoNext } : {})}
+                upNext={episodeNavigation?.next && !episodeNavigationDisabled ? {
+                  name: [`S${episodeNavigation.next.seasonNumber} E${episodeNavigation.next.episodeNumber}`, episodeNavigation.next.name].filter(Boolean).join(' - '),
+                  href: episodeNavigation.next.href,
                   ...(title.posterUrl ? { posterUrl: title.posterUrl } : {}),
                 } : undefined}
                 {...(resumeUpdatedAt !== undefined ? { resumeUpdatedAt } : {})}
@@ -404,7 +606,8 @@ export function PlayerShell({
                 {...(episodeNumber !== undefined ? { episodeNumber } : {})}
                 {...(initialPosition !== undefined ? { initialPosition } : {})}
                 onReady={handleNativeReady}
-                onError={handleNativeError}
+                onError={handlePlaybackError}
+                registerPartyPlayerPort={party.registerPlayerPort}
               />
             ) : (
               /*
@@ -440,24 +643,51 @@ export function PlayerShell({
                 allow="autoplay; fullscreen; encrypted-media; picture-in-picture"
                 allowFullScreen
                 loading="eager"
-                onLoad={() => setState('ready')}
-                onError={() => setState('provider-error')}
+                onLoad={() => { if (attemptRef.current === attemptKey) handleNativeReady(); }}
+                onError={() => { if (attemptRef.current === attemptKey) handlePlaybackError(); }}
               />
             )}
+            {playerFailed ? <div className="absolute inset-0 z-20 bg-black"><UnavailablePanel
+              message="The selected source could not play. Your selections are unchanged. Retry or choose another source."
+              onRetry={handleRetry}
+              onReport={handleReport}
+              reportingAvailable={reportingAvailable}
+              reportDisabled={reportDisabled}
+            /></div> : null}
           </>
         )}
-      </div>
+          </div>
 
-      <PlayerControlsBar
-        backHref={`/title/${title.type}/${title.slug}`}
-        backLabel={`Back to ${title.name} details`}
-        sources={sources}
-        showSourceSelector={nativeKind === null || !showPlayer || playerFailed}
-        selectedSourceId={activeSource?.id ?? null}
-        onSelectSource={handleSelectSource}
-        onReportIssue={handleReport}
-        reported={reported}
-      />
+          <PlayerControlsBar
+            backHref={`/title/${title.type}/${title.slug}`}
+            backLabel={`Back to ${title.name} details`}
+            sources={displayedSources}
+            showSourceSelector={nativeKind === null || !showPlayer || playerFailed}
+            selectedSourceId={activeSource?.id ?? null}
+            onSelectSource={handleSelectSource}
+            onReportIssue={handleReport}
+            reported={reported}
+            reportingAvailable={reportingAvailable}
+            reportPending={reportPending}
+            reportError={reportError}
+            episodeNavigation={episodeNavigation ? { ...episodeNavigation, disabled: episodeNavigationDisabled,
+              pending: episodeTransition === mediaScope, onNavigate: navigateEpisode } : undefined}
+            watchParty={{
+              available: party.available,
+              active: Boolean(party.state.room),
+              participantCount: party.state.participants.filter((participant) => participant.connected).length,
+              onOpen: () => setPartyPanelOpen(true),
+            }}
+          />
+        </div>
+
+        <WatchPartyPanel
+          open={partyPanelOpen}
+          onClose={() => setPartyPanelOpen(false)}
+          session={party}
+          {...(initialPartyRoomCode ? { initialRoomCode: initialPartyRoomCode } : {})}
+        />
+      </div>
 
       {nativeKind ? (
         /* Native playback (Spec Section 9): Lumora-hosted media streamed from
@@ -515,10 +745,14 @@ function UnavailablePanel({
   message,
   onRetry,
   onReport,
+  reportingAvailable,
+  reportDisabled,
 }: {
   message: string;
   onRetry: () => void;
   onReport: () => void;
+  reportingAvailable: boolean;
+  reportDisabled: boolean;
 }) {
   return (
     <div
@@ -534,10 +768,11 @@ function UnavailablePanel({
         <Button variant="primary" onClick={onRetry}>
           Retry
         </Button>
-        <Button variant="secondary" onClick={onReport}>
+        <Button variant="secondary" disabled={reportDisabled} onClick={() => { if (!reportDisabled) onReport(); }}>
           Report playback issue
         </Button>
       </div>
+      {!reportingAvailable ? <p className="text-xs text-content-muted">Reporting unavailable</p> : null}
       <p className="text-xs text-content-subtle">
         You can also choose an alternate authorized source below when one is available.
       </p>

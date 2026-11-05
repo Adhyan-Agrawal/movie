@@ -5,6 +5,7 @@ import { listProviderConfigs } from '@/lib/providers/config';
 import { resolvePlayback } from '@/lib/providers/registry';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { introCatalogPath } from '@/features/player/intro-markers';
+import { episodeNavigationPath } from '@/features/player/episode-navigation';
 
 /**
  * Playback bridge for the native app (Spec Section 9).
@@ -97,6 +98,11 @@ export async function GET(request: NextRequest) {
   }
   const introPath = introCatalogPath({ type, imdbId, season, episode });
   const introCatalogUrl = introPath ? new URL(introPath, origin).href : undefined;
+  const navigationPath = features.tmdbConfigured
+    && ['type', 'tmdbId', 'season', 'episode'].every((key) => sp.getAll(key).length === 1)
+    && sp.get('season') === String(season) && sp.get('episode') === String(episode)
+    ? episodeNavigationPath({ type, tmdbId, season, episode }) : undefined;
+  const episodeNavigationUrl = navigationPath ? new URL(navigationPath, origin).href : undefined;
   // Resume first (needs the real provider id), THEN anonymize — so the public
   // payload never carries an upstream identity.
   let fallbackIndex = 0;
@@ -114,5 +120,6 @@ export async function GET(request: NextRequest) {
 
   return NextResponse.json({ sources: publicSources, adPolicy: commerceContext.ads, entitlements: commerceContext.entitlements,
     ...(subtitleCatalogUrl ? { subtitleCatalogUrl } : {}),
+    ...(episodeNavigationUrl ? { episodeNavigationUrl } : {}),
     ...(introCatalogUrl ? { introCatalogUrl } : {}) }, { headers: { 'Cache-Control': 'no-store' } });
 }

@@ -8,7 +8,7 @@ import { signUpAction } from '@/features/auth/actions';
 
 /**
  * Sign-up form (Spec Section 8). Client component using useActionState for
- * inline, accessible error display (mismatched passwords, Supabase errors).
+ * inline, accessible validation, service errors, and confirmation instructions.
  */
 export function SignUpForm() {
   const [state, formAction, pending] = useActionState<AuthActionState, FormData>(
@@ -21,6 +21,11 @@ export function SignUpForm() {
       {state.error ? (
         <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
           {state.error}
+        </p>
+      ) : null}
+      {state.message ? (
+        <p role="status" className="rounded-md border border-border bg-surface/40 px-3 py-2 text-sm text-content-muted">
+          {state.message}
         </p>
       ) : null}
 

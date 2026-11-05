@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
+import { Icon } from '@/components/ui/Icon';
 
 /**
  * Auto-advancing hero carousel (Spec Section 4).
@@ -22,7 +23,7 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
   const count = children.length;
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
-  const [autoplay, setAutoplay] = useState(true);
+  const [autoplay, setAutoplay] = useState(false);
   const [reducedMotion, setReducedMotion] = useState(true);
 
   useEffect(() => {
@@ -51,15 +52,15 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
       role="region"
       aria-roledescription="carousel"
       aria-label="Trending titles"
-      className="relative"
+      className="hero-carousel relative"
       onMouseEnter={() => setPaused(true)}
       onMouseLeave={() => setPaused(false)}
       onFocus={() => setPaused(true)}
       onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false); }}
       onTouchStart={() => setAutoplay(false)}
     >
-      {/* Slides stacked with a crossfade; only the active one is in the tree. */}
-      <div className="relative" aria-live={paused || !autoplay || reducedMotion ? 'polite' : 'off'}>
+      {/* A shared grid cell keeps the tallest slide's geometry stable. */}
+      <div className="hero-slides" aria-live={paused || !autoplay || reducedMotion ? 'polite' : 'off'}>
         {children.map((child, i) => (
           <div
             key={i}
@@ -69,8 +70,8 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
             aria-roledescription="slide"
             aria-label={`${i + 1} of ${count}`}
             className={cn(
-              'transition-opacity duration-700 ease-deliberate motion-reduce:transition-none',
-              i === activeIndex ? 'relative opacity-100' : 'pointer-events-none absolute inset-0 opacity-0',
+              'hero-slide transition-opacity duration-500 ease-deliberate motion-reduce:transition-none',
+              i === activeIndex ? 'opacity-100' : 'pointer-events-none opacity-0',
             )}
           >
             {child}
@@ -79,39 +80,40 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
       </div>
 
       {/* Dots + arrows */}
-      <div className="absolute inset-x-4 bottom-6 z-20 flex items-center justify-center gap-1 md:inset-x-8">
+      {count > 1 ? <div className="hero-carousel-controls absolute inset-x-4 bottom-6 z-20">
+        <span className="hero-slide-count" aria-hidden="true">{String(activeIndex + 1).padStart(2, '0')}<span> / {String(count).padStart(2, '0')}</span></span>
         <button
           type="button"
-          onClick={prev}
+          onClick={() => { prev(); setAutoplay(false); }}
           aria-label="Previous trending title"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-full border border-border bg-base/60 text-content backdrop-blur transition-colors hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-primary"
+          className="site-icon-button hero-control-button"
         >
-          <span aria-hidden="true">←</span>
+          <Icon name="arrow-left" />
         </button>
 
-        <div className="flex min-w-0 items-center gap-0.5 overflow-x-auto rounded-full border border-border bg-base/60 px-1 py-1 backdrop-blur">
+        <div className="hero-pagination">
           {children.map((_child, i) => (
             <button
               key={i}
               type="button"
               aria-label={`Show trending title ${i + 1} of ${count}`}
               aria-current={i === activeIndex}
-              onClick={() => setIndex(i)}
-              className="grid h-11 w-6 shrink-0 place-items-center rounded-full focus-visible:ring-2 focus-visible:ring-primary"
-            ><span aria-hidden="true" className={cn('h-2 rounded-full motion-safe:transition-all', i === activeIndex ? 'w-5 bg-primary' : 'w-2 bg-content-subtle')} /></button>
+              onClick={() => { setIndex(i); setAutoplay(false); }}
+              className="hero-pagination-button"
+            ><span aria-hidden="true" className={cn('hero-pagination-mark', i === activeIndex && 'is-active')} /></button>
           ))}
         </div>
 
         <button
           type="button"
-          onClick={next}
+          onClick={() => { next(); setAutoplay(false); }}
           aria-label="Next trending title"
-          className="grid h-11 w-11 shrink-0 place-items-center rounded-full border border-border bg-base/60 text-content backdrop-blur transition-colors hover:bg-surface-raised focus-visible:ring-2 focus-visible:ring-primary"
+          className="site-icon-button hero-control-button"
         >
-          <span aria-hidden="true">→</span>
+          <Icon name="arrow-right" />
         </button>
-        {!reducedMotion ? <button type="button" onClick={() => setAutoplay((value) => !value)} aria-label={autoplay ? 'Pause slideshow' : 'Resume slideshow'} className="h-11 w-11 shrink-0 rounded-full border border-border bg-base/80 text-[11px] text-content focus-visible:ring-2 focus-visible:ring-primary">{autoplay ? 'Pause' : 'Resume'}</button> : null}
-      </div>
+        {!reducedMotion ? <button type="button" onClick={() => setAutoplay((value) => !value)} aria-label={autoplay ? 'Pause slideshow' : 'Start slideshow'} className="hero-autoplay-button">{autoplay ? 'Pause' : 'Auto'}</button> : null}
+      </div> : null}
     </div>
   );
 }

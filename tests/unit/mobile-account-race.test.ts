@@ -43,7 +43,7 @@ vi.mock('../../mobile/src/ads/AdMobProvider', () => ({ AdMobPrivacyChoices: 'AdM
 vi.mock('../../mobile/src/lib/api', () => ({ currentUser: mock.currentUser, fetchContinueWatching: mock.history,
   signOut: mock.signOut, getTitleBySlug: vi.fn(), submitTitleRequest: vi.fn() }));
 vi.mock('../../mobile/src/lib/guest', () => ({ readGuestEntries: mock.guest }));
-vi.mock('../../mobile/src/lib/supabase', () => ({ supabase: { auth: { onAuthStateChange: (callback: typeof mock.auth) => {
+vi.mock('../../mobile/src/lib/supabase', () => ({ supabaseConfigured: true, supabase: { auth: { onAuthStateChange: (callback: typeof mock.auth) => {
   mock.auth = callback; return { data: { subscription: { unsubscribe: mock.unsubscribe } } };
 } } } }));
 const componentPath = '../../mobile/src/screens/AccountScreen';

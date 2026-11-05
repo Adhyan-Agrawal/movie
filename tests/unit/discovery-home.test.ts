@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Title } from '@/features/catalog/types';
 
-const mocks = vi.hoisted(() => ({ features: { tmdbConfigured: true, supabaseConfigured: false }, listTitles: vi.fn(), getContinueWatching: vi.fn(), isSignedIn: vi.fn(), getForYouRow: vi.fn() }));
+const mocks = vi.hoisted(() => ({ features: { tmdbConfigured: true, supabaseConfigured: false }, listTitles: vi.fn(), getContinueWatching: vi.fn(), isSignedIn: vi.fn(), getForYouRow: vi.fn(), noStore: vi.fn() }));
+vi.mock('next/cache', () => ({ unstable_noStore: mocks.noStore }));
 vi.mock('@/lib/env', () => ({ features: mocks.features }));
 vi.mock('@/features/catalog/queries', () => ({ listTitles: mocks.listTitles }));
 vi.mock('@/features/playback/progress-queries', () => ({ getContinueWatching: mocks.getContinueWatching, isSignedIn: mocks.isSignedIn }));
@@ -21,6 +22,7 @@ beforeEach(() => {
   mocks.getContinueWatching.mockReset().mockResolvedValue([{ title: fixtures[0] }]);
   mocks.isSignedIn.mockReset().mockResolvedValue(true);
   mocks.getForYouRow.mockReset().mockResolvedValue({ id: 'personal', heading: 'Because you watched', titles: [fixtures[0]] });
+  mocks.noStore.mockReset();
 });
 afterEach(() => vi.restoreAllMocks());
 
@@ -34,7 +36,21 @@ describe('public home discovery payload', () => {
     expect(mocks.getContinueWatching).not.toHaveBeenCalled();
     expect(mocks.isSignedIn).not.toHaveBeenCalled();
     expect(mocks.getForYouRow).not.toHaveBeenCalled();
+    expect(mocks.noStore).not.toHaveBeenCalled();
     expect(mocks.listTitles.mock.calls.every(([filters]) => filters.limit <= 20)).toBe(true);
+  });
+
+  it('marks each personalized home read no-store and never applies that boundary to public data', async () => {
+    mocks.features.supabaseConfigured = true;
+    await getPublicHomeData();
+    expect(mocks.noStore).not.toHaveBeenCalled();
+    expect(mocks.getContinueWatching).not.toHaveBeenCalled();
+
+    await getHomeData();
+    await getHomeData();
+    expect(mocks.noStore).toHaveBeenCalledTimes(2);
+    expect(mocks.getContinueWatching).toHaveBeenCalledTimes(2);
+    expect(mocks.getForYouRow).toHaveBeenCalledTimes(2);
   });
 
   it('works with TMDB configured and Supabase absent', async () => {

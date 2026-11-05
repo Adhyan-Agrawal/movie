@@ -1,0 +1,17 @@
+{
+  "name": "@lumora/migration-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "export": "node ./src/export.mjs",
+    "transform": "node ./src/transform.mjs",
+    "import": "node ./src/import.mjs",
+    "snapshot:local": "node ./src/snapshot-local.mjs",
+    "reconcile": "node ./src/reconcile.mjs",
+    "test": "node --test ./test/*.test.mjs"
+  }
+}

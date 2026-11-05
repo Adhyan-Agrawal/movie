@@ -1,7 +1,10 @@
 import Link from 'next/link';
 import Image from 'next/image';
-import { Badge } from '@/components/ui/Badge';
 import { buttonClasses } from '@/components/ui/Button';
+import { Container } from '@/components/ui/Container';
+import { Icon } from '@/components/ui/Icon';
+import { TrailerButton } from './TrailerButton';
+import { formatRuntime } from './title-detail-helpers';
 import type { Title } from '../types';
 
 /** True when the artwork is a real remote image (TMDB-style http(s) URL). */
@@ -9,16 +12,17 @@ function isRemoteUrl(url: string | undefined): boolean {
   return url !== undefined && (url.startsWith('https://') || url.startsWith('http://'));
 }
 
-/** Editorial hero (Section 4). Real TMDB backdrop when present; gradient fallback keeps it premium. */
+/** An editorial spotlight with real artwork and provider metadata. */
 export function Hero({ title, priority = true }: { title: Title; priority?: boolean }) {
   const href = `/title/${title.type}/${title.slug}`;
   const watchHref = `/watch/${title.type}/${title.slug}`;
   const headingId = `hero-title-${title.id.replace(/[^a-z0-9-]/gi, '-')}`;
+  const runtime = formatRuntime(title.runtimeMinutes);
 
   return (
     <section
       aria-labelledby={headingId}
-      className="discovery-hero relative flex min-h-[62vh] flex-col justify-end overflow-hidden md:min-h-[72vh]"
+      className="discovery-hero"
     >
       {isRemoteUrl(title.backdropUrl) && title.backdropUrl ? (
         /* Decorative backdrop — the section's text carries the meaning. */
@@ -27,64 +31,58 @@ export function Hero({ title, priority = true }: { title: Title; priority?: bool
           alt=""
           fill
           priority={priority}
+          unoptimized
+          loading={priority ? 'eager' : 'lazy'}
+          decoding="async"
           sizes="100vw"
-          className="object-cover"
+          className="hero-artwork object-cover"
           aria-hidden
         />
       ) : (
         <div
           aria-hidden="true"
-          className="absolute inset-0"
-          style={title.backdropUrl?.startsWith('linear-gradient') ? { backgroundImage: title.backdropUrl } : undefined}
+          className="hero-artwork-fallback"
         />
       )}
       {/* Legibility gradients over artwork (Section 5) */}
-      <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-t from-base via-base/70 to-transparent" />
-      <div aria-hidden="true" className="absolute inset-0 bg-gradient-to-r from-base/90 via-base/30 to-transparent" />
+      <div aria-hidden="true" className="hero-scrim" />
 
-      <div className="relative z-10 flex max-w-2xl flex-col gap-4 px-4 pb-24 md:px-8 md:pb-28">
-        <p className="text-xs font-semibold uppercase tracking-[0.24em] text-content-muted">Lumora / In the spotlight</p>
-        <div className="flex flex-wrap items-center gap-2">
-          {title.featured ? <Badge tone="primary">Featured</Badge> : null}
-          {title.type === 'tv' ? <Badge tone="info">Series</Badge> : null}
-          <Badge tone="neutral">{title.maturity}</Badge>
-        </div>
+      <Container className="hero-content-wrap">
+      <div className="hero-content">
+        <p className="site-eyebrow hero-eyebrow"><span aria-hidden="true" />In the spotlight<span className="hero-type">{title.type === 'tv' ? 'Series' : 'Film'}</span></p>
 
-        <h1 id={headingId} className="font-display text-4xl font-bold tracking-tight md:text-6xl">
+        <h1 id={headingId} className="hero-title">
           {title.name}
         </h1>
 
-        <div className="flex flex-wrap items-center gap-2 text-sm text-content-muted">
+        <div className="hero-metadata">
           {title.releaseYear > 0 ? <span>{title.releaseYear}</span> : null}
+          {runtime ? <span>{runtime}</span> : null}
+          {title.maturity ? <span className="hero-maturity">{title.maturity}</span> : null}
           {title.genres.length ? (
-            <>
-              <span aria-hidden="true">·</span>
-              <span>{title.genres.join(', ')}</span>
-            </>
+            <span>{title.genres.slice(0, 3).join(' / ')}</span>
           ) : null}
           {typeof title.score === 'number' ? (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="text-success">{(title.score / 10).toFixed(1)}/10 rating</span>
-            </>
+            <span className="hero-rating">{(title.score / 10).toFixed(1)}/10 rating</span>
           ) : null}
         </div>
 
-        <p className="line-clamp-3 max-w-xl text-sm leading-relaxed text-content-muted md:text-base">{title.synopsis}</p>
+        {title.synopsis ? <p className="hero-synopsis">{title.synopsis}</p> : null}
 
-        <div className="mt-1 flex flex-wrap items-center gap-3">
+        <div className="hero-actions">
           <Link
             href={watchHref}
+            prefetch={false}
             aria-label={`Play ${title.name}`}
-            className={buttonClasses({ size: 'lg', variant: 'primary' })}
+            className={buttonClasses({ size: 'lg', variant: 'primary', className: 'site-action-primary' })}
           >
-            <span aria-hidden="true">▶</span> Play
+            <Icon name="play" /> Play
           </Link>
-          <Link href={href} className={buttonClasses({ size: 'lg', variant: 'secondary' })}>
-            More info
-          </Link>
+          <TrailerButton trailerUrl={title.trailerUrl} titleName={title.name} imdbId={title.imdbId} tmdbId={title.tmdbId} type={title.type} />
         </div>
+        <Link href={href} prefetch={false} className="hero-info-link">Explore this title <Icon name="arrow-right" width="17" height="17" /></Link>
       </div>
+      </Container>
     </section>
   );
 }

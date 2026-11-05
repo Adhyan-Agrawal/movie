@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { createClient } from '@supabase/supabase-js';
+import { resolveSupabaseRuntimeConfig } from './runtime-config';
 
 /**
  * Supabase client for React Native.
@@ -14,20 +15,20 @@ import { createClient } from '@supabase/supabase-js';
  * this client can read public catalog rows and only the signed-in viewer's own
  * library rows.
  */
-const supabaseUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
-const supabaseAnonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+const config = resolveSupabaseRuntimeConfig(
+  process.env.EXPO_PUBLIC_SUPABASE_URL,
+  process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY,
+);
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  throw new Error(
-    'Missing EXPO_PUBLIC_SUPABASE_URL / EXPO_PUBLIC_SUPABASE_ANON_KEY — copy mobile/.env.example to mobile/.env.',
-  );
-}
+export const supabaseConfigured = config.configured;
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
+// A constructor-safe inert client keeps module evaluation from taking down the
+// entire app. Every account entry point checks `supabaseConfigured` first.
+export const supabase = createClient(config.url, config.anonKey, {
   auth: {
-    storage: AsyncStorage,
-    autoRefreshToken: true,
-    persistSession: true,
+    ...(supabaseConfigured ? { storage: AsyncStorage } : {}),
+    autoRefreshToken: supabaseConfigured,
+    persistSession: supabaseConfigured,
     detectSessionInUrl: false,
   },
 });

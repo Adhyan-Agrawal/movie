@@ -8,7 +8,7 @@ import { Button, EmptyState, Loading, Screen } from '../components/ui';
 import { Row } from '../components/Row';
 import { currentUser, fetchContinueWatching, getTitleBySlug, signOut, submitTitleRequest } from '../lib/api';
 import { readGuestEntries } from '../lib/guest';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseConfigured } from '../lib/supabase';
 import { SubscriptionStatus } from '../components/SubscriptionStatus';
 import { AdMobPrivacyChoices } from '../ads/AdMobProvider';
 import type { ContinueEntry, TitleType } from '../lib/types';
@@ -84,7 +84,7 @@ export default function AccountScreen() {
   // And live, when the session changes while the tab is already on screen.
   useEffect(() => {
     mounted.current = true;
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
+    const subscription = supabaseConfigured ? supabase.auth.onAuthStateChange((_event, session) => {
       loadGeneration.current += 1;
       const accountId = session?.user.id ?? null;
       if (identity.current !== accountId) {
@@ -92,9 +92,9 @@ export default function AccountScreen() {
       }
       identity.current = accountId;
       // Supabase auth callbacks hold its session lock; defer any auth/library reads.
-      queueMicrotask(() => { if (mounted.current && focused.current) void load(); });
-    });
-    return () => { mounted.current = false; loadGeneration.current += 1; data.subscription.unsubscribe(); };
+      queueMicrotask(() => { if (mounted.current && focused.current) void load().catch(() => {}); });
+    }).data.subscription : null;
+    return () => { mounted.current = false; loadGeneration.current += 1; subscription?.unsubscribe(); };
   }, [load]);
 
   const onRefresh = useCallback(async () => {
@@ -185,11 +185,11 @@ export default function AccountScreen() {
             heading="Continue watching"
             {...(signedIn
               ? {}
-              : { reason: 'Saved on this device only — sign in to keep it across devices.' })}
+              : { reason: 'Saved on this device only. Guest history is not transferred to your account when you sign in.' })}
             titles={entries.map((e) => e.title)}
             onPressTitle={(t) => {
               const entry = entries.find((e) => e.title.id === t.id);
-              if (entry) playEntry(entry);
+               if (entry) void playEntry(entry).catch(() => {});
             }}
             progressById={progressById}
           />

@@ -24,17 +24,17 @@ export function EmptyState({
   return (
     <div
       className={cn(
-        'flex flex-col items-center justify-center gap-3 rounded-lg border border-dashed border-border',
-        'bg-surface/40 px-6 py-16 text-center',
+        'site-empty-state flex flex-col items-center justify-center gap-4 border border-border',
+        'bg-surface px-6 py-16 text-center',
         className,
       )}
     >
-      <div aria-hidden="true" className={cn('text-3xl', accent)}>
+      <div aria-hidden="true" className={cn('grid h-12 w-12 place-items-center rounded-full border border-border text-2xl', accent)}>
         {icon}
       </div>
-      <h2 className="text-base font-semibold">{title}</h2>
-      {description ? <p className="max-w-sm text-sm text-content-muted">{description}</p> : null}
-      {action ? <div className="mt-1">{action}</div> : null}
+      <h2 className="text-xl font-semibold tracking-tight">{title}</h2>
+      {description ? <p className="max-w-md text-sm leading-relaxed text-content-muted">{description}</p> : null}
+      {action ? <div className="mt-2">{action}</div> : null}
     </div>
   );
 }

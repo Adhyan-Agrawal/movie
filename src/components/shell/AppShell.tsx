@@ -1,4 +1,3 @@
-import { Rail } from './Rail';
 import { MobileNav } from './MobileNav';
 import { TopBar } from './TopBar';
 import { Footer } from './Footer';
@@ -6,6 +5,7 @@ import { InstallPrompt } from '@/components/pwa/InstallPrompt';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
 import { isSignedIn } from '@/features/playback/progress-queries';
+import { features } from '@/lib/env';
 
 /**
  * AppShell (Section 5). Landmarks: nav (rail + mobile), header (top bar),
@@ -13,21 +13,21 @@ import { isSignedIn } from '@/features/playback/progress-queries';
  * fixed rail on desktop and the bottom nav on mobile.
  */
 export async function AppShell({ children }: { children: React.ReactNode }) {
-  const signedIn = await isSignedIn().catch(() => false);
+  const accountsAvailable = features.supabaseConfigured;
+  const signedIn = accountsAvailable && await isSignedIn().catch(() => false);
   return (
-    <div className="min-h-dvh">
+    <div className="site-shell min-h-dvh min-w-0">
       <a href="#main" className="skip-link">
         Skip to content
       </a>
-      <Rail />
-      <div className="flex min-h-dvh flex-col md:pl-16">
-        <TopBar signedIn={signedIn} />
+      <div className="flex min-h-dvh min-w-0 flex-col">
+        <TopBar signedIn={signedIn} accountsAvailable={accountsAvailable} />
         {/* pb-24 (6rem) clears the bottom nav; the safe-area inset is added on
             top so the last row isn't tucked under the home indicator. */}
         <main
           id="main"
           tabIndex={-1}
-          className="flex-1 pb-[calc(6rem+env(safe-area-inset-bottom))] focus:outline-none md:pb-8"
+          className="site-main min-w-0 flex-1 focus:outline-none"
         >
           {children}
         </main>
@@ -41,7 +41,7 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
       {/* Mounted here (not in layout.tsx) so it renders inside the shell, sat
           just above the fixed mobile nav. */}
       <InstallPrompt />
-      <MobileNav />
+      <MobileNav accountsAvailable={accountsAvailable} />
     </div>
   );
 }

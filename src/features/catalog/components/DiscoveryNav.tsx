@@ -8,15 +8,15 @@ export function DiscoveryNav({ collections = DISCOVERY_COLLECTIONS, type, genres
       || (!type && genre.toLowerCase() === providerGenre(item.filters.genre!, 'tv').toLowerCase()))));
   if (!visible.length) return null;
   return (
-    <nav aria-label="Explore genres and world cinema" className="discovery-nav flex flex-col gap-3">
-      <p className="text-xs font-semibold uppercase tracking-[0.18em] text-content-subtle">Follow your mood. Discover a new world.</p>
-      <ul className="flex gap-2 overflow-x-auto pb-2 [scrollbar-width:thin]">
+    <nav aria-label="Explore genres and world cinema" className="discovery-nav">
+      <p className="site-eyebrow">Genres &amp; world cinema</p>
+      <ul>
         {visible.map((item) => {
           const filters: DiscoveryFilters = { ...item.filters, ...(type ? { type } : {}) };
           const href = type ? discoveryHref(filters, type === 'movie' ? '/movies' : '/tv') : item.href;
           return (
             <li key={item.id} className="shrink-0">
-              <Link href={href} prefetch={false} className="discovery-chip inline-flex min-h-11 items-center rounded-full border border-border bg-surface/70 px-4 text-sm font-medium text-content-muted transition-colors hover:border-primary hover:text-content focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">
+               <Link href={href} prefetch={false} className="discovery-chip">
                 {item.label}
               </Link>
             </li>

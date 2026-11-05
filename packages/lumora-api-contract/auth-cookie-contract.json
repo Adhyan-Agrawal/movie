@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "contractVersion": "1.0.0",
+  "authImplementation": "better-auth@1.7.15",
+  "basePath": "/v1/auth",
+  "cookiePrefix": "lumora",
+  "cookie": {
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Lax",
+    "path": "/",
+    "domain": null,
+    "domainSemantics": "Host-only; deploy the Worker on the final API custom domain before issuing production sessions.",
+    "productionNameNote": "Better Auth may add the __Secure- prefix when secure cookies are enabled. Clients must use Set-Cookie/getCookie rather than hard-code a cookie name."
+  },
+  "web": {
+    "cors": "Exact configured origins only; wildcard origins are forbidden.",
+    "fetchCredentials": "include",
+    "csrf": "Better Auth origin and Fetch Metadata checks remain enabled for every mutation.",
+    "storage": "No session material in localStorage or JavaScript-readable cookies."
+  },
+  "mobile": {
+    "packages": ["@better-auth/expo@1.7.15", "expo-secure-store"],
+    "cookiePrefix": "lumora",
+    "storage": "SecureStore",
+    "request": "Read authClient.getCookie(), set the Cookie header only for the exact API origin, and use credentials: omit.",
+    "retry": "One session-refresh retry is allowed; then clear secure auth state and require sign-in.",
+    "logout": "Call the server sign-out endpoint before clearing SecureStore and cached session state."
+  },
+  "session": {
+    "canonicalStore": "D1",
+    "suspension": "Every protected request re-checks accounts.is_suspended. Suspension revokes all sessions immediately.",
+    "renewal": "Every canonical and protected API response forwards Better Auth renewal Set-Cookie headers.",
+    "clearing": "Expired, invalid, logged-out, and suspended sessions return an expired canonical session cookie.",
+    "access": "Cloudflare Access is not a consumer authentication mechanism.",
+    "bearerTokens": "Not part of the v1 consumer contract.",
+    "clientIp": "Only Cloudflare's single-value CF-Connecting-IP is trusted; forwarded IP headers are ignored.",
+    "legacyPassword": "Unsupported legacy hashes return the same generic invalid-credential response and require the reset/account-claim flow."
+  },
+  "productionReadiness": {
+    "failClosed": true,
+    "requirements": [
+      "Explicit production runtime and data-cutover attestation",
+      "Verified Cloudflare Email Sending domain and approved sender attestation",
+      "HTTPS API, web, and passkey origins with matching RP ID",
+      "Independent 32-byte-minimum Better Auth and media signing secrets"
+    ],
+    "emailRetry": "Queue payloads contain only an opaque retry UUID; email addresses and verification/reset tokens are never queued or logged."
+  }
+}

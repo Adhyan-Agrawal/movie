@@ -11,6 +11,7 @@ import { searchPeopleAction, searchTitlesAction } from '@/app/search/actions';
 import { MediaCard } from './MediaCard';
 import type { PersonSearchResult } from '@/features/people/types';
 import type { Title } from '../types';
+import { Icon } from '@/components/ui/Icon';
 
 /**
  * Debounced (250ms), cancellable search (Section 4). Syncs `?q=` to the URL,
@@ -49,7 +50,7 @@ function writeRecents(list: string[]): void {
 }
 
 const chipClass =
-  'inline-flex h-11 items-center rounded-md border border-border bg-surface-raised px-3 text-xs text-content transition-colors hover:border-border-strong hover:bg-surface-overlay focus-visible:outline-none';
+  'discovery-chip';
 
 export function SearchClient({ initialQuery, genres = [] }: { initialQuery: string; genres?: string[] }) {
   const router = useRouter();
@@ -172,7 +173,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
   const showPeopleEmpty = hasQuery && settled && !isPending && people.length === 0;
 
   return (
-    <div className="flex flex-col gap-8 pb-12">
+    <div className="search-surface">
       <form
         role="search"
         onSubmit={(e) => {
@@ -181,11 +182,11 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
         }}
       >
         <label htmlFor="site-search" className="sr-only">
-          Search movies and shows
+          Search titles or people
         </label>
-        <div className="relative">
-          <span aria-hidden="true" className="pointer-events-none absolute left-4 top-1/2 -translate-y-1/2 text-content-subtle">
-            ⌕
+        <div className="search-field">
+          <span aria-hidden="true" className="search-field-icon pointer-events-none">
+            <Icon name="search" width="25" height="25" />
           </span>
           <input
             id="site-search"
@@ -193,22 +194,21 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
             value={query}
             onChange={(e) => onInput(e.target.value)}
             autoComplete="off"
-            placeholder="Search movies and shows…"
-            className="h-14 w-full rounded-lg border border-border bg-surface-raised pl-11 pr-12 text-base text-content shadow-soft transition-colors placeholder:text-content-subtle hover:border-border-strong focus:border-primary focus-visible:outline-none"
+            placeholder="Search titles or people"
+            aria-describedby="search-hint"
           />
           {query ? (
             <button
               type="button"
               onClick={clear}
               aria-label="Clear search"
-              className="absolute right-2 top-1/2 grid h-9 w-9 -translate-y-1/2 place-items-center rounded-md text-content-subtle transition-colors hover:bg-surface-overlay hover:text-content"
+               className="search-clear"
             >
-              <span aria-hidden="true" className="text-lg leading-none">
-                ×
-              </span>
+               <Icon name="close" />
             </button>
           ) : null}
         </div>
+        <p id="search-hint" className="search-hint">A title, an actor, a director. Find the story you have in mind.</p>
       </form>
 
       {!hasQuery ? (
@@ -237,7 +237,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
 
           <section aria-labelledby="trending-heading" className="flex flex-col gap-3">
             <h2 id="trending-heading" className="text-sm font-semibold text-content">
-              Trending searches
+               Search starting points
             </h2>
             <ul className="flex flex-wrap gap-2">
               {TRENDING.map((term) => (
@@ -260,6 +260,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
                   <li key={genre}>
                     <Link
                       href={`/browse?genre=${encodeURIComponent(genre)}`}
+                      prefetch={false}
                       className={chipClass}
                     >
                       {genre}
@@ -283,7 +284,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
             </div>
 
             {loading ? (
-              <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+               <ul className="search-title-grid">
                 {Array.from({ length: 6 }).map((_, i) => (
                   <li key={i} className="flex flex-col gap-2">
                     <Skeleton className="aspect-[2/3] w-full" />
@@ -292,10 +293,10 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
                 ))}
               </ul>
             ) : results.length > 0 ? (
-              <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+               <ul className="search-title-grid">
                 {results.map((title) => (
                   <li key={title.id}>
-                    <MediaCard title={title} className="w-full sm:w-full md:w-full" />
+                     <MediaCard title={title} />
                   </li>
                 ))}
               </ul>
@@ -363,23 +364,27 @@ function PersonCard({ person }: { person: PersonSearchResult }) {
   return (
     <Link
       href={`/person/${person.id}`}
-      className="group flex items-center gap-3 rounded-md border border-border bg-surface/40 p-3 transition-colors hover:border-border-strong hover:bg-surface-overlay focus-visible:outline-none"
+       prefetch={false}
+       className="search-people-card group"
     >
       {person.profileUrl ? (
         <Image
           src={person.profileUrl}
           alt={`Photo of ${person.name}`}
-          width={48}
-          height={48}
-          sizes="48px"
-          className="h-12 w-12 shrink-0 rounded-full object-cover"
+           width={56}
+           height={72}
+          unoptimized
+          loading="lazy"
+          decoding="async"
+           sizes="56px"
+           className="shrink-0"
         />
       ) : (
         <div
           aria-hidden="true"
-          className="grid h-12 w-12 shrink-0 place-items-center rounded-full bg-surface-raised text-lg text-content-subtle"
+           className="grid h-[72px] w-14 shrink-0 place-items-center rounded bg-surface-raised text-content-subtle"
         >
-          ◎
+           <Icon name="user" />
         </div>
       )}
       <div className="flex min-w-0 flex-col">

@@ -12,13 +12,19 @@ import { getProviderConfig } from '@/lib/providers/config';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { getActiveProviderConfigs, resolvePlayback } from '@/lib/providers/registry';
 import { PlayerShell } from '@/features/player/PlayerShell';
-import { EpisodeNavLinks, type EpisodeNavTarget } from '@/features/player/EpisodeNavLinks';
+import { isStoredCatalogId } from '@/features/account/availability';
+import { episodeNavigationPath } from '@/features/player/episode-navigation';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { getAdSlot } from '@/features/ads/config';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
 import { getPlaybackCommerceContext } from '@/features/commerce/queries';
 import { introCatalogPath } from '@/features/player/intro-markers';
+import {
+  normalizeWatchPartyRoomCode,
+  parseWatchPartyMediaIdentity,
+} from '@/features/watch-party/protocol';
+import { isWatchPartyConfigured } from '@/app/api/watch-party/config';
 
 /**
  * Watch route (Spec Section 3 & 9). Server component: loads the title, resolves
@@ -29,7 +35,11 @@ import { introCatalogPath } from '@/features/player/intro-markers';
  */
 
 type RouteParams = { type: string; slug: string };
-type RouteSearch = { season?: string | string[]; episode?: string | string[] };
+type RouteSearch = {
+  season?: string | string[];
+  episode?: string | string[];
+  party?: string | string[];
+};
 
 function isTitleType(value: string): value is TitleType {
   return value === 'movie' || value === 'tv';
@@ -72,9 +82,11 @@ export default async function WatchPage({
   const title = await getTitleBySlug(type, slug);
   if (!title) notFound();
 
-  const { season: seasonParam, episode: episodeParam } = await searchParams;
+  const { season: seasonParam, episode: episodeParam, party: partyParam } = await searchParams;
   const season = toIndex(seasonParam);
   const episode = toIndex(episodeParam);
+  const partyValue = Array.isArray(partyParam) ? partyParam[0] : partyParam;
+  const initialPartyRoomCode = partyValue ? normalizeWatchPartyRoomCode(partyValue) : null;
   let seasons: Season[] = [];
   if (title.type === 'tv' && features.supabaseConfigured) {
     try {
@@ -99,7 +111,9 @@ export default async function WatchPage({
       firstSeason = first.seasonNumber;
       firstEpisode = first.episodes[0].episodeNumber;
     }
-    redirect(`/watch/tv/${title.slug}?season=${firstSeason}&episode=${firstEpisode}`);
+    const query = new URLSearchParams({ season: String(firstSeason), episode: String(firstEpisode) });
+    if (initialPartyRoomCode) query.set('party', initialPartyRoomCode);
+    redirect(`/watch/tv/${title.slug}?${query.toString()}`);
   }
 
   // TV: resolve the exact episode row so native sources and watch progress can
@@ -120,44 +134,23 @@ export default async function WatchPage({
     }
   }
 
-  // Episode index + previous/next (TV only). Flattened in season order so
-  // "previous" crosses back into the last episode of the prior season and
-  // "next" rolls forward into the next season's first episode.
-  let episodeNav:
-    | { current: EpisodeNavTarget; previous?: EpisodeNavTarget; next?: EpisodeNavTarget }
-    | undefined;
-  if (title.type === 'tv' && season !== undefined && episode !== undefined && features.supabaseConfigured) {
-    try {
-      const flat = seasons.flatMap((s) =>
-        s.episodes.map((e) => ({
-          season: s.seasonNumber,
-          episode: e.episodeNumber,
-          name: e.name,
-        })),
-      );
-      const idx = flat.findIndex((e) => e.season === season && e.episode === episode);
-      if (idx >= 0) {
-        const target = (i: number): EpisodeNavTarget => ({
-          season: flat[i]!.season,
-          episode: flat[i]!.episode,
-          label: `S${flat[i]!.season} E${flat[i]!.episode}`,
-          ...(flat[i]!.name ? { name: flat[i]!.name } : {}),
-        });
-        episodeNav = {
-          current: target(idx),
-          ...(idx > 0 ? { previous: target(idx - 1) } : {}),
-          ...(idx < flat.length - 1 ? { next: target(idx + 1) } : {}),
-        };
-      }
-    } catch (err) {
-      console.warn('playback.episodeNav failed', {
-        message: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
+  const watchPartyMedia = parseWatchPartyMediaIdentity(title.type === 'movie'
+    ? { kind: 'movie', mediaId: title.id }
+    : {
+      kind: 'episode',
+      mediaId: title.id,
+      ...(episodeId ? { episodeId } : {}),
+      ...(season !== undefined && episode !== undefined
+        ? { seasonNumber: season, episodeNumber: episode } : {}),
+    });
 
   // The title's own TMDB/IMDb ids from the catalog row drive playback resolution.
   const external = resolveTitleExternalIds(title);
+  const episodeNavigationUrl = features.tmdbConfigured
+    && typeof seasonParam === 'string' && seasonParam === String(season)
+    && typeof episodeParam === 'string' && episodeParam === String(episode)
+    ? episodeNavigationPath({ type: title.type, tmdbId: external.tmdbId, season, episode })
+    : undefined;
   const introCatalogUrl = introCatalogPath({
     type: title.type,
     imdbId: external.imdbId,
@@ -260,25 +253,18 @@ export default async function WatchPage({
           consentRequired={consentRequired}
           viewerKey={playbackContext.viewerKey}
           adPolicy={commerceContext.ads}
+          reportingAvailable={features.supabaseConfigured && isStoredCatalogId(title.id)}
+          watchPartyConfigured={isWatchPartyConfigured()}
+          watchPartyMedia={watchPartyMedia}
+          {...(initialPartyRoomCode ? { initialPartyRoomCode } : {})}
           {...(episodeId ? { episodeId } : {})}
           {...(title.type === 'tv' && season !== undefined ? { seasonNumber: season } : {})}
           {...(title.type === 'tv' && episode !== undefined ? { episodeNumber: episode } : {})}
-          {...(episodeNav?.next ? { nextEpisode: episodeNav.next } : {})}
+          {...(episodeNavigationUrl ? { episodeNavigationUrl } : {})}
           {...(resumePos ? { initialPosition: resumePos.positionSeconds, resumeUpdatedAt: resumePos.updatedAt } : {})}
           {...(introCatalogUrl ? { introCatalogUrl } : {})}
           preroll={preroll}
         />
-
-        {/* Episode navigation (TV only): next/previous across season
-            boundaries, computed server-side from the real episode index. */}
-        {episodeNav ? (
-          <EpisodeNavLinks
-            baseHref={`/watch/tv/${title.slug}`}
-            current={episodeNav.current}
-            previous={episodeNav.previous}
-            next={episodeNav.next}
-          />
-        ) : null}
 
         {/* Ad (Spec Section 11): one banner below the player header — never
             above the fold of the player itself. */}

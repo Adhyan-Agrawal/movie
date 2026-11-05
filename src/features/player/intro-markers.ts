@@ -236,7 +236,7 @@ async function boundedJson(response: Response, signal: AbortSignal): Promise<unk
 }
 
 export function createIntroResolver(options: { fetchImpl?: FetchLike; now?: () => number } = {}) {
-  const fetchImpl = options.fetchImpl ?? ((input: string | URL, init?: RequestInit) => fetch(input, init));
+  const fetchImpl = options.fetchImpl ?? ((input: string | URL, init?: RequestInit) => globalThis.fetch(input, init));
   const now = options.now ?? (() => Date.now());
   const cache = new Map<string, CacheEntry>();
 
@@ -271,7 +271,7 @@ export function createIntroResolver(options: { fetchImpl?: FetchLike; now?: () =
         const response = await fetchImpl(url, {
           method: 'GET',
           headers: { Accept: 'application/json', 'Accept-Encoding': 'identity' },
-          redirect: 'error',
+          redirect: 'manual',
           cache: 'no-store',
           credentials: 'omit',
           signal: controller.signal,

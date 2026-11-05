@@ -2,27 +2,28 @@
 
 import { useActionState } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
-import { AUTH_INITIAL_STATE, type AuthActionState } from '@/features/auth/state';
+import { AUTH_INITIAL_STATE, AUTH_SERVICE_UNAVAILABLE, type AuthActionState } from '@/features/auth/state';
 import { signInAction } from '@/features/auth/actions';
 
 /**
  * Sign-in form (Spec Section 8). Client component using useActionState so the
- * server action's Supabase error (bad credentials, etc.) renders inline with an
- * accessible alert role. No secrets are logged; the action returns only
- * Supabase's public error message.
+ * application-owned error renders inline with an accessible alert role.
  */
 export function SignInForm({ next }: { next?: string }) {
   const [state, formAction, pending] = useActionState<AuthActionState, FormData>(
     signInAction,
     AUTH_INITIAL_STATE,
   );
+  const searchParams = useSearchParams();
+  const error = state.error ?? (searchParams.get('auth') === 'unavailable' ? AUTH_SERVICE_UNAVAILABLE : null);
 
   return (
     <form action={formAction} className="flex flex-col gap-4" noValidate>
-      {state.error ? (
+      {error ? (
         <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
-          {state.error}
+          {error}
         </p>
       ) : null}
 

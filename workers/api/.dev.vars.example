@@ -1,0 +1,5 @@
+BETTER_AUTH_SECRET=generate-a-random-32-byte-minimum-secret
+MEDIA_SIGNING_SECRET=generate-an-independent-random-32-byte-minimum-secret
+RUNTIME_ENV=local
+PRODUCTION_READY=false
+EMAIL_SENDING_READY=false

@@ -14,13 +14,13 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cf:build": "opennextjs-cloudflare build",
-    "cf:preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview",
-    "cf:dry-run": "opennextjs-cloudflare build && wrangler deploy --dry-run",
-    "cf:dry-run:built": "wrangler deploy --dry-run",
+    "cf:build": "node scripts/build-cloudflare.mjs",
+    "cf:preview": "node scripts/build-cloudflare.mjs --preview",
+    "cf:dry-run": "node scripts/build-cloudflare.mjs --dry-run",
+    "cf:dry-run:built": "node scripts/build-cloudflare.mjs --dry-run --skip-build",
     "cf:deploy": "node scripts/deploy-cloudflare.mjs",
     "cf:deploy:validate": "node scripts/deploy-cloudflare.mjs --dry-run",
-    "cf:deploy:built": "opennextjs-cloudflare deploy -- --keep-vars --strict",
+    "cf:deploy:built": "node scripts/deploy-cloudflare.mjs --skip-build",
     "cf:typegen": "wrangler types --env-interface CloudflareEnv cloudflare-env.d.ts",
     "cf:whoami": "wrangler whoami",
     "cf:secret": "wrangler secret put"
@@ -58,7 +58,7 @@
     "tailwindcss": "3.4.17",
     "typescript": "5.7.3",
     "vitest": "4.1.12",
-    "wrangler": "4.156.0"
+    "wrangler": "4.156.1"
   },
   "overrides": {
     "postcss": "$postcss"

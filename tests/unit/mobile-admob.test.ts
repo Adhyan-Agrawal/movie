@@ -14,22 +14,25 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe('AdMob safe public configuration', () => {
   it('defaults to official Google app/adaptive banner/interstitial demo IDs in release too', () => {
-    expect(resolveAdMobConfig()).toEqual({ ...TEST_IDS, testAds: true });
+    expect(resolveAdMobConfig()).toEqual({ ...TEST_IDS, testAds: true, enabled: true });
     expect(TEST_IDS).toEqual({ appId: 'ca-app-pub-3940256099942544~3347511713',
+      iosAppId: 'ca-app-pub-3940256099942544~1458002511',
       bannerId: 'ca-app-pub-3940256099942544/9214589741', interstitialId: 'ca-app-pub-3940256099942544/1033173712' });
   });
   it('requires explicit production mode and all validated public overrides', () => {
-    expect(resolveAdMobConfig(production)).toEqual({ ...TEST_IDS, testAds: true });
-    expect(resolveAdMobConfig({ ...production, testAds: 'false' })).toEqual({ ...production, testAds: false });
-    expect(() => resolveAdMobConfig({ ...production, bannerId: undefined, testAds: 'false' })).toThrow('requires all three');
+    expect(resolveAdMobConfig(production)).toEqual({ ...TEST_IDS, testAds: true, enabled: true });
+    expect(resolveAdMobConfig({ ...production, testAds: 'false' })).toEqual({ ...production,
+      iosAppId: TEST_IDS.iosAppId, testAds: false, enabled: true });
+    expect(resolveAdMobConfig({ ...production, bannerId: undefined, testAds: 'false' }))
+      .toEqual({ ...TEST_IDS, testAds: true, enabled: false });
   });
   it('forces safe units for development even when production IDs/mode are configured', () => {
-    expect(resolveAdMobConfig({ ...production, testAds: 'false', development: true })).toEqual({ ...TEST_IDS, testAds: true });
+    expect(resolveAdMobConfig({ ...production, testAds: 'false', development: true }))
+      .toEqual({ ...TEST_IDS, testAds: true, enabled: true });
   });
   it.each([{ appId: 'ca-app-pub-1234567890123456/1234567890' }, { bannerId: 'ca-app-pub-1234567890123456~1234567890' },
-    { interstitialId: 'javascript:alert(1)' }, { appId: 'private-value-do-not-print' }, { testAds: 'maybe' }])('rejects invalid configuration without exposing input %j', (input) => {
-    expect(() => resolveAdMobConfig(input)).toThrow();
-    try { resolveAdMobConfig(input); } catch (error) { expect(String(error)).not.toContain('private-value-do-not-print'); }
+    { interstitialId: 'javascript:alert(1)' }, { appId: 'private-value-do-not-print' }, { testAds: 'maybe' }])('fails malformed configuration closed with native-safe IDs %j', (input) => {
+    expect(resolveAdMobConfig(input)).toEqual({ ...TEST_IDS, testAds: true, enabled: false });
   });
   it('preserves existing Expo settings/plugins and uses nextgen/delayed measurement', () => {
     for (const key of ['EXPO_PUBLIC_ADMOB_ANDROID_APP_ID', 'EXPO_PUBLIC_ADMOB_ANDROID_BANNER_ID', 'EXPO_PUBLIC_ADMOB_ANDROID_INTERSTITIAL_ID', 'EXPO_PUBLIC_ADMOB_TEST_ADS']) vi.stubEnv(key, undefined);
@@ -38,7 +41,7 @@ describe('AdMob safe public configuration', () => {
     const actual = appConfig({ config: original });
     expect(actual).toMatchObject({ name: original.name, android: original.android, ios: original.ios, scheme: original.scheme });
     expect(actual.plugins).toEqual([...original.plugins, ['react-native-google-mobile-ads', {
-      androidAppId: TEST_IDS.appId, androidSdk: 'nextgen', delayAppMeasurementInit: true,
+      androidAppId: TEST_IDS.appId, iosAppId: TEST_IDS.iosAppId, androidSdk: 'nextgen', delayAppMeasurementInit: true,
     }]]);
     expect(original.plugins).toHaveLength(2);
   });

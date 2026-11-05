@@ -11,6 +11,8 @@ import { getPerson, getPersonCredits } from '@/features/people/queries';
 import type { PersonCredit } from '@/features/people/types';
 import type { Title } from '@/features/catalog/types';
 import { publicEnv } from '@/lib/env';
+import { Icon } from '@/components/ui/Icon';
+import { SectionReveal } from '@/components/ui/SectionReveal';
 
 /**
  * Person profile route (actor/director pages).
@@ -85,53 +87,58 @@ export default async function PersonPage({ params }: PersonParams) {
   const knownFor = topKnownFor(credits);
 
   return (
-    <Container>
+    <Container className="person-page">
       {/* Profile header: photo + name + "known for" blurb. */}
-      <header className="flex flex-col gap-6 py-8 md:flex-row md:items-start md:gap-8">
-        <div className="shrink-0">
+      <header className="person-profile">
+        <div className="person-portrait">
           {isRemoteUrl(person.profileUrl) ? (
             <Image
               src={person.profileUrl}
               alt={`Photo of ${person.name}`}
-              width={160}
-              height={240}
-              sizes="(max-width: 640px) 128px, 160px"
-              className="aspect-[2/3] w-32 rounded-lg border border-border object-cover shadow-raised md:w-40"
+               fill
+              unoptimized
+               priority
+               loading="eager"
+              decoding="async"
+               sizes="(max-width: 539px) 200px, (max-width: 767px) 160px, 320px"
+               className="object-cover"
             />
           ) : (
             <div
-              role="img"
-              aria-label={`Photo of ${person.name}`}
-              className="grid aspect-[2/3] w-32 place-items-center rounded-lg border border-border bg-surface-raised text-4xl text-content-subtle md:w-40"
+               aria-hidden="true"
+               className="absolute inset-0 grid place-items-center text-content-subtle"
             >
-              ◎
+               <Icon name="user" width="40" height="40" />
             </div>
           )}
         </div>
 
-        <div className="flex max-w-2xl flex-col gap-2 pt-1">
-          <h1 className="font-display text-3xl font-bold tracking-tight md:text-5xl">{person.name}</h1>
-          {person.knownFor ? <p className="text-sm text-content-muted">Known for {person.knownFor}</p> : null}
-          <p className="mt-1 text-sm text-content-muted">
-            {credits.length} {credits.length === 1 ? 'title credit' : 'title credits'} in the Lumora catalog
-          </p>
+         <div className="min-w-0">
+           <p className="site-eyebrow">Behind the stories</p>
+           <h1 className="person-name">{person.name}</h1>
+           {person.knownFor ? <p className="person-biography">Known for {person.knownFor}</p> : null}
+           <dl className="person-facts">
+             <div><dt>In the collection</dt><dd>{credits.length} {credits.length === 1 ? 'title credit' : 'title credits'}</dd></div>
+             {acting.length ? <div><dt>Acting</dt><dd>{acting.length} {acting.length === 1 ? 'credit' : 'credits'}</dd></div> : null}
+             {crew.length ? <div><dt>Directing &amp; crew</dt><dd>{crew.length} {crew.length === 1 ? 'credit' : 'credits'}</dd></div> : null}
+           </dl>
         </div>
       </header>
 
       {/* Known for: the person's highest-editorial-score titles, as MediaCards. */}
       {knownFor.length > 0 ? (
-        <section aria-labelledby="known-for-heading" className="flex flex-col gap-4 py-4">
-          <h2 id="known-for-heading" className="text-lg font-semibold tracking-tight">
+         <SectionReveal><section aria-labelledby="known-for-heading" className="person-filmography">
+           <h2 id="known-for-heading" className="title-section-heading">
             Known for
           </h2>
-          <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+           <ul className="title-grid">
             {knownFor.map((title) => (
               <li key={title.id}>
-                <MediaCard title={title} className="w-full sm:w-full md:w-full" />
+                 <MediaCard title={title} />
               </li>
             ))}
           </ul>
-        </section>
+         </section></SectionReveal>
       ) : null}
 
       {/* Credits grouped by credit_type (acting vs. directing/crew). */}
@@ -208,32 +215,34 @@ function CreditList({ id, heading, credits }: { id: string; heading: string; cre
 
   return (
     <section aria-labelledby={`${id}-heading`} className="flex flex-col gap-4">
-      <h2 id={`${id}-heading`} className="text-lg font-semibold tracking-tight">
+       <h2 id={`${id}-heading`} className="title-section-heading">
         {heading}
       </h2>
-      <ul className="flex flex-col divide-y divide-border overflow-hidden rounded-lg border border-border bg-surface/40">
+       <ul className="flex flex-col divide-y divide-border border-y border-border">
         {rows.map(({ title, roles }) => {
           const labels = roleLabels(roles);
           const meta = [title.releaseYear ? String(title.releaseYear) : null, title.type === 'tv' ? 'Series' : 'Film', labels]
             .filter((part): part is string => Boolean(part))
             .join(' · ');
           return (
-            <li key={title.id} className="flex items-center justify-between gap-4 px-4 py-3">
+             <li key={title.id} className="flex items-center justify-between gap-4 py-4">
               <div className="flex min-w-0 flex-col gap-0.5">
                 <Link
-                  href={`/title/${title.type}/${title.slug}`}
-                  className="truncate text-sm font-semibold text-content transition-colors hover:underline focus-visible:underline focus-visible:outline-none"
+                   href={`/title/${title.type}/${title.slug}`}
+                   prefetch={false}
+                   className="inline-flex min-h-11 items-center text-sm font-semibold text-content hover:text-primary"
                 >
                   {title.name}
                 </Link>
-                <p className="truncate text-xs text-content-muted">{meta}</p>
+                 <p className="text-xs leading-relaxed text-content-muted">{meta}</p>
               </div>
               <Link
-                href={`/watch/${title.type}/${title.slug}`}
+                 href={`/watch/${title.type}/${title.slug}`}
+                 prefetch={false}
                 aria-label={`Watch ${title.name}`}
                 className={buttonClasses({ variant: 'ghost', size: 'sm' })}
               >
-                <span aria-hidden="true">▶</span> Watch
+                 <Icon name="play" width="17" height="17" /> Watch
               </Link>
             </li>
           );

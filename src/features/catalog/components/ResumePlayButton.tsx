@@ -94,6 +94,7 @@ export function ResumePlayButton({
     <div className={cn('flex flex-col items-start gap-1', className)}>
       <Link
         href={primaryHref}
+        prefetch={false}
         aria-label={resume ? `Resume ${label}` : 'Play'}
         className={buttonClasses({ size: 'lg', variant: 'primary' })}
       >

@@ -182,7 +182,12 @@ export default async function TitlePage({ params }: TitleParams) {
 
   const [availability, inWatchlist] = await Promise.all([
     resolveAvailability(title),
-    isInWatchlist(title.id),
+    features.supabaseConfigured ? isInWatchlist(title.id).catch((err: unknown) => {
+      console.warn('title.isInWatchlist: optional read failed', {
+        message: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }) : Promise.resolve(false),
   ]);
   const jsonLd = buildJsonLd(title, canonicalUrl(type, slug));
 

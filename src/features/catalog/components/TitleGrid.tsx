@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { buttonClasses } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { SectionReveal } from '@/components/ui/SectionReveal';
 import { MediaCard } from './MediaCard';
 import type { Title } from '../types';
 
@@ -44,14 +45,14 @@ export function TitleGrid({
           }
         />
       ) : (
-        <ul className="grid grid-cols-2 gap-x-4 gap-y-6 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+        <SectionReveal><ul className="title-grid">
           {titles.map((title) => (
             <li key={title.id}>
               {/* Override MediaCard's fixed track width so cards fill the grid cell. */}
-              <MediaCard title={title} className="w-full sm:w-full md:w-full" />
+              <MediaCard title={title} />
             </li>
           ))}
-        </ul>
+        </ul></SectionReveal>
       )}
     </section>
   );

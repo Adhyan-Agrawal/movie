@@ -35,6 +35,7 @@ const config: Config = {
           DEFAULT: 'rgb(var(--color-primary) / <alpha-value>)',
           hover: 'rgb(var(--color-primary-hover) / <alpha-value>)',
           contrast: 'rgb(var(--color-primary-contrast) / <alpha-value>)',
+          content: 'rgb(var(--color-primary-content) / <alpha-value>)',
         },
         // Semantic status
         success: 'rgb(var(--color-success) / <alpha-value>)',

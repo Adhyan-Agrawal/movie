@@ -5,6 +5,13 @@ import { useId } from 'react';
 import { cn } from '@/lib/cn';
 import { buttonClasses } from '@/components/ui/Button';
 import type { PlaybackSource } from '@/lib/providers/types';
+import type { EpisodeNavigation } from './episode-navigation';
+
+export interface EpisodeNavigationControls extends EpisodeNavigation {
+  disabled?: boolean;
+  pending?: boolean;
+  onNavigate: (direction: 'previous' | 'next') => boolean;
+}
 
 /**
  * Player controls bar (Spec Section 9): back navigation, source/server selector,
@@ -22,6 +29,16 @@ export interface PlayerControlsBarProps {
   showSourceSelector?: boolean;
   onReportIssue: () => void;
   reported?: boolean;
+  reportingAvailable?: boolean;
+  reportPending?: boolean;
+  reportError?: string;
+  watchParty?: {
+    available: boolean;
+    active: boolean;
+    participantCount: number;
+    onOpen: () => void;
+  };
+  episodeNavigation?: EpisodeNavigationControls;
   className?: string;
 }
 
@@ -39,10 +56,16 @@ export function PlayerControlsBar({
   showSourceSelector = true,
   onReportIssue,
   reported = false,
+  reportingAvailable = false,
+  reportPending = false,
+  reportError,
+  watchParty,
+  episodeNavigation,
   className,
 }: PlayerControlsBarProps) {
   const selectId = useId();
   const hasSources = sources.length > 0;
+  const reportDisabled = !reportingAvailable || reportPending || reported;
 
   return (
     <div
@@ -55,6 +78,7 @@ export function PlayerControlsBar({
       </Link>
 
       <div className="flex flex-wrap items-center gap-3">
+        {episodeNavigation ? <EpisodeControls {...episodeNavigation} /> : null}
         {showSourceSelector ? <div className="flex items-center gap-2">
           <label htmlFor={selectId} className="text-xs font-medium text-content-muted">
             Source
@@ -81,15 +105,48 @@ export function PlayerControlsBar({
           </select>
         </div> : null}
 
-        <button type="button" onClick={onReportIssue} className={buttonClasses({ variant: 'ghost' })}>
+        {watchParty ? (
+          <button
+            type="button"
+            onClick={() => { if (watchParty.available) watchParty.onOpen(); }}
+            disabled={!watchParty.available}
+            aria-haspopup="dialog"
+            className={buttonClasses({ variant: watchParty.active ? 'secondary' : 'primary' })}
+          >
+            {!watchParty.available ? 'Watch Party unavailable' : watchParty.active
+              ? `Party chat (${watchParty.participantCount})`
+              : 'Invite / Join party'}
+          </button>
+        ) : null}
+
+        <button type="button" disabled={reportDisabled} aria-busy={reportPending}
+          onClick={() => { if (!reportDisabled) onReportIssue(); }} className={buttonClasses({ variant: 'ghost' })}>
           <span aria-hidden="true">⚑</span> Report playback issue
         </button>
 
         {/* Acknowledgement is announced politely to assistive tech. */}
-        <span role="status" aria-live="polite" className="text-xs text-success">
-          {reported ? 'Thanks — your report was recorded.' : ''}
+        <span role="status" aria-live="polite" className={cn('text-xs', reported ? 'text-success' : reportError ? 'text-danger' : 'text-content-muted')}>
+          {!reportingAvailable ? 'Reporting unavailable' : reportPending ? 'Sending report...' : reported
+            ? 'Thanks, your report was recorded.' : reportError ?? ''}
         </span>
       </div>
     </div>
   );
+}
+
+export function EpisodeControls({ previous, next, disabled, pending, onNavigate }: EpisodeNavigationControls) {
+  return <div role="group" aria-label="Episode controls" className="flex flex-wrap items-center gap-2">
+    {(['previous', 'next'] as const).map((direction) => {
+      const target = direction === 'previous' ? previous : next;
+      const label = direction === 'previous' ? 'Previous' : 'Next';
+      return <button key={direction} type="button" className={cn(controlSurface, 'min-h-11 min-w-11 gap-2')}
+        aria-label={`${label} episode${target ? ` (S${target.seasonNumber} E${target.episodeNumber})` : ''}`}
+        title={target?.name || undefined} disabled={!target || disabled || pending} aria-busy={pending}
+        onClick={() => { if (target && !disabled && !pending) onNavigate(direction); }}>
+        {direction === 'previous' ? <span aria-hidden="true">&lt;</span> : null}{label}
+        {direction === 'next' ? <span aria-hidden="true">&gt;</span> : null}
+      </button>;
+    })}
+    {disabled ? <span className="text-xs text-content-muted">Episode navigation is unavailable in a watch party.</span> : null}
+  </div>;
 }

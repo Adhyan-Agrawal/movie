@@ -2,22 +2,25 @@ import { createContext, useContext, useEffect, useRef, useState, type ReactNode 
 import { AppState, Platform, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useIsFocused } from '@react-navigation/native';
-import mobileAds, { AdEventType, AdsConsent, AdsConsentPrivacyOptionsRequirementStatus, BannerAd, BannerAdSize, InterstitialAd } from 'react-native-google-mobile-ads';
 import { resolveAdMobConfig } from '../../admob.config';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseConfigured } from '../lib/supabase';
 import { Button } from '../components/ui';
 import { colors, radius, spacing } from '../theme';
 import { fetchAdMobEntitlements } from './entitlements';
 import { adMobAccountEligible, canUseAdMob, createAdMobBrowsingSchedule, type AdMobGate, type AdMobRoute } from './policy';
+import { getNativeAdMobSdk } from './native-admob';
 
 const config = resolveAdMobConfig({ appId: process.env.EXPO_PUBLIC_ADMOB_ANDROID_APP_ID,
+  iosAppId: process.env.EXPO_PUBLIC_ADMOB_IOS_APP_ID,
   bannerId: process.env.EXPO_PUBLIC_ADMOB_ANDROID_BANNER_ID, interstitialId: process.env.EXPO_PUBLIC_ADMOB_ANDROID_INTERSTITIAL_ID,
   testAds: process.env.EXPO_PUBLIC_ADMOB_TEST_ADS, development: __DEV__ });
+const nativeAds = getNativeAdMobSdk();
 const consentKey = (id: string) => `lumora:admob:consent:v1:${id}`;
 const emptyGate = (): AdMobGate => ({ optedIn: false, umpEligible: false, accountId: null, entitlements: null,
   checkedAt: 0, foreground: AppState.currentState === 'active', route: null });
 const requestOptions = { requestNonPersonalizedAdsOnly: true };
-type Inventory = { ad: InterstitialAd; showing: boolean; dispose: () => void };
+type Interstitial = ReturnType<NonNullable<typeof nativeAds>['InterstitialAd']['createForAdRequest']>;
+type Inventory = { ad: Interstitial; showing: boolean; dispose: () => void };
 const Context = createContext<{
   gate: AdMobGate; ready: boolean; busy: boolean; message: string; privacyRequired: boolean;
   choose: (allowed: boolean) => void; privacyOptions: () => void;
@@ -30,7 +33,9 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
   const [initialized, setInitialized] = useState(false);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [message, setMessage] = useState('Google ads are off unless you explicitly opt in.');
+  const [message, setMessage] = useState(config.enabled && nativeAds
+    ? 'Google ads are off unless you explicitly opt in.'
+    : 'Google ads are unavailable in this build. Browsing and playback are unaffected.');
   const [privacyRequired, setPrivacyRequired] = useState(false);
   const [warm, setWarm] = useState(0);
   const init = useRef<Promise<unknown> | null>(null);
@@ -86,25 +91,25 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     alive.current = true;
-    void refresh();
-    const { data } = supabase.auth.onAuthStateChange((_event, session) => {
-      authIdentity.current = session?.user.id ?? null;
-      cancelRequests();
-      update({ optedIn: false, umpEligible: false, accountId: null, entitlements: null, checkedAt: 0 });
-      discard(); schedule.current.cancel();
-      // Avoid awaiting Supabase while its auth callback holds the session lock.
-      queueMicrotask(() => { if (alive.current) void refresh(); });
-    });
+    void refresh().catch(() => {});
+    const auth = supabaseConfigured ? supabase.auth.onAuthStateChange((_event, session) => {
+        authIdentity.current = session?.user.id ?? null;
+        cancelRequests();
+        update({ optedIn: false, umpEligible: false, accountId: null, entitlements: null, checkedAt: 0 });
+        discard(); schedule.current.cancel();
+        // Avoid awaiting Supabase while its auth callback holds the session lock.
+        queueMicrotask(() => { if (alive.current) void refresh().catch(() => {}); });
+      }).data.subscription : null;
     const app = AppState.addEventListener('change', (state) => {
       update({ foreground: state === 'active', umpEligible: false });
       pending.current = false; schedule.current.cancel();
-      if (state === 'active') void refresh();
+      if (state === 'active') void refresh().catch(() => {});
       else cancelRequests();
     });
     return () => {
       alive.current = false; epoch.current += 1; request.current?.abort();
       inventory.current?.dispose(); inventory.current = null;
-      app.remove(); data.subscription.unsubscribe();
+      app.remove(); auth?.unsubscribe();
     };
     // The listeners use only live refs; auth changes must invalidate synchronously.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -112,26 +117,26 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
 
   const allowedRoute = !!gate.route && ['Tabs', 'Title', 'Person'].includes(gate.route.root);
   useEffect(() => {
-    if (Platform.OS !== 'android' || !allowedRoute || !gate.foreground || !gate.optedIn
+    if (!config.enabled || !nativeAds || Platform.OS !== 'android' || !allowedRoute || !gate.foreground || !gate.optedIn
       || !adMobAccountEligible(gate.accountId, gate.entitlements) || busyRef.current) return;
     let cancelled = false;
     const id = epoch.current;
-    void AdsConsent.requestInfoUpdate().then((info) => {
+    void nativeAds.AdsConsent.requestInfoUpdate().then((info) => {
       if (!cancelled && alive.current && id === epoch.current) {
         update({ umpEligible: info.canRequestAds === true });
-        setPrivacyRequired(info.privacyOptionsRequirementStatus === AdsConsentPrivacyOptionsRequirementStatus.REQUIRED);
+        setPrivacyRequired(info.privacyOptionsRequirementStatus === nativeAds.AdsConsentPrivacyOptionsRequirementStatus.REQUIRED);
       }
     }).catch(() => { if (!cancelled && alive.current) update({ umpEligible: false }); });
     return () => { cancelled = true; };
   }, [allowedRoute, gate.foreground, gate.optedIn, gate.accountId, gate.entitlements, gate.checkedAt, gate.route?.root, gate.route?.key, gate.route?.tab]);
 
-  const eligible = Platform.OS === 'android' && canUseAdMob(gate, Date.now());
+  const eligible = config.enabled && !!nativeAds && Platform.OS === 'android' && canUseAdMob(gate, Date.now());
   useEffect(() => {
     if (!eligible) return;
     let cancelled = false;
     const id = epoch.current;
     try {
-      init.current ??= mobileAds().initialize();
+      init.current ??= nativeAds!.default().initialize();
       void init.current.then(() => { if (!cancelled && alive.current && id === epoch.current && canUseAdMob(gateRef.current, Date.now())) setInitialized(true); })
         .catch(() => { init.current = null; if (!cancelled && alive.current) setMessage('Google ads are unavailable. Browsing and playback are unaffected.'); });
     } catch { init.current = null; }
@@ -140,7 +145,7 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (!gate.accountId || !gate.optedIn || !gate.foreground || !allowedRoute) return;
-    const timer = setInterval(() => { void refresh(); }, 45_000);
+    const timer = setInterval(() => { void refresh().catch(() => {}); }, 45_000);
     return () => clearInterval(timer);
     // Refresh private entitlements before their one-minute lease expires.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -150,8 +155,9 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     if (!ready) { discard(); return; }
     if (inventory.current) return;
-    let ad: InterstitialAd;
-    try { ad = InterstitialAd.createForAdRequest(config.interstitialId, requestOptions); } catch { return; }
+    if (!nativeAds) return;
+    let ad: Interstitial;
+    try { ad = nativeAds.InterstitialAd.createForAdRequest(config.interstitialId, requestOptions); } catch { return; }
     let disposed = false;
     const listeners: Array<() => void> = [];
     const item: Inventory = { ad, showing: false, dispose() {
@@ -161,12 +167,12 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
     } };
     const timeout = setTimeout(() => { if (!ad.loaded && !item.showing) { item.dispose(); if (inventory.current === item) inventory.current = null; } }, 10_000);
     inventory.current = item;
-    listeners.push(ad.addAdEventListener(AdEventType.LOADED, () => { if (!disposed) clearTimeout(timeout); }));
-    listeners.push(ad.addAdEventListener(AdEventType.ERROR, () => { if (disposed) return; item.dispose(); if (inventory.current === item) inventory.current = null; }));
-    listeners.push(ad.addAdEventListener(AdEventType.CLOSED, () => {
+    listeners.push(ad.addAdEventListener(nativeAds.AdEventType.LOADED, () => { if (!disposed) clearTimeout(timeout); }));
+    listeners.push(ad.addAdEventListener(nativeAds.AdEventType.ERROR, () => { if (disposed) return; item.dispose(); if (inventory.current === item) inventory.current = null; }));
+    listeners.push(ad.addAdEventListener(nativeAds.AdEventType.CLOSED, () => {
       if (disposed) return;
       item.dispose(); if (inventory.current === item) inventory.current = null;
-      if (alive.current) { setWarm((value) => value + 1); void refresh(); }
+      if (alive.current) { setWarm((value) => value + 1); void refresh().catch(() => {}); }
     }));
     try { ad.load(); } catch { item.dispose(); inventory.current = null; }
     // Inventory callbacks read live refs; rearm only on eligible route/close changes.
@@ -177,6 +183,10 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
     const accountId = gateRef.current.accountId;
     if (!accountId || Platform.OS !== 'android' || gateRef.current.route?.root !== 'Tabs'
       || gateRef.current.route.tab !== 'Account') return;
+    if (allowed && (!config.enabled || !nativeAds)) {
+      setMessage('Google ads remain off because the optional ads module or its public configuration is unavailable.');
+      return;
+    }
     if (allowed && busyRef.current) return;
     const id = ++epoch.current;
     const operation = ++privacySequence.current;
@@ -191,6 +201,8 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
       finally { if (operation === privacySequence.current) { busyRef.current = false; if (alive.current) setBusy(false); } }
       return;
     }
+    const ads = nativeAds;
+    if (!ads || !config.enabled) return;
     busyRef.current = true; setBusy(true);
     const controller = new AbortController(); request.current = controller;
     const timeout = setTimeout(() => {
@@ -210,12 +222,12 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
       }
       update({ ...profile, checkedAt: Date.now() });
       if (gateRef.current.route?.root !== 'Tabs' || gateRef.current.route.tab !== 'Account' || !gateRef.current.foreground) return;
-      const info = privacyOptions ? await AdsConsent.showPrivacyOptionsForm() : await AdsConsent.gatherConsent();
+      const info = privacyOptions ? await ads.AdsConsent.showPrivacyOptionsForm() : await ads.AdsConsent.gatherConsent();
       if (!alive.current || id !== epoch.current) return;
       await saveChoice(accountId, true, id);
       if (!alive.current || id !== epoch.current) return;
       update({ optedIn: true, umpEligible: info.canRequestAds === true });
-      setPrivacyRequired(info.privacyOptionsRequirementStatus === AdsConsentPrivacyOptionsRequirementStatus.REQUIRED);
+      setPrivacyRequired(info.privacyOptionsRequirementStatus === ads.AdsConsentPrivacyOptionsRequirementStatus.REQUIRED);
       setMessage(info.canRequestAds ? 'Google ads are allowed where your plan permits. Non-personalized requests only.' : 'Google privacy eligibility is unresolved. Ads remain off.');
     } catch { if (alive.current && id === epoch.current) setMessage('Google privacy or plan confirmation failed. Ads remain off.'); }
     finally {
@@ -230,7 +242,7 @@ export function AdMobProvider({ children }: { children: ReactNode }) {
     update({ route });
     pending.current = schedule.current.navigation(route, Date.now());
     if (gateRef.current.foreground && ['Tabs', 'Title', 'Person'].includes(route.root)
-      && (!gateRef.current.accountId || Date.now() - gateRef.current.checkedAt >= 60_000)) void refresh();
+      && (!gateRef.current.accountId || Date.now() - gateRef.current.checkedAt >= 60_000)) void refresh().catch(() => {});
   }
   function blur(key: string) {
     if (gateRef.current.route?.key !== key) return;
@@ -262,10 +274,11 @@ export function HomeAdMobBanner() {
   const focused = useIsFocused();
   const { width } = useWindowDimensions();
   const [failed, setFailed] = useState(false);
-  if (!focused || !ready || gate.route?.root !== 'Tabs' || gate.route.tab !== 'Home' || failed) return null;
+  if (!nativeAds || !focused || !ready || gate.route?.root !== 'Tabs' || gate.route.tab !== 'Home' || failed) return null;
+  const BannerAd = nativeAds.BannerAd;
   return <View style={styles.banner} accessibilityLabel="Advertisement">
     <Text style={styles.label}>Advertisement</Text>
-    <BannerAd unitId={config.bannerId} size={BannerAdSize.INLINE_ADAPTIVE_BANNER} maxHeight={120}
+    <BannerAd unitId={config.bannerId} size={nativeAds.BannerAdSize.INLINE_ADAPTIVE_BANNER} maxHeight={120}
       width={Math.max(1, Math.floor(width - spacing(8)))} requestOptions={requestOptions} onAdFailedToLoad={() => setFailed(true)} />
   </View>;
 }

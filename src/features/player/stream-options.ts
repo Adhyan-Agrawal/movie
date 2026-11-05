@@ -47,6 +47,25 @@ export function trackKey(track: { language?: string; label?: string }): string {
   return `${normalizedLanguage || label || 'und'}:${role}:${channels}`;
 }
 
+export function audioStreamId(choice: string): string | undefined {
+  if (!choice.startsWith('stream:')) return undefined;
+  const id = choice.slice(7);
+  return id && id.length <= 256 && id === id.trim() && !/[\u0000-\u001f\u007f]/.test(id) ? id : undefined;
+}
+
+export function numberedAudioStreamOptions(streams: DirectStream[]): StreamOption[] {
+  const seen = new Set<string>();
+  return streams.filter((stream) => Boolean(audioStreamId(`stream:${stream.id}`)) && Boolean(stream.url?.trim())
+    && !seen.has(stream.id) && Boolean(seen.add(stream.id)))
+    .map((stream, index) => ({ id: `stream:${stream.id}`, label: `Audio stream ${index + 1}` }));
+}
+
+function reportedAudioLabel(track: { label?: string; language?: string }): string {
+  const label = track.label?.trim();
+  const language = track.language?.trim();
+  return label || (language && language.toLowerCase() !== 'und' ? language : '');
+}
+
 export function aggregateStreamOptions(streams: DirectStream[]): {
   qualities: StreamOption[];
   audioTracks: StreamOption[];
@@ -66,8 +85,10 @@ export function aggregateStreamOptions(streams: DirectStream[]): {
       });
     }
     for (const track of stream.audioTracks) {
+      const label = reportedAudioLabel(track);
+      if (!label) continue;
       const id = trackKey(track);
-      if (!audioTracks.has(id)) audioTracks.set(id, { id, label: track.label || track.language || 'Default audio', language: track.language });
+      if (!audioTracks.has(id)) audioTracks.set(id, { id, label, language: track.language });
     }
     for (const track of stream.subtitles) {
       const id = trackKey(track);
@@ -98,32 +119,32 @@ export function chooseStream(
   preferences: StreamPreferences,
   changed: keyof StreamPreferences,
   currentStreamId?: string,
+  pinnedStreamId?: string,
 ): DirectStream | undefined {
   const matches = (stream: DirectStream, field: keyof StreamPreferences) => {
     const id = preferences[field];
-    if (!id || (field === 'quality' && id === 'auto') || (field === 'subtitle' && id === 'off')) return true;
+    if (!id || ((field === 'quality' || field === 'audio') && id === 'auto') || (field === 'subtitle' && id === 'off')) return true;
+    if (field === 'audio' && audioStreamId(id) !== undefined) return stream.id === audioStreamId(id);
     return field === 'quality' ? Boolean(findQualityForStream(stream, id))
       : field === 'audio' ? Boolean(findAudioForStream(stream, id))
       : Boolean(findSubtitleForStream(stream, id));
   };
-  const candidates = streams.filter((stream) => matches(stream, changed));
-  const score = (stream: DirectStream) => {
-    return (preferences.audio && matches(stream, 'audio') ? 1000 : 0)
-      + (preferences.subtitle !== 'off' && matches(stream, 'subtitle') ? 500 : 0)
-      + (preferences.quality !== 'auto' && matches(stream, 'quality') ? 100 : 0);
-  };
+  const candidates = streams.filter((stream) => (!pinnedStreamId || stream.id === pinnedStreamId) && matches(stream, changed)
+    && (['quality', 'audio', 'subtitle'] as const).every((field) => field === changed || matches(stream, field)));
   const latency = (stream: DirectStream) => typeof stream.startupLatencyMs === 'number'
     && Number.isFinite(stream.startupLatencyMs) && stream.startupLatencyMs >= 0 ? stream.startupLatencyMs : Infinity;
-  return candidates.sort((a, b) => score(b) - score(a)
-    || latency(a) - latency(b)
-    || Number(b.id === currentStreamId) - Number(a.id === currentStreamId))[0];
+  return candidates.sort((a, b) => {
+    const current = Number(b.id === currentStreamId) - Number(a.id === currentStreamId);
+    const startup = latency(a) - latency(b);
+    return preferences.quality === 'auto' && changed === 'quality' ? startup || current : current || startup;
+  })[0];
 }
 
 export function preferencesForStream(stream: DirectStream, preferences: StreamPreferences): StreamPreferences {
-  const defaultAudio = stream.audioTracks.find((track) => track.default) ?? stream.audioTracks[0];
+  const reported = stream.audioTracks.filter((track) => reportedAudioLabel(track));
+  const defaultAudio = reported.find((track) => track.default) ?? reported[0];
   return {
-    quality: preferences.quality === 'auto' || findQualityForStream(stream, preferences.quality) ? preferences.quality : 'auto',
-    audio: findAudioForStream(stream, preferences.audio) ? preferences.audio : defaultAudio ? trackKey(defaultAudio) : '',
-    subtitle: preferences.subtitle !== 'off' && findSubtitleForStream(stream, preferences.subtitle) ? preferences.subtitle : 'off',
+    ...preferences,
+    audio: preferences.audio || (defaultAudio ? trackKey(defaultAudio) : ''),
   };
 }

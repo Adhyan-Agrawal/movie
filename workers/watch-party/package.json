@@ -1,0 +1,28 @@
+{
+  "name": "@lumora/watch-party-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "packageManager": "npm@11.17.0",
+  "scripts": {
+    "cf:typegen": "wrangler types --env-interface Env src/worker-configuration.d.ts",
+    "test": "npm run test:unit && npm run test:worker",
+    "test:unit": "vitest run --config vitest.unit.config.mts",
+    "test:worker": "vitest run --config vitest.worker.config.mts",
+    "typecheck": "tsc -p tsconfig.json",
+    "dry-run": "wrangler deploy --dry-run --strict --outdir .wrangler/dry-run --env-file .dev.vars.example",
+    "check": "npm run cf:typegen && npm run typecheck && npm test && npm run dry-run",
+    "dev": "wrangler dev --env-file .dev.vars",
+    "deploy": "node scripts/deploy.mjs"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "@types/node": "22.12.0",
+    "typescript": "5.7.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.156.0"
+  }
+}

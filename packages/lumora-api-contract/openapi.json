@@ -1,0 +1,166 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lumora API",
+    "version": "1.0.0",
+    "description": "Frozen Phase 1 Cloudflare Worker contract. D1 and provider internals are never exposed."
+  },
+  "servers": [
+    { "url": "https://api.example.invalid", "description": "Replace with the exact API custom domain" }
+  ],
+  "security": [{ "cookieSession": [] }],
+  "paths": {
+    "/v1/health": {
+      "get": { "security": [], "operationId": "getHealth", "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/auth/{path}": {
+      "get": { "security": [], "operationId": "betterAuthGet", "parameters": [{ "$ref": "#/components/parameters/AuthPath" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } },
+      "post": { "security": [], "operationId": "betterAuthPost", "parameters": [{ "$ref": "#/components/parameters/AuthPath" }], "responses": { "200": { "$ref": "#/components/responses/Ok" }, "400": { "$ref": "#/components/responses/Error" }, "429": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/session": {
+      "get": { "operationId": "getSession", "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/account": {
+      "get": { "operationId": "getAccount", "responses": { "200": { "$ref": "#/components/responses/Ok" }, "401": { "$ref": "#/components/responses/Error" } } },
+      "patch": { "operationId": "updateAccount", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" }, "400": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/profiles": {
+      "get": { "operationId": "listProfiles", "responses": { "200": { "$ref": "#/components/responses/Ok" } } },
+      "post": { "operationId": "createProfile", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" }, "409": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/profiles/{profileId}": {
+      "patch": { "operationId": "updateProfile", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" } } },
+      "delete": { "operationId": "deleteProfile", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }], "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/profiles/{profileId}/watchlist": {
+      "get": { "operationId": "listWatchlist", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/profiles/{profileId}/watchlist/{titleId}": {
+      "put": { "operationId": "putWatchlistTitle", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/TitleId" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } },
+      "delete": { "operationId": "deleteWatchlistTitle", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/TitleId" }], "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/profiles/{profileId}/progress": {
+      "get": { "operationId": "listProgress", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/profiles/{profileId}/progress/{titleId}": {
+      "put": { "operationId": "putProgress", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/TitleId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/profiles/{profileId}/ratings/{titleId}": {
+      "put": { "operationId": "putRating", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/TitleId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" } } },
+      "delete": { "operationId": "deleteRating", "parameters": [{ "$ref": "#/components/parameters/ProfileId" }, { "$ref": "#/components/parameters/TitleId" }], "responses": { "204": { "description": "Deleted" } } }
+    },
+    "/v1/catalog/titles": {
+      "get": { "security": [], "operationId": "listTitles", "parameters": [{ "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/catalog/titles/{titleId}": {
+      "get": { "security": [], "operationId": "getTitle", "parameters": [{ "$ref": "#/components/parameters/TitleId" }], "responses": { "200": { "$ref": "#/components/responses/Ok" }, "404": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/catalog/genres": {
+      "get": { "security": [], "operationId": "listGenres", "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/playback/resolve": {
+      "get": { "security": [], "operationId": "resolvePlayback", "parameters": [{ "name": "titleId", "in": "query", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } }, { "name": "episodeId", "in": "query", "required": false, "schema": { "$ref": "#/components/schemas/Uuid" } }], "responses": { "200": { "$ref": "#/components/responses/Ok" }, "400": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/playback/sessions": {
+      "post": { "operationId": "createPlaybackSession", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/media/capabilities": {
+      "post": { "operationId": "createMediaCapability", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" }, "403": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/media/{capability}/{path}": {
+      "get": { "security": [], "operationId": "getMedia", "parameters": [{ "name": "capability", "in": "path", "required": true, "schema": { "type": "string", "maxLength": 2048 } }, { "name": "path", "in": "path", "required": true, "schema": { "type": "string", "maxLength": 1024 } }], "responses": { "200": { "description": "Streamed object" }, "206": { "description": "Streamed byte range" }, "416": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/requests": {
+      "get": { "operationId": "listTitleRequests", "parameters": [{ "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } },
+      "post": { "operationId": "createTitleRequest", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/reports/playback": {
+      "post": { "security": [], "operationId": "createPlaybackReport", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "202": { "$ref": "#/components/responses/Ok" }, "429": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/commerce/plans": {
+      "get": { "security": [], "operationId": "listPlans", "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/commerce/entitlements": {
+      "get": { "security": [], "operationId": "getEntitlements", "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/providers": {
+      "get": { "operationId": "listProviders", "responses": { "200": { "$ref": "#/components/responses/Ok" }, "403": { "$ref": "#/components/responses/Error" } } },
+      "post": { "operationId": "createProvider", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/settings": {
+      "get": { "security": [], "operationId": "listPublicSettings", "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/accounts": {
+      "get": { "operationId": "adminListAccounts", "parameters": [{ "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "$ref": "#/components/responses/Ok" }, "403": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/admin/accounts/{accountId}/suspension": {
+      "put": { "operationId": "adminSetSuspension", "parameters": [{ "$ref": "#/components/parameters/AccountId" }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/audit": {
+      "get": { "operationId": "adminListAudit", "parameters": [{ "$ref": "#/components/parameters/Cursor" }, { "$ref": "#/components/parameters/Limit" }], "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/plans": {
+      "post": { "operationId": "adminCreatePlan", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/plans/{planId}/publish": {
+      "post": { "operationId": "adminPublishPlan", "parameters": [{ "name": "planId", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" }, "409": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/admin/subscriptions": {
+      "post": { "operationId": "adminGrantSubscription", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/subscriptions/{subscriptionId}/revoke": {
+      "post": { "operationId": "adminRevokeSubscription", "parameters": [{ "name": "subscriptionId", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" }, "404": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/admin/settings/{key}": {
+      "put": { "operationId": "adminPutSetting", "parameters": [{ "name": "key", "in": "path", "required": true, "schema": { "type": "string", "maxLength": 100 } }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/catalog/titles": {
+      "post": { "operationId": "adminCreateTitle", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "201": { "$ref": "#/components/responses/Ok" } } }
+    },
+    "/v1/admin/media/transcodes": {
+      "post": { "operationId": "adminQueueTranscode", "parameters": [{ "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 8, "maxLength": 128 } }], "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "202": { "$ref": "#/components/responses/Ok" }, "409": { "$ref": "#/components/responses/Error" } } }
+    },
+    "/v1/admin/ads/vast": {
+      "put": { "operationId": "adminPutVastSettings", "requestBody": { "$ref": "#/components/requestBodies/Json" }, "responses": { "200": { "$ref": "#/components/responses/Ok" }, "400": { "$ref": "#/components/responses/Error" } } }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "cookieSession": { "type": "apiKey", "in": "cookie", "name": "lumora.session_token", "description": "Name may carry Better Auth's __Secure- prefix. Mobile obtains the Cookie header through @better-auth/expo getCookie()." }
+    },
+    "parameters": {
+      "AuthPath": { "name": "path", "in": "path", "required": true, "schema": { "type": "string", "maxLength": 256 } },
+      "AccountId": { "name": "accountId", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } },
+      "ProfileId": { "name": "profileId", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } },
+      "TitleId": { "name": "titleId", "in": "path", "required": true, "schema": { "$ref": "#/components/schemas/Uuid" } },
+      "Cursor": { "name": "cursor", "in": "query", "required": false, "schema": { "type": "string", "maxLength": 512 } },
+      "Limit": { "name": "limit", "in": "query", "required": false, "schema": { "type": "integer", "minimum": 1, "maximum": 50, "default": 24 } }
+    },
+    "requestBodies": {
+      "Json": { "required": true, "content": { "application/json": { "schema": { "type": "object", "maxProperties": 50 } } } }
+    },
+    "responses": {
+      "Ok": { "description": "Successful JSON response", "content": { "application/json": { "schema": {} } } },
+      "Error": { "description": "Stable error envelope", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ApiError" } } } }
+    },
+    "schemas": {
+      "Uuid": { "type": "string", "format": "uuid" },
+      "ApiError": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "requestId"],
+            "properties": {
+              "code": { "type": "string" },
+              "message": { "type": "string" },
+              "requestId": { "type": "string", "format": "uuid" },
+              "fields": { "type": "object", "additionalProperties": { "type": "string" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "name": "@lumora/api-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "scripts": {
+    "auth:schema": "auth generate --config ./src/auth.schema.config.ts --output ./src/generated/auth-schema.ts --adapter drizzle --dialect sqlite --yes",
+    "auth:migration": "drizzle-kit generate --config ./drizzle.config.ts --name better-auth",
+    "typegen": "wrangler types --env-interface Env worker-configuration.d.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "migrate:local": "wrangler d1 migrations apply lumora-api-local --local",
+    "dev": "wrangler dev",
+    "dry-run": "wrangler deploy --dry-run",
+    "check": "npm run typegen && npm run typecheck && npm test && npm run dry-run"
+  },
+  "dependencies": {
+    "@better-auth/expo": "1.7.15",
+    "@better-auth/passkey": "1.7.15",
+    "@lumora/api-contract": "file:../../packages/lumora-api-contract",
+    "better-auth": "1.7.15",
+    "drizzle-orm": "0.45.2",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.12",
+    "auth": "1.7.15",
+    "drizzle-kit": "0.31.11",
+    "typescript": "5.7.3",
+    "vitest": "4.1.12",
+    "wrangler": "4.156.1"
+  }
+}

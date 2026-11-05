@@ -1,0 +1,47 @@
+{
+  "source": "D:/movie platform/src/features/watch-party/protocol.ts",
+  "sha256": "f16ec0a555f734fb5eb3c469fcd4c1271436c914630702421430b318b8cee1fb",
+  "protocolVersion": 1,
+  "subprotocol": "lumora.watch-party.v1",
+  "ticketPrefix": "lumora.ticket.",
+  "limits": {
+    "maxMessageBytes": 16384,
+    "maxDisplayNameCharacters": 40,
+    "maxChatCharacters": 500,
+    "replayHistory": 200
+  },
+  "driftPolicy": {
+    "noCorrectionSeconds": 0.25,
+    "correctionExitSeconds": 0.1,
+    "hardSyncSeconds": 1.5,
+    "maxRateCorrectionRatio": 0.05,
+    "rateCorrectionGain": 0.04
+  },
+  "ids": {
+    "movie": "11111111-1111-4111-8111-111111111111",
+    "episode": "22222222-2222-4222-8222-222222222222",
+    "participant": "33333333-3333-4333-8333-333333333333"
+  },
+  "normalization": {
+    "roomInput": " abcd-efgh23 ",
+    "roomOutput": "ABCDEFGH23",
+    "displayNameInput": "  Alice\u0007   <Host> ",
+    "displayNameOutput": "Alice ‹Host›",
+    "chatInput": "hello <b>  world",
+    "chatOutput": "hello ‹b› world"
+  },
+  "clock": {
+    "clientSentAtMs": 1000,
+    "clientReceivedAtMs": 1200,
+    "serverTimeMs": 1600,
+    "roundTripMs": 200,
+    "offsetMs": 500
+  },
+  "drift": [
+    { "name": "stable", "localPositionSeconds": 9.8, "correctionState": "stable", "kind": "none", "rate": 1 },
+    { "name": "enter-correction", "localPositionSeconds": 9.5, "correctionState": "stable", "kind": "rate", "rate": 1.02 },
+    { "name": "correction-hysteresis", "localPositionSeconds": 9.8, "correctionState": "correcting", "kind": "rate", "rate": 1.008 },
+    { "name": "exit-correction", "localPositionSeconds": 9.95, "correctionState": "correcting", "kind": "none", "rate": 1 },
+    { "name": "hard-seek", "localPositionSeconds": 8.4, "correctionState": "stable", "kind": "hard-sync", "rate": 1 }
+  ]
+}

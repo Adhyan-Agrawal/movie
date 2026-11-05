@@ -4,6 +4,8 @@ import { AdminSidebar } from '@/features/admin/AdminSidebar';
 import { hasAnyPermission } from '@/lib/permissions/check';
 import { PERMISSIONS, type Permission } from '@/lib/permissions/permissions';
 
+export const dynamic = 'force-dynamic';
+
 /**
  * Admin console chrome (Section 3 — admin navigation is separate). The root
  * layout already wraps everything in the public AppShell, so this renders a

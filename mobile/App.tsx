@@ -1,4 +1,4 @@
-import { NavigationContainer, DarkTheme, useNavigationContainerRef, type Theme } from '@react-navigation/native';
+import { NavigationContainer, DarkTheme, useNavigationContainerRef, type LinkingOptions, type Theme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
@@ -18,6 +18,9 @@ import PlayerScreen from './src/screens/PlayerScreen';
 import PersonScreen from './src/screens/PersonScreen';
 import AuthScreen from './src/screens/AuthScreen';
 import { AdMobProvider, useAdMob } from './src/ads/AdMobProvider';
+import { AppErrorBoundary } from './src/runtime/AppErrorBoundary';
+import WatchPartyDeepLinkScreen from './src/watch-party/WatchPartyDeepLinkScreen';
+import { WATCH_PARTY_CLOUDFLARE_BASE_URL } from './src/watch-party/config';
 
 /**
  * Lumora native app shell.
@@ -29,6 +32,19 @@ import { AdMobProvider, useAdMob } from './src/ads/AdMobProvider';
  */
 const Stack = createNativeStackNavigator<RootStackParamList>();
 const Tabs = createBottomTabNavigator<TabParamList>();
+
+const linking: LinkingOptions<RootStackParamList> = {
+  prefixes: ['lumora://', `${WATCH_PARTY_CLOUDFLARE_BASE_URL}/`],
+  config: {
+    screens: {
+      Tabs: '',
+      WatchPartyLink: {
+        path: 'watch/:type/:slug',
+        parse: { season: Number, episode: Number, party: String },
+      },
+    },
+  },
+};
 
 const navTheme: Theme = {
   ...DarkTheme,
@@ -75,28 +91,36 @@ function AppNavigation() {
     const root = state.routes[state.index];
     if (!root) return;
     const tabState = root.state;
-    ads.navigation({ root: root.name, key: root.key,
-      ...(root.name === 'Tabs' ? { tab: tabState?.routes[tabState.index ?? 0]?.name ?? 'Home' } : {}) });
+    try {
+      ads.navigation({ root: root.name, key: root.key,
+        ...(root.name === 'Tabs' ? { tab: tabState?.routes[tabState.index ?? 0]?.name ?? 'Home' } : {}) });
+    } catch { /* Optional advertising state must not interrupt navigation. */ }
   }
   const [reduceMotion, setReduceMotion] = useState(true);
   useEffect(() => {
-    void AccessibilityInfo.isReduceMotionEnabled().then(setReduceMotion);
-    const subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion);
-    return () => subscription.remove();
+    let mounted = true;
+    void AccessibilityInfo.isReduceMotionEnabled().then((value) => { if (mounted) setReduceMotion(value); }).catch(() => {});
+    let subscription: { remove: () => void } | undefined;
+    try { subscription = AccessibilityInfo.addEventListener('reduceMotionChanged', setReduceMotion); } catch { /* Optional accessibility signal. */ }
+    return () => { mounted = false; subscription?.remove(); };
   }, []);
   // The app is portrait-first; the PLAYER unlocks rotation for itself (see
   // PlayerScreen) and restores portrait on exit.
   useEffect(() => {
-    void ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    try {
+      void Promise.resolve(ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP)).catch(() => {});
+    } catch { /* Orientation support varies by device/window mode. */ }
   }, []);
 
   return (
     <SafeAreaProvider>
       <StatusBar style="light" />
-      <NavigationContainer ref={navigationRef} theme={navTheme} onReady={syncNavigation} onStateChange={syncNavigation}>
+      <NavigationContainer ref={navigationRef} theme={navTheme} linking={linking} onReady={syncNavigation} onStateChange={syncNavigation}>
         <Stack.Navigator
-          screenListeners={({ route }) => ({ blur: () => ads.blur(route.key), transitionEnd: ({ data }) => {
-            if (route.name === 'Title' && data.closing) requestAnimationFrame(() => ads.browsingComplete());
+          screenListeners={({ route }) => ({ blur: () => { try { ads.blur(route.key); } catch { /* Optional ads. */ } }, transitionEnd: ({ data }) => {
+            if (route.name === 'Title' && data.closing) requestAnimationFrame(() => {
+              try { ads.browsingComplete(); } catch { /* Optional ads. */ }
+            });
           } })}
           screenOptions={{
             headerStyle: { backgroundColor: colors.base },
@@ -108,6 +132,7 @@ function AppNavigation() {
           <Stack.Screen name="Tabs" component={MainTabs} options={{ headerShown: false }} />
           <Stack.Screen name="Title" component={TitleScreen} options={{ title: '' }} />
           <Stack.Screen name="Player" component={PlayerScreen} options={{ headerShown: false }} />
+          <Stack.Screen name="WatchPartyLink" component={WatchPartyDeepLinkScreen} options={{ headerShown: false }} />
           <Stack.Screen name="Person" component={PersonScreen} options={{ title: '' }} />
           <Stack.Screen name="Auth" component={AuthScreen} options={{ title: 'Sign in' }} />
         </Stack.Navigator>
@@ -117,5 +142,5 @@ function AppNavigation() {
 }
 
 export default function App() {
-  return <AdMobProvider><AppNavigation /></AdMobProvider>;
+  return <AppErrorBoundary><AdMobProvider><AppNavigation /></AdMobProvider></AppErrorBoundary>;
 }

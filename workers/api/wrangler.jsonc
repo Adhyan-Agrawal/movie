@@ -1,0 +1,92 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lumora-api",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": false,
+  "upload_source_maps": true,
+  "vars": {
+    "RUNTIME_ENV": "unconfigured",
+    "PRODUCTION_READY": "false",
+    "EMAIL_SENDING_READY": "false",
+    "AUTH_BASE_URL": "http://localhost:8787",
+    "TRUSTED_WEB_ORIGINS": "http://localhost:3000",
+    "TRUSTED_MOBILE_ORIGINS": "lumora://",
+    "PASSKEY_RP_ID": "localhost",
+    "PASSKEY_ORIGIN": "http://localhost:8787",
+    "EMAIL_FROM": "Lumora <noreply@example.invalid>",
+    "MEDIA_CAPABILITY_TTL_SECONDS": "300"
+  },
+  "secrets": {
+    "required": ["BETTER_AUTH_SECRET", "MEDIA_SIGNING_SECRET"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lumora-api-local",
+      "database_id": "00000000-0000-0000-0000-000000000001",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "MEDIA",
+      "bucket_name": "lumora-media-local"
+    }
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "JOBS",
+        "queue": "lumora-api-jobs-local"
+      },
+      {
+        "binding": "TRANSCODE_JOBS",
+        "queue": "lumora-transcode-jobs-local"
+      }
+    ],
+    "consumers": [
+      {
+        "queue": "lumora-api-jobs-local",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 3,
+        "dead_letter_queue": "lumora-api-jobs-dead-local"
+      }
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ACCOUNT_COORDINATOR",
+        "class_name": "AccountCoordinator"
+      },
+      {
+        "name": "PLAN_COORDINATOR",
+        "class_name": "PlanCoordinator"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AccountCoordinator", "PlanCoordinator"]
+    }
+  ],
+  "send_email": [
+    {
+      "name": "EMAIL"
+    }
+  ],
+  "triggers": {
+    "crons": ["*/1 * * * *"]
+  },
+  "observability": {
+    "enabled": true,
+    "traces": {
+      "enabled": true
+    }
+  }
+}

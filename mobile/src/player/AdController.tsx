@@ -3,6 +3,7 @@ import { Alert, AppState, Modal, View } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { VideoPlayer } from 'expo-video';
 import { supabase } from '../lib/supabase';
+import { WEB_URL, webRuntimeConfig } from '../lib/runtime-config';
 import type { NativeAdPolicy, NativeVastCreative } from '../lib/types';
 import { createNativeAdSchedule } from './policy';
 import NativeVastAd from './VastAdBreak';
@@ -35,18 +36,18 @@ export function AdController({ player, policy }: { player: VideoPlayer; policy?:
       if (cancelled) return;
       if (stored !== null) { consent = stored === 'true'; return; }
       Alert.alert('Advertising privacy', 'Allow video advertisements and playback tracking? This is separate from permission to load a streaming provider.', [
-        { text: 'Not now', style: 'cancel', onPress: () => { consent = false; void AsyncStorage.setItem(CONSENT_KEY, 'false'); } },
-        { text: 'Allow', onPress: () => { consent = true; void AsyncStorage.setItem(CONSENT_KEY, 'true'); } },
+        { text: 'Not now', style: 'cancel', onPress: () => { consent = false; void AsyncStorage.setItem(CONSENT_KEY, 'false').catch(() => {}); } },
+        { text: 'Allow', onPress: () => { consent = true; void AsyncStorage.setItem(CONSENT_KEY, 'true').catch(() => {}); } },
       ]);
     }).catch(() => {});
     const begin = async () => {
       active = true; restore = { position: player.currentTime, rate: player.playbackRate, playing: player.playing }; player.pause();
+      if (!webRuntimeConfig.available) { finish(); return; }
       const controller = new AbortController(); request = controller;
       const timeout = setTimeout(() => controller.abort(), 10_000);
       try {
         const { data } = await supabase.auth.getSession();
-        const base = (process.env.EXPO_PUBLIC_WEB_URL ?? 'https://hulkofyt.eu.org').replace(/\/$/, '');
-        const response = await fetch(`${base}/api/vast?consent=1`, { signal: controller.signal,
+        const response = await fetch(`${WEB_URL}/api/vast?consent=1`, { signal: controller.signal,
           ...(data.session ? { headers: { Authorization: `Bearer ${data.session.access_token}` } } : {}) });
         if (!response.ok || response.status === 204) { finish(); return; }
         const body = await response.json() as { creative?: NativeVastCreative };

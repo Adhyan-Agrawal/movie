@@ -1,117 +1,80 @@
 import { useEffect, useRef, useState } from 'react';
-import { Dimensions, FlatList, ImageBackground, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, StyleSheet, Text, View } from 'react-native';
 import { colors, radius, spacing, type } from '../theme';
-import { Badge, Button } from './ui';
+import { Button, IconButton, MetaLine } from './ui';
+import { Artwork } from './Artwork';
+import { useBrowseLayout } from './layout';
+import { useMotionEnabled } from './motion';
 import type { Title } from '../lib/types';
 
-/**
- * Auto-advancing hero carousel (native twin of the web HeroCarousel).
- * Pages through the top trending titles every 7s, pauses while the user is
- * dragging, and renders dots for manual paging.
- */
-const { width } = Dimensions.get('window');
-const HERO_HEIGHT = Math.round(width * 1.1);
-const ADVANCE_MS = 7000;
-
-export function Hero({ titles, onPressTitle }: { titles: Title[]; onPressTitle: (t: Title) => void }) {
+/** Featured films stay still until the viewer chooses to swipe or page. */
+export function Hero({ titles, onPressTitle }: { titles: Title[]; onPressTitle: (title: Title) => void }) {
+  const layout = useBrowseLayout();
+  const slideWidth = layout.width - layout.gutter * 2;
+  const motion = useMotionEnabled();
   const listRef = useRef<FlatList<Title>>(null);
-  const [index, setIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
-  // Mirror of `index` for the interval: reading state inside the tick would use
-  // a stale closure, and scrolling from inside a setState updater is a side
-  // effect React may run twice (StrictMode) — so advance explicitly instead.
   const indexRef = useRef(0);
-  useEffect(() => {
-    indexRef.current = index;
-  }, [index]);
+  const [index, setIndex] = useState(0);
+  indexRef.current = index;
 
   useEffect(() => {
-    if (paused || titles.length <= 1) return;
-    const timer = setInterval(() => {
-      const next = (indexRef.current + 1) % titles.length;
-      indexRef.current = next;
-      setIndex(next);
-      listRef.current?.scrollToIndex({ index: next, animated: true });
-    }, ADVANCE_MS);
-    return () => clearInterval(timer);
-  }, [paused, titles.length]);
+    const next = Math.max(0, Math.min(indexRef.current, titles.length - 1));
+    setIndex(next);
+    if (titles.length) listRef.current?.scrollToOffset({ offset: next * slideWidth, animated: false });
+  }, [slideWidth, titles.length]);
 
-  if (titles.length === 0) return null;
+  function page(next: number) {
+    const clamped = Math.max(0, Math.min(next, titles.length - 1));
+    setIndex(clamped);
+    listRef.current?.scrollToIndex({ index: clamped, animated: motion });
+  }
 
-  return (
-    <View style={styles.wrap}>
-      <FlatList
-        ref={listRef}
-        data={titles}
-        keyExtractor={(t) => t.id}
-        horizontal
-        pagingEnabled
-        showsHorizontalScrollIndicator={false}
-        getItemLayout={(_, i) => ({ length: width, offset: width * i, index: i })}
-        onScrollBeginDrag={() => setPaused(true)}
-        onMomentumScrollEnd={(e) => {
-          setIndex(Math.round(e.nativeEvent.contentOffset.x / width));
-          setPaused(false);
-        }}
-        renderItem={({ item }) => (
-          <ImageBackground
-            source={item.backdropUrl ? { uri: item.backdropUrl } : undefined}
-            style={styles.slide}
-            imageStyle={styles.slideImage}
-          >
-            <View style={styles.scrim} />
-            <View style={styles.content}>
-              <View style={styles.badges}>
-                {item.type === 'tv' ? <Badge label="Series" tone="info" /> : null}
-                <Badge label={item.maturity} />
-              </View>
-              <Text style={styles.name} numberOfLines={2}>
-                {item.name}
-              </Text>
-              <Text style={styles.meta} numberOfLines={1}>
-                {[item.releaseYear || undefined, item.genres.slice(0, 2).join(', ')].filter(Boolean).join('  ·  ')}
-              </Text>
-              <Text style={styles.synopsis} numberOfLines={3}>
-                {item.synopsis}
-              </Text>
-              <View style={styles.actions}>
-                <Button label="▶  Play" onPress={() => onPressTitle(item)} />
-                <Button label="Details" variant="secondary" onPress={() => onPressTitle(item)} />
-              </View>
-            </View>
-          </ImageBackground>
-        )}
-      />
-      <View style={styles.dots}>
-        {titles.slice(0, 10).map((_t, i) => (
-          <Pressable
-            key={i}
-            accessibilityRole="button"
-            accessibilityLabel={`Show featured title ${i + 1}`}
-            onPress={() => {
-              setIndex(i);
-              listRef.current?.scrollToIndex({ index: i, animated: true });
-            }}
-            style={[styles.dot, i === index ? styles.dotActive : null]}
-          />
-        ))}
-      </View>
-    </View>
-  );
+  if (!titles.length) return null;
+  return <View style={[styles.wrap, { marginHorizontal: layout.gutter }]}>
+    <FlatList
+      ref={listRef}
+      data={titles}
+      keyExtractor={(title) => title.id}
+      horizontal
+      pagingEnabled
+      showsHorizontalScrollIndicator={false}
+      initialNumToRender={2}
+      windowSize={3}
+      getItemLayout={(_, i) => ({ length: slideWidth, offset: slideWidth * i, index: i })}
+      onScrollToIndexFailed={({ index: failed }) => listRef.current?.scrollToOffset({ offset: failed * slideWidth, animated: false })}
+      onMomentumScrollEnd={(event) => setIndex(Math.max(0, Math.min(titles.length - 1, Math.round(event.nativeEvent.contentOffset.x / slideWidth))))}
+      renderItem={({ item }) => <View style={[styles.slide, { width: slideWidth }, layout.wide && styles.wideSlide]}>
+        <Artwork uri={item.backdropUrl ?? item.posterUrl} label={item.name} style={layout.wide ? styles.wideArt : styles.art} />
+        <View style={[styles.content, layout.wide && styles.wideContent]}>
+          <Text style={styles.eyebrow}>IN THE SPOTLIGHT</Text>
+          <Text accessibilityRole="header" style={styles.name}>{item.name}</Text>
+          <MetaLine parts={[item.type === 'tv' ? 'Series' : 'Film', item.releaseYear ? String(item.releaseYear) : undefined, item.genres.slice(0, 2).join(', ')]} />
+          {item.synopsis ? <Text style={styles.synopsis} numberOfLines={layout.largeText ? undefined : 3}>{item.synopsis}</Text> : null}
+          <Button label="View title" variant="primary" icon="chevron-right" onPress={() => onPressTitle(item)} style={styles.action} accessibilityLabel={`View ${item.name}`} />
+        </View>
+      </View>}
+    />
+    {titles.length > 1 ? <View style={styles.pagination}>
+      <Text accessibilityLabel={`Featured title ${index + 1} of ${titles.length}`} style={styles.counter}>{String(index + 1).padStart(2, '0')}<Text style={styles.counterMuted}> / {String(titles.length).padStart(2, '0')}</Text></Text>
+      <View style={styles.arrows}><IconButton icon="chevron-left" label="Previous featured title" onPress={() => page(index - 1)} disabled={index === 0} /><IconButton icon="chevron-right" label="Next featured title" onPress={() => page(index + 1)} disabled={index >= titles.length - 1} /></View>
+    </View> : null}
+  </View>;
 }
 
 const styles = StyleSheet.create({
-  wrap: { height: HERO_HEIGHT, marginBottom: spacing(4) },
-  slide: { width, height: HERO_HEIGHT, justifyContent: 'flex-end', backgroundColor: colors.surface },
-  slideImage: { opacity: 0.85 },
-  scrim: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, backgroundColor: 'rgba(8,9,12,0.55)' },
-  content: { padding: spacing(4), gap: spacing(2) },
-  badges: { flexDirection: 'row', gap: spacing(2) },
+  wrap: { marginBottom: spacing(8) },
+  slide: { backgroundColor: colors.surface, borderRadius: radius.lg, overflow: 'hidden', borderWidth: 1, borderColor: colors.border },
+  wideSlide: { flexDirection: 'row', minHeight: 340 },
+  art: { width: '100%', aspectRatio: 1.55 },
+  wideArt: { width: '56%', alignSelf: 'stretch' },
+  content: { padding: spacing(5), gap: spacing(3) },
+  wideContent: { flex: 1, padding: spacing(7), justifyContent: 'center' },
+  eyebrow: { ...type.tiny, fontWeight: '700', letterSpacing: 1.8, color: colors.contentMuted },
   name: { ...type.h1, color: colors.content },
-  meta: { ...type.small, color: colors.contentMuted },
-  synopsis: { ...type.small, color: colors.contentMuted },
-  actions: { flexDirection: 'row', gap: spacing(2), marginTop: spacing(1) },
-  dots: { position: 'absolute', bottom: spacing(2), alignSelf: 'center', flexDirection: 'row', gap: 6 },
-  dot: { width: 7, height: 7, borderRadius: radius.pill, backgroundColor: colors.contentSubtle },
-  dotActive: { width: 18, backgroundColor: colors.primary },
+  synopsis: { ...type.body, color: colors.contentMuted },
+  action: { alignSelf: 'flex-start', marginTop: spacing(2), minWidth: 156, maxWidth: '100%' },
+  pagination: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: spacing(3) },
+  counter: { ...type.small, fontWeight: '700', color: colors.content, fontVariant: ['tabular-nums'] },
+  counterMuted: { color: colors.contentSubtle, fontWeight: '400' },
+  arrows: { flexDirection: 'row', gap: spacing(2) },
 });

@@ -7,8 +7,11 @@
  * value), which breaks `useActionState` hydration.
  */
 export interface AuthActionState {
-  /** Human-readable error from Supabase (or a generic fallback). null = success. */
+  /** Application-owned error text; null is not proof of an authenticated session. */
   error: string | null;
+  message?: string;
 }
+
+export const AUTH_SERVICE_UNAVAILABLE = 'Account services are temporarily unavailable. Your session may still be active. Please try again shortly.';
 
 export const AUTH_INITIAL_STATE: AuthActionState = { error: null };

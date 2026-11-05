@@ -4,6 +4,7 @@ import { Container } from '@/components/ui/Container';
 import { buttonClasses } from '@/components/ui/Button';
 import { Logo } from '@/components/ui/Logo';
 import { RequestForm } from '@/features/catalog/components/RequestForm';
+import { features } from '@/lib/env';
 
 export const metadata: Metadata = {
   title: 'Request a title',
@@ -25,11 +26,11 @@ export default function RequestPage() {
             <span>Lumora</span>
           </Link>
           <h1 className="text-xl font-semibold text-content">Request a movie or series</h1>
-          <p className="text-sm text-content-muted">Can&apos;t find something? Tell us and we&apos;ll add it.</p>
+          <p className="text-sm text-content-muted">{features.supabaseConfigured ? 'Request a title for the catalog team to review.' : 'Title requests are currently unavailable. You can still search the public catalog.'}</p>
         </div>
 
         <div className="rounded-lg border border-border bg-surface/40 p-6">
-          <RequestForm />
+          {features.supabaseConfigured ? <RequestForm /> : <p role="status" className="text-sm text-content-muted">Requests unavailable.</p>}
         </div>
 
         <Link

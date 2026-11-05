@@ -1,29 +1,32 @@
 import { MediaCard } from './MediaCard';
 import Link from 'next/link';
 import type { ContinueWatchingEntry, MediaRow as MediaRowType } from '../types';
+import { Container } from '@/components/ui/Container';
+import { Icon } from '@/components/ui/Icon';
 
 /**
  * Horizontally scrollable row of media cards. Cards are links and stay in the
  * tab order; the browser scrolls the container to the focused card.
  */
-export function MediaRow({ row }: { row: MediaRowType }) {
+export function MediaRow({ row, variant = 'poster', number }: { row: MediaRowType; variant?: 'poster' | 'landscape'; number?: number }) {
   if (row.titles.length === 0) return null;
   return (
-    <section aria-labelledby={`row-${row.id}`} className="discovery-shelf flex flex-col gap-3">
-      <div className="flex items-baseline justify-between gap-4 px-4 md:px-8">
+    <section aria-labelledby={`row-${row.id}`} className={`discovery-shelf ${variant === 'landscape' ? 'shelf-landscape' : 'shelf-poster'}`}>
+      <Container className="shelf-heading">
         <div className="min-w-0">
-          <h2 id={`row-${row.id}`} className="text-lg font-semibold tracking-tight md:text-xl">{row.heading}</h2>
-          {row.reason ? <p className="mt-1 text-xs text-content-subtle">{row.reason}</p> : null}
+          {number !== undefined ? <p className="site-eyebrow shelf-eyebrow">Collection {String(number).padStart(2, '0')}</p> : null}
+          <h2 id={`row-${row.id}`} className="shelf-title">{row.heading}</h2>
+          {row.reason ? <p className="shelf-description">{row.reason}</p> : null}
         </div>
-        {row.href ? <Link href={row.href} prefetch={false} aria-label={`View all ${row.heading}`} className="inline-flex min-h-11 shrink-0 items-center text-sm font-medium text-content-muted hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary">View all <span aria-hidden="true" className="ml-2">&gt;</span></Link> : null}
-      </div>
+        {row.href ? <Link href={row.href} prefetch={false} aria-label={`View all ${row.heading}`} className="shelf-view-all">View all <Icon name="arrow-right" width="18" height="18" /></Link> : null}
+      </Container>
       <ul
-        className="flex gap-3 overflow-x-auto px-4 pb-2 md:px-8 [scrollbar-width:thin]"
-        style={{ scrollSnapType: 'x proximity' }}
+        className="shelf-track"
+        aria-label={`${row.heading} titles`}
       >
         {row.titles.map((title) => (
-          <li key={title.id} style={{ scrollSnapAlign: 'start' }}>
-            <MediaCard title={title} />
+          <li key={title.id} className="shelf-item">
+            <MediaCard title={title} variant={variant} />
           </li>
         ))}
       </ul>
@@ -34,13 +37,13 @@ export function MediaRow({ row }: { row: MediaRowType }) {
 export function ContinueWatchingRow({ entries }: { entries: ContinueWatchingEntry[] }) {
   if (entries.length === 0) return null;
   return (
-    <section aria-labelledby="row-continue" className="flex flex-col gap-3">
-      <div className="px-4 md:px-8">
-        <h2 id="row-continue" className="text-lg font-semibold tracking-tight">
+    <section aria-labelledby="row-continue" className="discovery-shelf shelf-landscape">
+      <Container className="shelf-heading">
+        <h2 id="row-continue" className="shelf-title">
           Continue watching
         </h2>
-      </div>
-      <ul className="flex gap-3 overflow-x-auto px-4 pb-2 md:px-8 [scrollbar-width:thin]">
+      </Container>
+      <ul className="shelf-track" aria-label="Continue watching titles">
         {entries.map((entry) => {
           // TV entries carry the exact episode to resume, so the card links
           // straight to /watch/tv/{slug}?season=N&episode=M and labels itself.
@@ -48,7 +51,7 @@ export function ContinueWatchingRow({ entries }: { entries: ContinueWatchingEntr
             ? `/watch/tv/${entry.title.slug}?season=${entry.episode.seasonNumber}&episode=${entry.episode.episodeNumber}`
             : undefined;
           return (
-            <li key={entry.title.id} style={{ scrollSnapAlign: 'start' }}>
+            <li key={entry.title.id} className="shelf-item">
               {entry.progress ? (
                 /* Native playback recorded a real position — show the bar. */
                 <div className="relative">
@@ -56,6 +59,7 @@ export function ContinueWatchingRow({ entries }: { entries: ContinueWatchingEntr
                     title={entry.title}
                     progress={entry.progress.progress}
                     href={episodeHref}
+                    variant="landscape"
                   />
                   <span className="sr-only">
                     {Math.round(entry.progress.progress * 100)}% watched — resume {entry.title.name}
@@ -66,8 +70,8 @@ export function ContinueWatchingRow({ entries }: { entries: ContinueWatchingEntr
                 /* Watched via an external server, which shares no position: an
                    honest "Continue" badge instead of a fabricated progress bar. */
                 <div className="relative">
-                  <MediaCard title={entry.title} href={episodeHref} />
-                  <span className="absolute left-2 top-9 rounded bg-surface/90 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-content shadow-soft">
+                  <MediaCard title={entry.title} href={episodeHref} variant="landscape" />
+                  <span className="media-card-continue-label">
                     Continue
                   </span>
                   <span className="sr-only">Continue {entry.title.name} — position unknown</span>

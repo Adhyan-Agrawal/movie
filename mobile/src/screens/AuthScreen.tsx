@@ -12,53 +12,60 @@ import {
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
 import { colors, radius, spacing, type } from '../theme';
 import { Button, Screen } from '../components/ui';
-import { signIn, signUp } from '../lib/api';
+import { AUTH_UNAVAILABLE_MESSAGE, isAuthConfigured, signIn, signUp } from '../lib/api';
 import type { RootStackParamList } from '../navigation';
 
 type Props = NativeStackScreenProps<RootStackParamList, 'Auth'>;
 type Mode = 'signin' | 'signup';
 
-/**
- * Email + password authentication (sign in / create account) in one screen.
- *
- * The Lumora backend has email confirmation disabled, so a new account is
- * usable the instant it is created — the copy says so plainly instead of
- * sending people to an inbox that never receives a mail. Both modes land back
- * on whatever pushed Auth (`goBack`); the session itself is persisted in
- * AsyncStorage by the shared Supabase client, so no extra plumbing is needed.
- */
+/** Return to the caller only after Supabase establishes a native session. */
 export default function AuthScreen({ navigation }: Props) {
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const isSignUp = mode === 'signup';
-  const canSubmit = email.trim().length > 0 && password.length > 0 && !busy;
+  const authAvailable = isAuthConfigured();
+  const canSubmit = authAvailable && email.trim().length > 0 && password.length > 0 && !busy;
 
   async function submit() {
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
-      const result = isSignUp ? await signUp(email, password) : await signIn(email, password);
-      if (!result.ok) {
-        setError(result.message ?? 'Something went wrong. Please try again.');
-        return;
+      if (isSignUp) {
+        const result = await signUp(email, password);
+        if (result.status !== 'signedIn') {
+          if (result.status === 'verificationRequired') {
+            setNotice(result.message);
+            setMode('signin');
+          } else setError(result.message);
+          return;
+        }
+      } else {
+        const result = await signIn(email, password);
+        if (!result.ok) {
+          setError(result.message ?? 'Something went wrong. Please try again.');
+          return;
+        }
       }
       navigation.goBack();
     } catch (e) {
-      // Network failures reject rather than returning { ok: false }.
-      setError(e instanceof Error ? e.message : 'Network error — check your connection and try again.');
+      setError(e instanceof Error ? e.message : 'Network error. Check your connection and try again.');
     } finally {
       setBusy(false);
     }
   }
 
   function toggleMode() {
+    if (!authAvailable || busy) return;
     setMode(isSignUp ? 'signin' : 'signup');
     setError(null);
+    setNotice(null);
   }
 
   return (
@@ -68,9 +75,10 @@ export default function AuthScreen({ navigation }: Props) {
           <Text style={styles.heading}>{isSignUp ? 'Create your account' : 'Welcome back'}</Text>
           <Text style={styles.lede}>
             {isSignUp
-              ? 'Account creation is instant — this backend requires no email confirmation step, so you can start watching straight away.'
-              : 'Sign in to sync your list and pick up where you left off on any device.'}
+              ? 'Create an account. Email verification may be required before you can sign in.'
+              : 'Sign in to access your account\'s saved list and watch history.'}
           </Text>
+          {!authAvailable ? <Text style={styles.lede} accessibilityRole="alert">{AUTH_UNAVAILABLE_MESSAGE}</Text> : null}
 
           <View style={styles.field}>
             <Text style={styles.label}>Email</Text>
@@ -85,7 +93,7 @@ export default function AuthScreen({ navigation }: Props) {
               keyboardType="email-address"
               textContentType="emailAddress"
               accessibilityLabel="Email address"
-              editable={!busy}
+              editable={authAvailable && !busy}
             />
           </View>
 
@@ -102,7 +110,7 @@ export default function AuthScreen({ navigation }: Props) {
               autoCorrect={false}
               textContentType={isSignUp ? 'newPassword' : 'password'}
               accessibilityLabel="Password"
-              editable={!busy}
+              editable={authAvailable && !busy}
               returnKeyType="go"
               onSubmitEditing={submit}
             />
@@ -113,6 +121,7 @@ export default function AuthScreen({ navigation }: Props) {
               {error}
             </Text>
           ) : null}
+          {notice ? <Text style={styles.lede} accessibilityLiveRegion="polite">{notice}</Text> : null}
 
           <Button
             label={isSignUp ? 'Create account' : 'Sign in'}
@@ -129,7 +138,7 @@ export default function AuthScreen({ navigation }: Props) {
             </Text>
             <Pressable
               onPress={toggleMode}
-              disabled={busy}
+              disabled={!authAvailable || busy}
               hitSlop={8}
               accessibilityRole="button"
               accessibilityLabel={isSignUp ? 'Switch to sign in' : 'Switch to create account'}

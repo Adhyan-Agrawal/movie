@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { DirectStream } from '@/lib/providers/types';
-import { aggregateStreamOptions, chooseStream, nominalQualityHeight, preferencesForStream, trackKey } from '@/features/player/stream-options';
+import { aggregateStreamOptions, audioStreamId, chooseStream, nominalQualityHeight, numberedAudioStreamOptions, preferencesForStream, trackKey } from '@/features/player/stream-options';
 
 const streams: DirectStream[] = [
   { id: 'hd', url: '/hd', qualities: [{ id: 'hd', label: 'HD', width: 1920, height: 800 }], audioTracks: [{ id: 'en', label: 'English', language: 'en' }], subtitles: [] },
@@ -35,11 +35,23 @@ describe('unified stream options', () => {
     expect(preferencesForStream(selected!, preferences)).toEqual(preferences);
   });
 
-  it('honors newly selected audio when the old quality is unavailable instead of inventing that combination', () => {
+  it('rejects incompatible manual audio and quality instead of silently resetting quality to Auto', () => {
     const preferences = { quality: 'quality:2160', audio: trackKey({ language: 'ta' }), subtitle: trackKey({ language: 'en' }) };
     const selected = chooseStream(streams, preferences, 'audio', 'uhd');
-    expect(selected?.id).toBe('dub');
-    expect(preferencesForStream(selected!, preferences).quality).toBe('auto');
+    expect(selected).toBeUndefined();
+    expect(preferencesForStream(streams[2]!, preferences)).toEqual(preferences);
+  });
+
+  it('never resets requested audio or subtitles when a replacement stream has incomplete metadata', () => {
+    const preferences = { quality: 'quality:2160', audio: 'hi::', subtitle: 'en::' };
+    expect(preferencesForStream({ id: 'pending', url: '/pending', qualities: [], audioTracks: [], subtitles: [] }, preferences)).toEqual(preferences);
+    expect(chooseStream(streams, { quality: 'quality:1080', audio: 'en::', subtitle: 'missing::' }, 'quality')).toBeUndefined();
+  });
+
+  it('does not replace a compatible current stream merely to apply a manual rendition or language', () => {
+    const measured = streams.map((stream) => ({ ...stream, startupLatencyMs: stream.id === 'hd' ? 10 : 900 }));
+    expect(chooseStream(measured, { quality: 'quality:1080', audio: 'en::', subtitle: 'off' }, 'quality', 'uhd')?.id).toBe('uhd');
+    expect(chooseStream(measured, { quality: 'auto', audio: 'en::', subtitle: 'off' }, 'audio', 'uhd')?.id).toBe('uhd');
   });
 
   it('does not advertise absent audio or subtitle tracks', () => {
@@ -69,5 +81,48 @@ describe('unified stream options', () => {
     expect(chooseStream(candidates, preferences, 'quality')?.id).toBe('hd');
     expect(chooseStream(candidates.map((stream) => ({ ...stream, startupLatencyMs: 80 })), preferences, 'quality')?.id).toBe('hd');
     expect(chooseStream(candidates, preferences, 'quality', 'uhd')?.id).toBe('uhd');
+  });
+
+  it('numbers every real catalog source even when no track metadata exists, without inventing languages', () => {
+    const catalog = [streams[1]!, { id: 'muxed', url: '/muxed', qualities: [], audioTracks: [], subtitles: [] }];
+    expect(numberedAudioStreamOptions(catalog)).toEqual([
+      { id: 'stream:uhd', label: 'Audio stream 1' }, { id: 'stream:muxed', label: 'Audio stream 2' },
+    ]);
+    expect(aggregateStreamOptions(catalog).audioTracks.map((track) => track.label)).toEqual(['English', 'Hindi']);
+  });
+
+  it('rejects malformed numbered preferences and duplicate or URL-less catalog entries', () => {
+    for (const choice of ['stream:', 'stream: ', 'stream:\n0', `stream:${'a'.repeat(257)}`, 'en::']) expect(audioStreamId(choice)).toBeUndefined();
+    expect(audioStreamId('stream:0')).toBe('0');
+    expect(numberedAudioStreamOptions([streams[0]!, streams[0]!, { ...streams[1]!, url: '' }])).toEqual([{ id: 'stream:hd', label: 'Audio stream 1' }]);
+  });
+
+  it('does not invent a track name for unlabeled or undetermined catalog audio', () => {
+    const unknown = { ...streams[0]!, audioTracks: [{ id: 'muxed', label: '', language: 'und', default: true }] };
+    expect(aggregateStreamOptions([unknown]).audioTracks).toEqual([]);
+    expect(preferencesForStream(unknown, { quality: 'auto', audio: '', subtitle: 'off' }).audio).toBe('');
+    expect(numberedAudioStreamOptions([unknown])).toEqual([{ id: 'stream:hd', label: 'Audio stream 1' }]);
+  });
+
+  it('selects the exact numbered source without requiring declared tracks', () => {
+    const muxed = { id: 'muxed', url: '/muxed', qualities: [], audioTracks: [], subtitles: [] };
+    const preferences = { quality: 'auto', audio: 'stream:muxed', subtitle: 'off' };
+    expect(chooseStream([...streams, muxed], preferences, 'audio', 'uhd')).toBe(muxed);
+    expect(preferencesForStream(muxed, preferences)).toEqual(preferences);
+    expect(chooseStream(streams, { ...preferences, audio: 'stream:missing' }, 'audio')).toBeUndefined();
+  });
+
+  it('rejects numbered audio / 4K conflicts and never resets the manual quality', () => {
+    const preferences = { quality: 'quality:2160', audio: 'stream:hd', subtitle: 'off' };
+    expect(chooseStream(streams, preferences, 'audio', 'uhd')).toBeUndefined();
+    expect(preferencesForStream(streams[0]!, preferences)).toEqual(preferences);
+  });
+
+  it('keeps a numbered source pin when selecting Auto quality or a genuine compatible language', () => {
+    const measured = streams.map((stream) => ({ ...stream, startupLatencyMs: stream.id === 'hd' ? 1 : 900 }));
+    expect(chooseStream(measured, { quality: 'auto', audio: 'auto', subtitle: 'off' }, 'quality', 'uhd', 'uhd')?.id).toBe('uhd');
+    expect(chooseStream(measured, { quality: 'auto', audio: 'hi::', subtitle: 'off' }, 'audio', 'uhd', 'uhd')?.id).toBe('uhd');
+    expect(chooseStream(measured, { quality: 'auto', audio: 'ta::', subtitle: 'off' }, 'audio', 'uhd', 'uhd')).toBeUndefined();
+    expect(chooseStream(measured, { quality: 'auto', audio: 'auto', subtitle: 'off' }, 'quality', 'uhd')?.id).toBe('hd');
   });
 });

@@ -3,6 +3,7 @@
 import { useState, useTransition } from 'react';
 import { cn } from '@/lib/cn';
 import { setRatingAction, removeRatingAction } from '@/features/catalog/ratings-actions';
+import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
 
 /**
  * Community rating + per-viewer rating control (Spec Sections 4, 7).
@@ -20,18 +21,22 @@ export function RatingControl({
   initialMyRating,
   average,
   count,
+  available = true,
 }: {
   titleId: string;
   initialMyRating: number | null;
   average: number | null;
   count: number;
+  available?: boolean;
 }) {
   const [myRating, setMyRating] = useState<number | null>(initialMyRating);
   const [pending, startTransition] = useTransition();
   const [message, setMessage] = useState<string | null>(null);
 
   function set(value: number) {
+    if (!available || pending) return;
     startTransition(async () => {
+      try {
       const result = await setRatingAction(titleId, value);
       if (result.ok) {
         setMyRating(value);
@@ -39,13 +44,18 @@ export function RatingControl({
       } else {
         setMessage(result.message ?? 'Could not save your rating.');
       }
+      } catch { setMessage(ACCOUNT_SERVICES_UNAVAILABLE); }
     });
   }
 
   function clear() {
+    if (!available || pending) return;
     startTransition(async () => {
+      try {
       const result = await removeRatingAction(titleId);
       if (result.ok) setMyRating(null);
+      else setMessage(result.message ?? 'Could not remove your rating.');
+      } catch { setMessage(ACCOUNT_SERVICES_UNAVAILABLE); }
     });
   }
 
@@ -75,13 +85,14 @@ export function RatingControl({
             <button
               key={star}
               type="button"
-              disabled={pending}
+              disabled={pending || !available}
+              title={!available ? ACCOUNT_SERVICES_UNAVAILABLE : undefined}
               onClick={() => set(value)}
               aria-label={`Rate ${value} out of 10`}
               aria-pressed={myRating === value}
               className={cn(
                 'grid h-8 w-8 place-items-center rounded text-lg transition-colors',
-                'disabled:cursor-wait focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                'disabled:cursor-not-allowed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
                 star <= filledStars
                   ? 'text-primary hover:text-primary'
                   : 'text-content-subtle hover:text-content-muted',
@@ -103,12 +114,13 @@ export function RatingControl({
           {message}
         </p>
       ) : null}
+      {!available ? <p role="status" className="text-xs text-content-muted">Personal ratings unavailable.</p> : null}
 
       {myRating != null ? (
         <button
           type="button"
           onClick={clear}
-          disabled={pending}
+          disabled={pending || !available}
           className="self-start text-xs text-content-muted underline-offset-2 hover:text-content hover:underline"
         >
           Clear my rating

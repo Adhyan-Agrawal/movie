@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const mock = vi.hoisted(() => ({ getSession: vi.fn(), fetch: vi.fn(), url: 'https://lumora.example/api/account/subscription' }));
-vi.mock('../../mobile/src/lib/supabase', () => ({ supabase: { auth: { getSession: mock.getSession } } }));
+vi.mock('../../mobile/src/lib/supabase', () => ({ supabaseConfigured: true, supabase: { auth: { getSession: mock.getSession } } }));
 vi.mock('../../mobile/src/lib/api', () => ({ sameOriginPlaybackUrl: () => mock.url }));
 import { fetchAdMobEntitlements } from '../../mobile/src/ads/entitlements';
 

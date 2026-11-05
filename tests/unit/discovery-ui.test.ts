@@ -12,7 +12,7 @@ vi.mock('next/link', async () => {
 });
 vi.mock('next/image', async () => {
   const { createElement } = await import('react');
-  return { default: ({ priority, fill: _fill, ...props }: ImgHTMLAttributes<HTMLImageElement> & { priority?: boolean; fill?: boolean }) => createElement('img', { ...props, 'data-priority': String(priority ?? false) }) };
+  return { default: ({ priority, fill: _fill, unoptimized, ...props }: ImgHTMLAttributes<HTMLImageElement> & { priority?: boolean; fill?: boolean; unoptimized?: boolean }) => createElement('img', { ...props, 'data-priority': String(priority ?? false), 'data-unoptimized': String(unoptimized ?? false) }) };
 });
 vi.mock('next/navigation', () => ({
   usePathname: () => '/movies', useRouter: () => ({ replace: vi.fn() }), useSearchParams: () => new URLSearchParams(mocks.query),
@@ -38,6 +38,7 @@ import { ContinueWatchingRow, MediaRow } from '@/features/catalog/components/Med
 const title: Title = {
   id: 'tmdb:movie:1', type: 'movie', slug: 'fixture-1', name: 'Fixture title', synopsis: 'A real metadata fixture.',
   releaseYear: 2024, maturity: 'PG', genres: ['Comedy'], originalLanguage: 'hi', score: 82,
+  posterUrl: 'https://image.tmdb.org/t/p/w500/fixture-poster.jpg',
   backdropUrl: 'https://image.tmdb.org/t/p/w1280/fixture.jpg',
 };
 const hindi: DiscoveryCollection = { id: 'hindi-cinema', label: 'Hindi cinema', href: '/browse?type=movie&originalLanguage=hi&sort=trending', filters: { type: 'movie', originalLanguage: 'hi', sort: 'trending' } };
@@ -99,6 +100,23 @@ describe('real shelves and spotlight', () => {
     expect(markup).toContain('Bollywood and other Hindi-language films');
   });
 
+  it('avoids speculative title and playback requests from dense catalog cards', () => {
+    const markup = renderToStaticMarkup(createElement('div', null,
+      createElement(MediaCard, { title }),
+      createElement(MediaCard, { title, href: '/watch/movie/fixture-1' }),
+    ));
+    expect(markup.match(/data-prefetch="false"/g)).toHaveLength(2);
+    expect(markup).toContain('href="/title/movie/fixture-1"');
+    expect(markup).toContain('href="/watch/movie/fixture-1"');
+  });
+
+  it('only resolves spotlight title and playback routes after deliberate navigation', () => {
+    const markup = renderToStaticMarkup(createElement(Hero, { title }));
+    expect(markup.match(/data-prefetch="false"/g)).toHaveLength(2);
+    expect(markup).toContain('href="/watch/movie/fixture-1"');
+    expect(markup).toContain('href="/title/movie/fixture-1"');
+  });
+
   it('shows a provider rating, never a fabricated personal match', () => {
     const hero = renderToStaticMarkup(createElement(Hero, { title }));
     const card = renderToStaticMarkup(createElement(MediaCard, { title }));
@@ -106,6 +124,18 @@ describe('real shelves and spotlight', () => {
     expect(card).toContain('8.2/10');
     expect(hero).not.toContain('% match');
     expect(hero).not.toContain('<video');
+  });
+
+  it('renders TMDB artwork as direct origin URLs with optimization disabled', () => {
+    const markup = renderToStaticMarkup(createElement('div', null,
+      createElement(Hero, { title }),
+      createElement(MediaCard, { title }),
+    ));
+    expect(markup).toContain('src="https://image.tmdb.org/t/p/w1280/fixture.jpg"');
+    expect(markup).toContain('src="https://image.tmdb.org/t/p/w500/fixture-poster.jpg"');
+    expect(markup.match(/data-unoptimized="true"/g)).toHaveLength(2);
+    expect(markup).not.toContain('/_next/image');
+    expect(markup).not.toContain('/cdn-cgi/image');
   });
 
   it('gives spotlight slides unique headings and prioritizes only the first image', () => {

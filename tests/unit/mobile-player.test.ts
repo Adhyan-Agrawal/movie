@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DirectStream } from '../../mobile/src/lib/types';
-import { chooseStream, compatiblePreferences, DEFAULT_PREFERENCES, qualityHeight, qualityKey, renditionUrl, trackKey } from '../../mobile/src/player/options';
+import { audioStreamOptions, chooseStream, compatiblePreferences, DEFAULT_PREFERENCES, hasAdaptiveQualities, qualityHeight, qualityKey, renditionUrl,
+  streamPlaybackUrl, trackKey } from '../../mobile/src/player/options';
 import { doubleTap, parseVtt, subtitleText } from '../../mobile/src/player/subtitles';
 
 const storage = vi.hoisted(() => {
@@ -41,11 +42,20 @@ describe('Android stream preferences and capabilities', () => {
     const prefs = { quality: 'quality:1080', audio: trackKey({ language: 'hi', label: 'hi' }), subtitle: trackKey({ language: 'fr', label: 'fr' }) };
     expect(chooseStream(candidates, prefs, 'quality')?.id).toBe('slow');
   });
-  it('resets only incompatible preferences and retains global VTT sidecars', () => {
+  it('never substitutes manual quality, audio or subtitle pins when metadata is incompatible', () => {
     const s = stream('a', 10, 720);
     expect(compatiblePreferences(s, { quality: 'quality:2160', audio: 'de::', subtitle: 'fr::' }))
-      .toEqual({ quality: 'auto', audio: 'en::', subtitle: 'off' });
+      .toEqual({ quality: 'quality:2160', audio: 'de::', subtitle: 'fr::' });
+    expect(streamPlaybackUrl(s, { ...DEFAULT_PREFERENCES, quality: 'quality:2160' }, s.url)).toBeNull();
     expect(compatiblePreferences(s, { quality: 'auto', audio: '', subtitle: 'sidecar:release1' }).subtitle).toBe('sidecar:release1');
+  });
+  it('prefers a real adaptive master over a faster fixed 4K-only stream for Auto', () => {
+    const fixed = stream('fixed-4k', 1, 2160);
+    const adaptive = { ...stream('adaptive', 100, 360), qualities: [360, 720, 1080, 2160].map((height) => ({ id: String(height), label: `${height}p`, height })) };
+    expect(hasAdaptiveQualities(fixed)).toBe(false); expect(hasAdaptiveQualities(adaptive)).toBe(true);
+    expect(chooseStream([fixed, adaptive], DEFAULT_PREFERENCES, 'quality')?.id).toBe('adaptive');
+    expect(streamPlaybackUrl(adaptive, DEFAULT_PREFERENCES, fixed.url)).toBe(adaptive.url);
+    expect(new URL(streamPlaybackUrl(adaptive, DEFAULT_PREFERENCES, fixed.url)!).searchParams.has('rendition')).toBe(false);
   });
   it('unknown/invalid latency cannot beat measured healthy startup', () => {
     expect(chooseStream([stream('negative', -1, 2160), stream('nan', NaN, 2160), stream('valid', 0, 480)], DEFAULT_PREFERENCES, 'quality')?.id).toBe('valid');
@@ -86,6 +96,40 @@ describe('Android stream preferences and capabilities', () => {
     expect(url.searchParams.get('token')).toBe('snapshot');
     expect(url.searchParams.get('rendition')).toBe('3');
     expect(selected.url).not.toContain('rendition');
+  });
+  it('numbers every actual catalog stream in order without deduplicating metadata or fabricating language labels', () => {
+    const candidates = Array.from({ length: 12 }, (_, index) => ({
+      ...stream(`snapshot-${index}`, index === 0 ? 1 : undefined, 720),
+      ...(index % 2 ? { qualities: [], audioTracks: [], subtitles: [] } : {}),
+    }));
+    const choices = audioStreamOptions(candidates);
+    expect(choices.map((choice) => choice.label)).toEqual(Array.from({ length: 12 }, (_, index) => String(index + 1)));
+    expect(choices.map((choice) => choice.number)).toEqual(Array.from({ length: 12 }, (_, index) => index + 1));
+    choices.forEach((choice, index) => expect(choice.stream).toBe(candidates[index]));
+    expect(choices[1]!.stream.audioTracks).toEqual([]);
+    expect(audioStreamOptions([])).toEqual([]);
+  });
+  it('pins the actual catalog capability despite faster, missing, reordered, or reused-ID catalog entries', () => {
+    const pinned = { ...stream('same-id', undefined, 1080), audioTracks: [], subtitles: [] };
+    const replacement = { ...pinned, url: `${pinned.url}&snapshot=new`, startupLatencyMs: 0 };
+    for (const candidates of [[], [replacement], [stream('fast', 1, 1080), replacement]]) {
+      expect(chooseStream(candidates, DEFAULT_PREFERENCES, 'quality', undefined, pinned)).toBe(pinned);
+      expect(streamPlaybackUrl(pinned, DEFAULT_PREFERENCES, 'https://example.test/api/vidnest?stream=auto')).toBe(pinned.url);
+    }
+    expect(chooseStream([replacement], { ...DEFAULT_PREFERENCES, audio: 'hi::' }, 'audio', undefined, pinned)).toBeUndefined();
+    expect(chooseStream([replacement], { ...DEFAULT_PREFERENCES, quality: 'quality:2160' }, 'quality', undefined, pinned)).toBeUndefined();
+    expect(chooseStream([replacement], DEFAULT_PREFERENCES, 'quality', undefined, null)).toBe(replacement);
+  });
+  it('never turns missing manual-quality metadata into an Auto/master request', () => {
+    const fixed = { ...stream('pin', 10, 1080), qualities: [{ id: '9', label: '1080p', height: 1080 }] };
+    const prefs = { ...DEFAULT_PREFERENCES, quality: 'quality:1080' };
+    const url = new URL(streamPlaybackUrl(fixed, prefs, 'https://example.test/auto.m3u8')!);
+    expect(url.searchParams.get('token')).toBe('pin');
+    expect(url.searchParams.get('rendition')).toBe('9');
+    expect(streamPlaybackUrl({ ...fixed, qualities: [] }, prefs, fixed.url)).toBeNull();
+    expect(streamPlaybackUrl(null, prefs, fixed.url)).toBeNull();
+    expect(streamPlaybackUrl({ ...fixed, url: 'https://example.test/unfiltered.m3u8' }, prefs, fixed.url)).toBeNull();
+    expect(streamPlaybackUrl(fixed, DEFAULT_PREFERENCES, fixed.url)).toBe(fixed.url);
   });
 });
 

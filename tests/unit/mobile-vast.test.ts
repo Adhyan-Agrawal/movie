@@ -1,5 +1,7 @@
 import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
 import type { NativeAdPolicy, NativeVastCreative } from '../../mobile/src/lib/types';
 import type { PlaybackAdPolicy } from '../../src/features/commerce/types';
 import type { VastCreative } from '../../src/features/ads/vast/types';
@@ -13,13 +15,54 @@ const observation = (positionSeconds: number, nowMs = positionSeconds * 1000) =>
   playing: true, ready: true, foreground: true, playbackRate: 1 });
 
 describe('Native VAST public contract and scheduler parity', () => {
-  it('has no raw ad executor notification path and passes policy only with resolved non-ad-free context', () => {
+  it('has no raw ad executor notification path', () => {
     const screen = readFileSync(new URL('../../mobile/src/screens/PlayerScreen.tsx', import.meta.url), 'utf8');
     const nativePolicy = readFileSync(new URL('../../mobile/src/player/policy.ts', import.meta.url), 'utf8');
     expect(screen).not.toContain('notifyAdBreak');
     expect(nativePolicy).not.toContain('notifyAdBreak');
-    expect(screen).toContain('adPolicy={bridge.entitlements?.resolved === true && bridge.entitlements.adFree === false ? bridge.adPolicy : undefined}');
   });
+
+  it.each(['guest', 'account:fixture:profile:fixture', 'unavailable'])('passes policy only with a known viewer and strictly resolved non-ad-free entitlements (%s)', (viewerKey) => {
+    const screen = ts.createSourceFile('PlayerScreen.tsx',
+      readFileSync(new URL('../../mobile/src/screens/PlayerScreen.tsx', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const expressions: ts.Expression[] = [];
+    function visit(node: ts.Node) {
+      if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && node.tagName.getText(screen) === 'NativePlayer') {
+        for (const attribute of node.attributes.properties) {
+          if (ts.isJsxAttribute(attribute) && attribute.name.getText(screen) === 'adPolicy'
+            && attribute.initializer && ts.isJsxExpression(attribute.initializer) && attribute.initializer.expression) {
+            expressions.push(attribute.initializer.expression);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    }
+    visit(screen);
+    expect(expressions).toHaveLength(1);
+    // Evaluate the actual JSX prop with fake DTOs, without importing RN or duplicating the gate.
+    const expression = `(${expressions[0]!.getText(screen)})`;
+    const cases = [
+      { name: 'eligible', entitlements: { resolved: true, adFree: false }, allowed: true },
+      { name: 'absent', entitlements: undefined, allowed: false },
+      { name: 'null', entitlements: null, allowed: false },
+      { name: 'empty', entitlements: {}, allowed: false },
+      { name: 'unresolved', entitlements: { resolved: false, adFree: false }, allowed: false },
+      { name: 'resolution absent', entitlements: { adFree: false }, allowed: false },
+      { name: 'resolution null', entitlements: { resolved: null, adFree: false }, allowed: false },
+      { name: 'resolution string', entitlements: { resolved: 'true', adFree: false }, allowed: false },
+      { name: 'resolution number', entitlements: { resolved: 1, adFree: false }, allowed: false },
+      { name: 'ad-free', entitlements: { resolved: true, adFree: true }, allowed: false },
+      { name: 'ad-free absent', entitlements: { resolved: true }, allowed: false },
+      { name: 'ad-free null', entitlements: { resolved: true, adFree: null }, allowed: false },
+      { name: 'ad-free string', entitlements: { resolved: true, adFree: 'false' }, allowed: false },
+      { name: 'ad-free number', entitlements: { resolved: true, adFree: 0 }, allowed: false },
+    ];
+    for (const { name, entitlements, allowed } of cases) {
+      const actual = runInNewContext(expression, { context: { viewerKey }, bridge: { entitlements, adPolicy: policy } });
+      expect(actual, `${viewerKey}: ${name}`).toBe(allowed && viewerKey !== 'unavailable' ? policy : undefined);
+    }
+  });
+
   it('mirrors public commerce/creative DTOs without tag or provider secrets', () => {
     expectTypeOf<NativeAdPolicy>().toEqualTypeOf<PlaybackAdPolicy>();
     expectTypeOf<NativeVastCreative>().toEqualTypeOf<VastCreative>();

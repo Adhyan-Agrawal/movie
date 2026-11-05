@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { MediaCard } from './MediaCard';
 import { readGuestEntries, type GuestWatchEntry } from '@/features/playback/guest-watch';
+import { Container } from '@/components/ui/Container';
+import Link from 'next/link';
 
 /**
  * Guest (signed-out) continue watching (Spec Sections 4, 8): rendered from
@@ -11,7 +13,7 @@ import { readGuestEntries, type GuestWatchEntry } from '@/features/playback/gues
  * nothing when empty. Signed-in viewers get the server-side row instead — the
  * home page shows one or the other, never both.
  */
-export function GuestContinueWatchingRow() {
+export function GuestContinueWatchingRow({ accountsAvailable = true }: { accountsAvailable?: boolean }) {
   const [entries, setEntries] = useState<GuestWatchEntry[]>([]);
 
   useEffect(() => {
@@ -21,18 +23,18 @@ export function GuestContinueWatchingRow() {
   if (entries.length === 0) return null;
 
   return (
-    <section aria-labelledby="guest-continue-heading" className="flex flex-col gap-3">
-      <h2 id="guest-continue-heading" className="text-lg font-semibold text-content">
+    <section aria-labelledby="guest-continue-heading" className="discovery-shelf">
+      <Container className="shelf-heading"><h2 id="guest-continue-heading" className="shelf-title">
         Continue watching
-      </h2>
-      <ul className="flex gap-4 overflow-x-auto pb-2">
+      </h2></Container>
+      <ul className="shelf-track" aria-label="Continue watching on this device">
         {entries.slice(0, 12).map((entry) => {
           const episodeHref =
             entry.type === 'tv' && entry.seasonNumber !== undefined && entry.episodeNumber !== undefined
               ? `/watch/tv/${entry.slug}?season=${entry.seasonNumber}&episode=${entry.episodeNumber}`
               : undefined;
           return (
-            <li key={`${entry.type}-${entry.slug}`} className="w-36 shrink-0 sm:w-40">
+            <li key={`${entry.type}-${entry.slug}`} className="shelf-item">
               <MediaCard
                 title={{
                   id: `guest-${entry.slug}`,
@@ -47,6 +49,7 @@ export function GuestContinueWatchingRow() {
                 }}
                 progress={entry.progress}
                 href={episodeHref}
+                showMaturity={false}
               />
               {entry.seasonNumber !== undefined && entry.episodeNumber !== undefined ? (
                 <p className="mt-1 truncate px-0.5 text-xs font-medium text-content-muted">
@@ -57,10 +60,10 @@ export function GuestContinueWatchingRow() {
           );
         })}
       </ul>
-      <p className="text-xs text-content-subtle">
-        Saved on this device. <a href="/signin" className="text-primary hover:underline">Sign in</a> to sync your
-        history everywhere.
-      </p>
+      <Container><p className="text-xs leading-relaxed text-content-subtle">
+        Saved on this device. {accountsAvailable ? <><Link href="/signin" prefetch={false} className="inline-flex min-h-11 items-center text-primary hover:underline">Sign in</Link> to sync your history everywhere.</>
+          : 'Account synchronization is unavailable.'}
+      </p></Container>
     </section>
   );
 }

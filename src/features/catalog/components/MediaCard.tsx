@@ -1,8 +1,9 @@
 import Link from 'next/link';
 import Image from 'next/image';
 import { cn } from '@/lib/cn';
-import { Badge } from '@/components/ui/Badge';
+import { Icon } from '@/components/ui/Icon';
 import type { Title } from '../types';
+import { TrailerPreview } from './TrailerPreview';
 
 /** True when the artwork is a real remote image (TMDB-style http(s) URL). */
 function isRemoteUrl(url: string | undefined): boolean {
@@ -23,6 +24,8 @@ export function MediaCard({
   progress,
   className,
   href,
+  variant = 'poster',
+  showMaturity = true,
 }: {
   title: Title;
   /** 0..1 resume progress, renders a bottom bar when present. */
@@ -30,53 +33,48 @@ export function MediaCard({
   className?: string;
   /** Override the default title link (e.g. resume a specific episode). */
   href?: string;
+  /** Landscape shelves use a backdrop only when the provider supplies one. */
+  variant?: 'poster' | 'landscape';
+  /** Browser-local history has no certification metadata. */
+  showMaturity?: boolean;
 }) {
   const runtime = formatRuntime(title.runtimeMinutes);
   const cardHref = href ?? `/title/${title.type}/${title.slug}`;
+  const artwork = variant === 'landscape' && isRemoteUrl(title.backdropUrl) ? title.backdropUrl : title.posterUrl;
+  const metadata = [title.releaseYear > 0 ? String(title.releaseYear) : null, runtime, title.type === 'tv' ? 'Series' : 'Film'].filter(Boolean);
 
   return (
     <Link
       href={cardHref}
+      prefetch={false}
       className={cn(
-        'discovery-card group relative flex w-36 shrink-0 flex-col gap-2 rounded-md sm:w-44 md:w-48',
-        'focus-visible:outline-none',
+        'discovery-card group',
+        variant === 'landscape' ? 'media-card-landscape' : 'media-card-poster',
         className,
       )}
-      aria-label={`${title.name} (${title.releaseYear}), ${title.maturity}`}
+      aria-label={[title.name, title.releaseYear > 0 ? String(title.releaseYear) : null, showMaturity ? title.maturity : null].filter(Boolean).join(', ')}
     >
       <div
-        className={cn(
-          'relative aspect-[2/3] w-full overflow-hidden rounded-md border border-border',
-          'bg-surface-raised shadow-soft transition-transform duration-200 ease-deliberate',
-          'motion-safe:group-hover:-translate-y-1 group-hover:border-border-strong motion-reduce:transition-none',
-          'group-focus-visible:ring-2 group-focus-visible:ring-primary',
-        )}
-        style={title.posterUrl?.startsWith('linear-gradient') ? { backgroundImage: title.posterUrl } : undefined}
+        className="media-card-artwork"
       >
-        {isRemoteUrl(title.posterUrl) && title.posterUrl ? (
+        {isRemoteUrl(artwork) && artwork ? (
           <Image
-            src={title.posterUrl}
-            alt={`${title.name} poster`}
+            src={artwork}
+            alt=""
             fill
-            sizes="(max-width: 640px) 45vw, 200px"
-            className="object-cover"
+            unoptimized
+            loading="lazy"
+            decoding="async"
+            sizes={variant === 'landscape' ? '(max-width: 640px) 78vw, (max-width: 1024px) 40vw, 360px' : '(max-width: 640px) 45vw, (max-width: 1024px) 25vw, 240px'}
+            className={cn('media-card-image object-cover', variant === 'landscape' && artwork === title.posterUrl && 'media-card-poster-fallback')}
           />
-        ) : null}
-        <div className="absolute left-2 top-2 flex gap-1">
-          {title.type === 'tv' ? <Badge tone="info">Series</Badge> : null}
-        </div>
-        <div className="absolute right-2 top-2">
-          <Badge tone="neutral">{title.maturity}</Badge>
-        </div>
-
-        {/* Legibility scrim for the metadata at the base of the poster */}
-        <div className="absolute inset-x-0 bottom-0 h-2/5 bg-gradient-to-t from-black/80 to-transparent" />
-        <div className="absolute inset-x-0 bottom-0 p-2.5">
-          <p className="line-clamp-2 text-sm font-semibold text-white drop-shadow">{title.name}</p>
-        </div>
+        ) : <div className="media-card-placeholder"><Icon name={title.type === 'tv' ? 'tv' : 'film'} width="32" height="32" /><span>{title.name}</span></div>}
+        <TrailerPreview imdbId={title.imdbId} tmdbId={title.tmdbId} type={title.type} />
+        <div className="media-card-hover" aria-hidden="true"><span className="media-card-hover-icon"><Icon name="arrow-right" /></span><span>Explore title</span></div>
+        {showMaturity && title.maturity ? <span className="media-card-maturity">{title.maturity}</span> : null}
 
         {typeof progress === 'number' ? (
-          <div className="absolute inset-x-0 bottom-0 h-1 bg-black/50">
+          <div className="media-card-progress">
             <div
               className="h-full bg-primary"
               style={{ width: `${Math.round(Math.min(1, Math.max(0, progress)) * 100)}%` }}
@@ -85,20 +83,14 @@ export function MediaCard({
         ) : null}
       </div>
 
-      <div className="flex items-center gap-1.5 px-0.5 text-xs text-content-muted">
-        {title.releaseYear > 0 ? <span>{title.releaseYear}</span> : null}
-        {runtime ? (
-          <>
-            <span aria-hidden="true">·</span>
-            <span>{runtime}</span>
-          </>
-        ) : null}
+      <div className="media-card-copy">
+        <p className="media-card-title">{title.name}</p>
+        <div className="media-card-meta">
+        <span>{metadata.join(' · ')}</span>
         {typeof title.score === 'number' ? (
-          <>
-            <span aria-hidden="true">·</span>
-            <span className="text-success">{(title.score / 10).toFixed(1)}/10</span>
-          </>
+            <span className="media-card-rating" aria-label={`${(title.score / 10).toFixed(1)} out of 10 rating`}>{(title.score / 10).toFixed(1)}/10</span>
         ) : null}
+        </div>
       </div>
     </Link>
   );

@@ -47,9 +47,13 @@ export function SubscriptionManager({ plans }: { plans: CommercePlan[] }) {
         setLoading(true); setLookupError(''); setRecords([]);
         try {
           const response = await fetch(`/api/account/subscription?accountId=${encodeURIComponent(accountId)}`, { cache: 'no-store' });
-          const body = await response.json();
-          if (!response.ok) throw new Error(body.error || 'Unable to read grants.');
-          setRecords(body.subscriptions);
+          const body: unknown = await response.json();
+          const payload = body && typeof body === 'object' && !Array.isArray(body)
+            ? body as { error?: unknown; subscriptions?: unknown }
+            : {};
+          if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : 'Unable to read grants.');
+          if (!Array.isArray(payload.subscriptions)) throw new Error('Invalid grants response.');
+          setRecords(payload.subscriptions as CommerceSubscription[]);
         } catch (error) { setLookupError(error instanceof Error ? error.message : 'Unable to read grants.'); }
         finally { setLoading(false); }
       }}>

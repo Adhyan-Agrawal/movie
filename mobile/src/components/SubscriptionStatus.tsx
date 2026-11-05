@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, StyleSheet, Text, View } from 'react-native';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseConfigured } from '../lib/supabase';
+import { WEB_URL, webRuntimeConfig } from '../lib/runtime-config';
 import { colors, radius, spacing } from '../theme';
 
 interface Entitlements { resolved: boolean; adFree: boolean; maxProfiles: number; status: string; planName?: string; accessUntil?: string }
@@ -11,10 +12,10 @@ export function SubscriptionStatus() {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
     void (async () => {
+      if (!supabaseConfigured || !webRuntimeConfig.available) { setState(null); return; }
       const { data } = await supabase.auth.getSession();
       if (!data.session) { setState(null); return; }
-      const base = (process.env.EXPO_PUBLIC_WEB_URL ?? 'https://hulkofyt.eu.org').replace(/\/$/, '');
-      const response = await fetch(`${base}/api/account/subscription`, {
+      const response = await fetch(`${WEB_URL}/api/account/subscription`, {
         signal: controller.signal, headers: { Authorization: `Bearer ${data.session.access_token}` },
       });
       const body = await response.json() as { entitlements?: Entitlements };

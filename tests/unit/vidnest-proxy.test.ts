@@ -70,7 +70,6 @@ beforeEach(async () => {
   GET = (await import('@/app/api/vidnest/route')).GET;
   vi.stubEnv('VIDNEST_API_SECRET', API_SECRET);
   vi.stubEnv('VIDNEST_API_URL', 'https://resolver.example');
-  vi.stubEnv('VIDNEST_CDN_BASE_URL', '');
 });
 
 afterEach(() => {
@@ -80,50 +79,80 @@ afterEach(() => {
 });
 
 describe('Vidnest proxy transport', () => {
-  it('uses a validated optional CDN endpoint while keeping Worker-to-origin child URLs same-origin', async () => {
-    vi.stubEnv('VIDNEST_CDN_BASE_URL', 'https://vidnest-edge.example/media');
-    const fetchMock = installFetch('https://third-party.example/master.m3u8', new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts\n', {
-      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
-    }), {
-      origin: 'https://player.example',
-      referer: 'https://player.example/watch',
-    });
-
+  it.each([
+    'http://cdn.example/segment.ts',
+    'https://user:password@cdn.example/segment.ts',
+    'https://127.0.0.1/segment.ts',
+    'https://localhost/segment.ts',
+    'data:application/octet-stream;base64,AAAA',
+    'https://[invalid/segment.ts',
+  ])('never passes an unsafe manifest destination through to the client (%s)', async (url) => {
+    const fetchMock = installFetch('https://cdn.example/master.m3u8', new Response(`#EXTM3U\n#EXTINF:6,\n${url}\n`));
     const response = await GET(playbackRequest());
-    const playlist = await response.text();
-    const edgeLine = playlist.split(/\r?\n/).find((line) => line.startsWith('https://vidnest-edge.example/'));
-    expect(edgeLine).toBeDefined();
-    const edgeUrl = new URL(edgeLine!);
-    expect(edgeUrl.pathname).toBe('/media');
-    expect(edgeUrl.searchParams.get('token')).toMatch(/^v1\.[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]{22}$/);
-    expect(playlist).not.toMatch(/third-party\.example|player\.example|referer|origin/);
-
-    fetchMock.mockResolvedValueOnce(new Response('#EXTM3U\n#EXTINF:6,\nnested.ts\n', {
-      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
-    }));
-    const originResponse = await GET(new NextRequest(`https://app.example/api/vidnest?token=${encodeURIComponent(edgeUrl.searchParams.get('token')!)}`));
-    const originPlaylist = await originResponse.text();
-    expect(originPlaylist).toContain('/api/vidnest?token=');
-    expect(originPlaylist).not.toContain('vidnest-edge.example');
+    expect(response.status).toBe(502);
+    expect(await response.text()).not.toContain(url);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
-  it.each([
-    'http://vidnest-edge.example/media',
-    'https://user:password@vidnest-edge.example/media',
-    'https://vidnest-edge.example/media?unsafe=1',
-    'https://vidnest-edge.example/not-media',
-    'https://localhost/media',
-  ])('keeps the existing same-origin fallback for an invalid CDN URL: %s', async (cdnUrl) => {
-    vi.stubEnv('VIDNEST_CDN_BASE_URL', cdnUrl);
-    installFetch('https://third-party.example/master.m3u8', new Response('#EXTM3U\nsegment.ts\n', {
-      headers: { 'Content-Type': 'application/vnd.apple.mpegurl' },
-    }));
+  it.each(['http://cdn.example/key.bin', 'https://localhost/key.bin', ''])('rejects unsafe or empty key URIs (%s)', async (uri) => {
+    installFetch('https://cdn.example/master.m3u8', new Response(`#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="${uri}"\nsegment.ts\n`));
+    expect((await GET(playbackRequest())).status).toBe(502);
+  });
 
+  it('preserves BOM-prefixed manifests and blank lines without inventing playlist requests', async () => {
+    const fetchMock = installFetch('https://cdn.example/master.m3u8', new Response('\uFEFF#EXTM3U\n  \n#EXTINF:6,\n segment.ts \n'));
     const response = await GET(playbackRequest());
+    expect(response.status).toBe(200);
     const playlist = await response.text();
+    expect(playlist).toMatch(/^#EXTM3U\n/);
+    expect((await followProxyPaths(playlist, fetchMock)).map(({ url }) => url)).toEqual(['https://cdn.example/segment.ts']);
+  });
 
-    expect(playlist).toContain('/api/vidnest?token=');
-    expect(playlist).not.toContain('vidnest-edge.example');
+  it('times out upstream response headers without waiting for a platform timeout', async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(() => new Promise<Response>(() => {}));
+    vi.stubGlobal('fetch', fetchMock);
+    const token = encryptedFixture({ expiresAt: Date.now() + 60_000, url: 'https://cdn.example/master.m3u8', headers: {} });
+    const pending = GET(new NextRequest(`https://app.example/api/vidnest?token=${token}`));
+    await vi.advanceTimersByTimeAsync(4001);
+    expect((await pending).status).toBe(504);
+    expect((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].signal?.aborted).toBe(true);
+  });
+
+  it.each(['opaque', 'playlist'])('cancels a stalled %s body within the startup deadline', async (kind) => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode(kind === 'opaque' ? '#EX' : '#EXTM3U\n')); },
+      cancel,
+    });
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(body, {
+      headers: { 'Content-Type': kind === 'opaque' ? 'application/octet-stream' : 'application/vnd.apple.mpegurl' },
+    })));
+    const token = encryptedFixture({ expiresAt: Date.now() + 60_000, url: `https://cdn.example/${kind}`, headers: {} });
+    const pending = GET(new NextRequest(`https://app.example/api/vidnest?token=${token}`));
+    await vi.advanceTimersByTimeAsync(4001);
+    expect((await pending).status).toBe(504);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it('does not expire a media body after its startup prefix has been received', async () => {
+    vi.useFakeTimers();
+    const prefix = new Uint8Array(188 * 3);
+    prefix[0] = prefix[188] = prefix[376] = 0x47;
+    const body = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(prefix);
+      setTimeout(() => { controller.enqueue(new Uint8Array(64)); controller.close(); }, 8000);
+    } });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(body, { headers: { 'Content-Type': 'video/mp2t' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    const token = encryptedFixture({ expiresAt: Date.now() + 60_000, url: 'https://cdn.example/segment.ts', headers: {} });
+    const response = await GET(new NextRequest(`https://app.example/api/vidnest?token=${token}`));
+    const bytes = response.arrayBuffer();
+    await vi.advanceTimersByTimeAsync(8001);
+    expect(response.status).toBe(200);
+    expect((await bytes).byteLength).toBe(prefix.length + 64);
+    expect((fetchMock.mock.calls[0]![1] as RequestInit).signal?.aborted).toBe(false);
   });
 
   it('serves one fixed rendition to native clients while preserving alternate audio', async () => {
@@ -373,9 +402,81 @@ describe('Vidnest proxy transport', () => {
     expect(response.headers.get('content-length')).toBe(String(expected.byteLength));
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(expected);
   });
+
+  it('cancels a replaced media response without a late upstream abort becoming a stream failure', async () => {
+    const cancel = vi.fn(async () => { throw new DOMException('ResponseAborted', 'AbortError'); });
+    const first = new Uint8Array([0, 0, 0, 24, 102, 116, 121, 112, 109, 112, 52, 50]);
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(first); },
+      cancel,
+    });
+    installFetch('https://cdn.example/video', new Response(body, {
+      headers: { 'Content-Type': 'application/octet-stream' },
+    }));
+    const response = await GET(playbackRequest());
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    expect((await reader.read()).value).toEqual(first);
+    const pending = reader.read();
+    await expect(reader.cancel('source replaced')).resolves.toBeUndefined();
+    await expect(pending).resolves.toMatchObject({ done: true });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
 });
 
 describe('VidNest authenticated encrypted capabilities', () => {
+  it.each(['exp', 'expires', 'expiry'])('clamps an authenticated old capability and nested media to upstream %s without fetching expired URLs', async (parameter) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 10, 4));
+    const deadline = Date.now() + 5000;
+    const rootUrl = `https://cdn.example/master.m3u8?${parameter}=${deadline / 1000}`;
+    const token = encryptedFixture({ url: rootUrl, headers: {}, expiresAt: Date.now() + FOUR_HOURS_MS });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000000\nvideo.m3u8'));
+    vi.stubGlobal('fetch', fetchMock);
+    const root = await GET(new NextRequest(`https://app.example/api/vidnest?token=${token}`));
+    const childPath = proxyPaths(await root.text())[0]!;
+    vi.setSystemTime(deadline - 1);
+    fetchMock.mockResolvedValueOnce(new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts'));
+    const child = await GET(new NextRequest(new URL(childPath, 'https://app.example')));
+    const mediaPath = proxyPaths(await child.text())[0]!;
+    expect(child.status).toBe(200);
+    vi.setSystemTime(deadline);
+    for (const path of [childPath, mediaPath, `/api/vidnest?token=${token}`]) {
+      expect((await GET(new NextRequest(new URL(path, 'https://app.example')))).status).toBe(403);
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a child signed URL expiry shorter than the parent capability', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(Date.UTC(2026, 10, 4));
+    const deadline = Date.now() + 2000;
+    const token = encryptedFixture({ url: 'https://cdn.example/master.m3u8', headers: {}, expiresAt: Date.now() + 60_000 });
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response(`#EXTM3U\n#EXTINF:6,\nsegment.ts?Expires=${deadline / 1000}`));
+    vi.stubGlobal('fetch', fetchMock);
+    const root = await GET(new NextRequest(`https://app.example/api/vidnest?token=${token}`));
+    const mediaPath = proxyPaths(await root.text())[0]!;
+    vi.setSystemTime(deadline);
+    expect((await GET(new NextRequest(new URL(mediaPath, 'https://app.example')))).status).toBe(403);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('cancels a late response from a transport that ignored caller abort', async () => {
+    let release!: (response: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { release = resolve; }));
+    vi.stubGlobal('fetch', fetchMock);
+    const controller = new AbortController();
+    const token = encryptedFixture({ url: 'https://cdn.example/segment.ts', headers: {}, expiresAt: Date.now() + 60_000 });
+    const result = GET(new NextRequest(`https://app.example/api/vidnest?token=${token}`, { signal: controller.signal }));
+    await Promise.resolve();
+    controller.abort();
+    const cancel = vi.fn();
+    release(new Response(new ReadableStream({ start(stream) { stream.enqueue(new Uint8Array(1024)); }, cancel })));
+    expect((await result).status).toBe(504);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   async function issuedCapability() {
     const fetchMock = installFetch('https://cdn.example/master.m3u8', new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts'), {
       referer: 'https://player.example/watch', origin: 'https://player.example',

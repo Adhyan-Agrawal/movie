@@ -5,6 +5,7 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { buttonClasses } from '@/components/ui/Button';
 import type { MaturityRating, TitleType } from '@/features/catalog/types';
+import { Icon } from '@/components/ui/Icon';
 
 /**
  * Crafted filter + sort controls for the browse surfaces (Section 4). All state
@@ -56,13 +57,13 @@ function FilterSelect({
   children: ReactNode;
 }) {
   return (
-    <label className="flex min-w-[8.5rem] flex-1 flex-col gap-1.5 sm:flex-none">
-      <span className="text-[11px] font-medium uppercase tracking-wide text-content-subtle">{label}</span>
+    <label className="catalog-filter-label">
+      <span>{label}</span>
       <div className="relative">
         <select
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          className="h-11 w-full appearance-none rounded-md border border-border bg-surface-raised pl-3 pr-9 text-sm text-content shadow-soft transition-colors hover:border-border-strong focus:border-primary focus-visible:outline-none"
+          className="catalog-filter-select"
         >
           {children}
         </select>
@@ -70,7 +71,7 @@ function FilterSelect({
           aria-hidden="true"
           className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-content-subtle"
         >
-          ▾
+          <Icon name="chevron-down" width="16" height="16" />
         </span>
       </div>
     </label>
@@ -143,9 +144,9 @@ export function FilterBar({
   return (
     <section
       aria-label="Filter and sort titles"
-      className="flex flex-col gap-3 rounded-lg border border-border bg-surface/50 p-3 shadow-soft md:p-4"
+      className="catalog-filter-bar flex flex-col gap-4"
     >
-      <div className="flex flex-wrap items-end gap-3">
+      <div className="catalog-filter-controls">
         {!lockType ? (
           <FilterSelect label="Type" value={typeValue} onChange={onType}>
             <option value="">All types</option>
@@ -201,15 +202,10 @@ export function FilterBar({
               type="button"
               onClick={c.onRemove}
               aria-label={`Remove ${c.label} filter`}
-              className="group inline-flex h-11 items-center gap-1.5 rounded-md border border-border bg-surface-raised pl-3 pr-2.5 text-xs text-content transition-colors hover:border-border-strong hover:bg-surface-overlay"
+               className="catalog-filter-chip"
             >
               <span>{c.label}</span>
-              <span
-                aria-hidden="true"
-                className="text-sm leading-none text-content-subtle transition-colors group-hover:text-content"
-              >
-                ×
-              </span>
+               <Icon name="close" width="14" height="14" />
             </button>
           ))}
           <button type="button" onClick={reset} className={cn(buttonClasses({ variant: 'ghost', size: 'sm' }), 'ml-auto')}>

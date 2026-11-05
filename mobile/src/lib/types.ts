@@ -137,6 +137,7 @@ export interface PlaybackResponse {
   sources: PlaybackSource[];
   subtitleCatalogUrl?: string;
   introCatalogUrl?: string;
+  episodeNavigationUrl?: string;
   adPolicy?: NativeAdPolicy;
   entitlements?: ViewerEntitlements;
 }

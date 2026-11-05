@@ -25,6 +25,12 @@ export const metadata: Metadata = {
   description: 'A calm, premium place to discover and watch movies and television.',
   metadataBase: appUrl,
   applicationName: publicEnv.NEXT_PUBLIC_APP_NAME,
+  other: {
+    clckd: [
+      'f3b2e6ec440a7d2aa713ff4c24e8538c',
+      '640e7381f91f7a3f72795b14d6027572',
+    ],
+  },
   // Default social/link-preview image = the brand logo. Title pages override
   // this with their poster (see /title/[type]/[slug]/page.tsx).
   openGraph: {

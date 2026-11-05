@@ -5,7 +5,14 @@
  * verified with fixtures instead (tests/unit/tmdb-normalize.test.ts).
  */
 
-const TMDB_IMG = 'https://image.tmdb.org/t/p';
+export const TMDB_IMAGE_ORIGIN = 'https://image.tmdb.org';
+export type TmdbImageSize = 'w185' | 'w300' | 'w500' | 'w1280';
+
+/** Build an origin-direct TMDB image URL; proxy/data URLs are never accepted. */
+export function tmdbImageUrl(path: string | null | undefined, size: TmdbImageSize): string | null {
+  if (!path || !/^\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(path)) return null;
+  return `${TMDB_IMAGE_ORIGIN}/t/p/${size}${path}`;
+}
 
 export interface TmdbListResult {
   id: number;
@@ -207,13 +214,20 @@ export function validYear(date: string | null): number | null {
   return Number.isInteger(year) && year >= 1878 && year <= 2100 ? year : null;
 }
 
-function isHttpUrl(value: string | null | undefined): value is string {
-  return typeof value === 'string' && /^https?:\/\//.test(value);
+function isDirectTmdbImageUrl(value: string | null | undefined): value is string {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return url.origin === TMDB_IMAGE_ORIGIN && /^\/t\/p\/(?:w185|w300|w500|w1280)\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(url.pathname)
+      && !url.search && !url.hash;
+  } catch {
+    return false;
+  }
 }
 
 /** The UI's placeholder convention: gradient strings, not image URLs. */
 export function posterSrc(posterUrl: string | null | undefined): string | null {
-  return isHttpUrl(posterUrl) ? posterUrl : null;
+  return isDirectTmdbImageUrl(posterUrl) ? posterUrl : null;
 }
 
 /** Normalize a TMDB movie detail payload; null when it lacks title/overview. */
@@ -233,8 +247,8 @@ export function normalizeMovie(d: TmdbMovieDetail): NormalizedTitle | null {
     runtimeMinutes: d.runtime ?? null,
     maturity: cert || 'NR',
     originalLanguage: d.original_language || 'en',
-    posterUrl: d.poster_path ? `${TMDB_IMG}/w500${d.poster_path}` : null,
-    backdropUrl: d.backdrop_path ? `${TMDB_IMG}/w1280${d.backdrop_path}` : null,
+    posterUrl: tmdbImageUrl(d.poster_path, 'w500'),
+    backdropUrl: tmdbImageUrl(d.backdrop_path, 'w1280'),
     score: typeof d.vote_average === 'number' ? Math.round(d.vote_average * 10) : null,
     popularity: d.popularity ?? null,
     genres: (d.genres ?? []).map((g) => g.name),
@@ -261,8 +275,8 @@ export function normalizeTv(d: TmdbTvDetail): NormalizedTitle | null {
     runtimeMinutes: runtime ?? null,
     maturity: us?.rating || 'NR',
     originalLanguage: d.original_language || 'en',
-    posterUrl: d.poster_path ? `${TMDB_IMG}/w500${d.poster_path}` : null,
-    backdropUrl: d.backdrop_path ? `${TMDB_IMG}/w1280${d.backdrop_path}` : null,
+    posterUrl: tmdbImageUrl(d.poster_path, 'w500'),
+    backdropUrl: tmdbImageUrl(d.backdrop_path, 'w1280'),
     score: typeof d.vote_average === 'number' ? Math.round(d.vote_average * 10) : null,
     popularity: d.popularity ?? null,
     genres: (d.genres ?? []).map((g) => g.name),
@@ -273,7 +287,7 @@ export function normalizeTv(d: TmdbTvDetail): NormalizedTitle | null {
         name: s.name,
         overview: s.overview ?? '',
         airDate: s.air_date,
-        posterUrl: s.poster_path ? `${TMDB_IMG}/w500${s.poster_path}` : null,
+        posterUrl: tmdbImageUrl(s.poster_path, 'w500'),
         episodeCount: s.episode_count,
       })),
     cast: normalizeCast(d.credits),
@@ -302,7 +316,7 @@ export function normalizeCast(
       tmdbId: c.id,
       name: c.name as string,
       character: c.character || null,
-      profileUrl: c.profile_path ? `${TMDB_IMG}/w185${c.profile_path}` : null,
+      profileUrl: tmdbImageUrl(c.profile_path, 'w185'),
       knownFor: c.known_for_department || null,
       creditOrder: typeof c.order === 'number' && c.order >= 0 ? c.order : i,
     }));
@@ -323,7 +337,7 @@ export function normalizeEpisodes(season: TmdbSeasonDetail): NormalizedEpisode[]
       overview: e.overview ?? '',
       airDate: e.air_date,
       runtimeMinutes: e.runtime ?? null,
-      stillUrl: e.still_path ? `${TMDB_IMG}/w300${e.still_path}` : null,
+      stillUrl: tmdbImageUrl(e.still_path, 'w300'),
       tmdbId: e.id,
     }));
 }

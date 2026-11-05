@@ -1,0 +1,38 @@
+.preview {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity 240ms ease;
+}
+
+.ready {
+  opacity: 1;
+}
+
+.label {
+  position: absolute;
+  top: 0.7rem;
+  left: 0.7rem;
+  max-width: calc(100% - 4.5rem);
+  padding: 0.3rem 0.45rem;
+  border: 1px solid rgb(255 255 255 / 25%);
+  border-radius: 3px;
+  background: rgb(13 14 15 / 90%);
+  color: rgb(245 241 232);
+  font-size: 0.5625rem;
+  line-height: 1.5;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .video { transition: none; }
+}

@@ -58,7 +58,7 @@ describe('public Android catalog bridge', () => {
     expect(legacy.fetchHome).toHaveBeenCalledOnce();
   });
 
-  it('never retains a home payload across refreshes', async () => {
+  it('never caches home responses without explicit proof that the shape is public', async () => {
     fetchMock.mockResolvedValueOnce(json({ hero: title, rows: [] })).mockResolvedValueOnce(json({ hero: null, rows: [] }));
     const api = await bridge();
     expect((await api.fetchHome()).hero).toEqual([title]);

@@ -1,11 +1,11 @@
 import { sameOriginPlaybackUrl } from '../lib/api';
-import { supabase } from '../lib/supabase';
+import { supabase, supabaseConfigured } from '../lib/supabase';
 import type { ViewerEntitlements } from '../lib/types';
 
 export async function fetchAdMobEntitlements(signal?: AbortSignal): Promise<{
   accountId: string; entitlements: ViewerEntitlements | null;
 } | null> {
-  if (signal?.aborted) return null;
+  if (signal?.aborted || !supabaseConfigured) return null;
   const controller = new AbortController();
   const abort = () => controller.abort();
   const timer = setTimeout(abort, 8000);

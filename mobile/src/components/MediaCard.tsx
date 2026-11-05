@@ -1,6 +1,8 @@
-import { Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
 import { colors, radius, spacing, type } from '../theme';
 import type { Title } from '../lib/types';
+import { Artwork } from './Artwork';
+import { Icon } from './Icon';
 
 /**
  * Poster card (native twin of the web MediaCard). `progress` (0..1) draws the
@@ -11,40 +13,41 @@ export function MediaCard({
   progress,
   onPress,
   width = 132,
+  variant = 'poster',
+  caption,
 }: {
   title: Title;
   progress?: number;
   onPress: () => void;
   width?: number;
+  variant?: 'poster' | 'landscape';
+  caption?: string;
 }) {
+  const { fontScale } = useWindowDimensions();
+  const watched = typeof progress === 'number' && Number.isFinite(progress) ? Math.min(1, Math.max(0, progress)) : undefined;
+  const landscape = variant === 'landscape';
   return (
     <Pressable
       onPress={onPress}
       accessibilityRole="button"
-      accessibilityLabel={`${title.name}${title.releaseYear ? `, ${title.releaseYear}` : ''}`}
-      style={({ pressed }) => [{ width, opacity: pressed ? 0.85 : 1 }]}
+      accessibilityLabel={`${caption ? `${caption}, ` : ''}${title.name}${title.releaseYear ? `, ${title.releaseYear}` : ''}${watched !== undefined ? `, ${Math.round(watched * 100)} percent watched` : ''}`}
+      accessibilityHint={landscape ? 'Continue watching' : 'View title details'}
+      style={({ pressed }) => [{ width, opacity: pressed ? 0.75 : 1 }]}
     >
-      <View style={[styles.posterWrap, { height: width * 1.5 }]}>
-        {title.posterUrl ? (
-          <Image source={{ uri: title.posterUrl }} style={styles.poster} resizeMode="cover" />
-        ) : (
-          <View style={styles.posterFallback}>
-            <Text style={styles.posterFallbackText} numberOfLines={2}>
-              {title.name}
-            </Text>
-          </View>
-        )}
-        {typeof progress === 'number' ? (
+      <View style={[styles.posterWrap, { aspectRatio: landscape ? 16 / 9 : 2 / 3 }]}>
+        <Artwork uri={landscape ? title.backdropUrl ?? title.posterUrl : title.posterUrl} label={title.name} style={styles.art} />
+        {landscape ? <View style={styles.playMark}><Icon name="play" size={17} /></View> : null}
+        {watched !== undefined ? (
           <View style={styles.progressTrack}>
-            <View style={[styles.progressFill, { width: `${Math.round(Math.min(1, Math.max(0, progress)) * 100)}%` }]} />
+            <View style={[styles.progressFill, { width: `${Math.round(watched * 100)}%` }]} />
           </View>
         ) : null}
       </View>
-      <Text style={styles.name} numberOfLines={2}>
+      <Text style={[styles.name, landscape && styles.landscapeName]} numberOfLines={fontScale > 1.3 ? undefined : 2}>
         {title.name}
       </Text>
-      <Text style={styles.meta} numberOfLines={1}>
-        {[title.releaseYear || undefined, title.genres[0]].filter(Boolean).join(' · ')}
+      <Text style={styles.meta} numberOfLines={fontScale > 1.3 ? undefined : 2}>
+        {caption ?? [title.type === 'tv' ? 'Series' : 'Film', title.releaseYear || undefined].filter(Boolean).join(' \u00b7 ')}
       </Text>
     </Pressable>
   );
@@ -56,14 +59,12 @@ const styles = StyleSheet.create({
     borderRadius: radius.md,
     overflow: 'hidden',
     backgroundColor: colors.surfaceRaised,
-    borderWidth: 1,
-    borderColor: colors.border,
   },
-  poster: { width: '100%', height: '100%' },
-  posterFallback: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing(2) },
-  posterFallbackText: { ...type.small, color: colors.contentSubtle, textAlign: 'center' },
-  progressTrack: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, backgroundColor: 'rgba(0,0,0,0.5)' },
+  art: { width: '100%', height: '100%' },
+  playMark: { position: 'absolute', left: spacing(3), bottom: spacing(3), width: 38, height: 38, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(8,10,12,0.78)', borderWidth: 1, borderColor: '#ffffff33' },
+  progressTrack: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 3, backgroundColor: 'rgba(0,0,0,0.65)' },
   progressFill: { height: '100%', backgroundColor: colors.primary },
-  name: { ...type.small, color: colors.content, fontWeight: '600', marginTop: spacing(1.5) },
-  meta: { ...type.tiny, color: colors.contentSubtle, marginTop: 2 },
+  name: { ...type.small, color: colors.content, fontWeight: '600', marginTop: spacing(2) },
+  landscapeName: { ...type.h3, fontWeight: '600' },
+  meta: { ...type.tiny, color: colors.contentMuted, marginTop: spacing(1) },
 });

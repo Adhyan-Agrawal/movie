@@ -4,6 +4,8 @@ import { Container } from '@/components/ui/Container';
 import { buttonClasses } from '@/components/ui/Button';
 import { Logo } from '@/components/ui/Logo';
 import { SignUpForm } from '@/features/auth/SignUpForm';
+import { features } from '@/lib/env';
+import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
 
 export const metadata: Metadata = {
   title: 'Create account',
@@ -20,14 +22,14 @@ export default function SignUpPage() {
             <Logo size={28} />
             <span>Lumora</span>
           </Link>
-          <h1 className="text-xl font-semibold text-content">Create your Lumora account</h1>
+          <h1 className="text-xl font-semibold text-content">{features.supabaseConfigured ? 'Create your Lumora account' : 'Accounts are unavailable'}</h1>
           <p className="text-sm text-content-muted">
-            One account for your profiles, watchlist, and viewing history.
+            {features.supabaseConfigured ? 'One account for your profiles, watchlist, and viewing history.' : 'You can still browse titles and watch as a guest.'}
           </p>
         </div>
 
         <div className="rounded-lg border border-border bg-surface/40 p-6">
-          <SignUpForm />
+          {features.supabaseConfigured ? <SignUpForm /> : <p role="status" className="text-sm leading-relaxed text-content-muted">{ACCOUNT_SERVICES_UNAVAILABLE}</p>}
         </div>
 
         <Link href="/" className={buttonClasses({ variant: 'ghost', size: 'sm', className: 'self-center' })}>

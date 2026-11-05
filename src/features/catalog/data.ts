@@ -1,3 +1,4 @@
+import { unstable_noStore as noStore } from 'next/cache';
 import { features } from '@/lib/env';
 import type { ContinueWatchingEntry, DiscoveryCollection, MediaRow, Title } from './types';
 import { listTitles } from './queries';
@@ -88,6 +89,8 @@ export function getPublicHomeData(): Promise<HomeData> {
 }
 
 export async function getHomeData(options: { personalize?: boolean } = {}): Promise<HomeData> {
+  const personalized = options.personalize !== false;
+  if (personalized) noStore();
   if (!features.supabaseConfigured && !features.tmdbConfigured) {
     return {
       hero: null,
@@ -108,9 +111,9 @@ export async function getHomeData(options: { personalize?: boolean } = {}): Prom
       // single biggest egress consumer.
       listTitles({ sort: 'trending', limit: 20 }),
       loadDiscoveryRows(listTitles),
-      options.personalize === false ? Promise.resolve([]) : loadContinueWatching(),
-      options.personalize === false ? Promise.resolve(false) : loadSignedIn(),
-      options.personalize === false ? Promise.resolve(null) : loadForYou(),
+      personalized ? loadContinueWatching() : Promise.resolve([]),
+      personalized ? loadSignedIn() : Promise.resolve(false),
+      personalized ? loadForYou() : Promise.resolve(null),
     ]);
     const titles = trending.length ? trending : discoveryRows.flatMap((row) => row.titles);
     if (!titles.length) {

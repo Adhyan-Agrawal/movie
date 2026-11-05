@@ -1,0 +1,4 @@
+# Local Watch Party Worker bindings only. Never put production secrets here.
+WATCH_PARTY_SECRET=local-only-watch-party-secret-change-this-value
+ALLOWED_ORIGINS=https://app.example.com
+WATCH_PARTY_PUBLIC_URL=https://watch-party.example.com

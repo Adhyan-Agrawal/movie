@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mock = vi.hoisted(() => ({ getSession: vi.fn(), fetch: vi.fn() }));
-vi.mock('../../mobile/src/lib/supabase', () => ({ supabase: { auth: { getSession: mock.getSession } } }));
+vi.mock('../../mobile/src/lib/supabase', () => ({ supabaseConfigured: true, supabase: { auth: { getSession: mock.getSession } } }));
 import { fetchIntroCatalog, resolvePlaybackDetails } from '../../mobile/src/lib/api';
 
 const origin = new URL(process.env.EXPO_PUBLIC_WEB_URL ?? 'https://hulkofyt.eu.org').origin;

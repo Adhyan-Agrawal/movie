@@ -37,7 +37,7 @@ export interface TitleFilters {
 
 /** Log a repository failure once (safe diagnostics only). */
 function warnFailure(fn: string, err: unknown): void {
-  console.warn(`catalog.${fn}: repository failed, returning empty result`, {
+  console.warn(`catalog.${fn}: read failed`, {
     message: err instanceof Error ? err.message : String(err),
   });
 }
@@ -61,23 +61,30 @@ async function withReadDeadline<T>(read: Promise<T>, timeoutMs = 8000): Promise<
 // React cache is scoped to the render request, including metadata. Repository
 // reads retain their RLS context and cannot leak drafts across requests.
 export const getTitleBySlug = cache(async (type: TitleType, slug: string): Promise<Title | null> => {
+  let publicFailure: unknown;
   if (features.tmdbConfigured) {
     try {
       const { getTmdbTitle } = await import('./tmdb-catalog');
       const title = await withReadDeadline(getTmdbTitle(type, slug));
       if (title) return title;
     } catch (err) {
+      publicFailure = err;
       warnFailure('getTmdbTitle', err);
     }
   }
-  if (!features.supabaseConfigured) return null;
-  try {
-    const { repoGetTitleBySlug } = await import('./repository');
-    return await repoGetTitleBySlug(type, slug);
-  } catch (err) {
-    warnFailure('getTitleBySlug', err);
+  if (!features.supabaseConfigured) {
+    if (publicFailure) throw publicFailure;
     return null;
   }
+  try {
+    const { repoGetTitleBySlug } = await import('./repository');
+    const title = await repoGetTitleBySlug(type, slug);
+    if (title || !publicFailure) return title;
+  } catch (err) {
+    warnFailure('getTitleBySlug', err);
+    throw publicFailure ?? err;
+  }
+  throw publicFailure;
 });
 
 export const getTitleById = cache(async (id: string): Promise<Title | null> => {

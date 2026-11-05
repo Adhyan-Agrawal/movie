@@ -68,9 +68,9 @@ jobs:
           TMDB_API_BASE_URL: ${{ vars.TMDB_API_BASE_URL || 'https://api.themoviedb.org/3' }}
           WYZIE_API_KEY: ${{ secrets.WYZIE_API_KEY }}
           WYZIE_SUBTITLE_TOKEN_SECRET: ${{ secrets.WYZIE_SUBTITLE_TOKEN_SECRET }}
-          VIDNEST_API_URL: ${{ vars.VIDNEST_API_URL || 'https://vidnest-pi.vercel.app' }}
           VIDNEST_API_SECRET: ${{ secrets.VIDNEST_API_SECRET }}
-          VIDNEST_CDN_BASE_URL: ${{ vars.VIDNEST_CDN_BASE_URL }}
+          WATCH_PARTY_SECRET: ${{ secrets.WATCH_PARTY_SECRET }}
+          WATCH_PARTY_WORKER_URL: ${{ vars.WATCH_PARTY_WORKER_URL }}
           ADSTERRA_KEY_LEADERBOARD: ${{ vars.ADSTERRA_KEY_LEADERBOARD }}
           ADSTERRA_KEY_RECTANGLE: ${{ vars.ADSTERRA_KEY_RECTANGLE }}
           ADSTERRA_KEY_PREROLL: ${{ vars.ADSTERRA_KEY_PREROLL }}
@@ -82,9 +82,8 @@ jobs:
           const fs = require('node:fs');
           const required = [
             'CLOUDFLARE_ACCOUNT_ID', 'CLOUDFLARE_API_TOKEN', 'NEXT_PUBLIC_APP_NAME',
-            'NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY',
-            'SUPABASE_SERVICE_ROLE_KEY', 'TMDB_API_KEY', 'TMDB_API_BASE_URL',
-            'VIDNEST_API_URL', 'VIDNEST_API_SECRET',
+            'NEXT_PUBLIC_APP_URL', 'TMDB_API_KEY', 'TMDB_API_BASE_URL',
+            'VIDNEST_API_SECRET',
           ];
           const missing = required.filter((name) => !process.env[name]?.trim());
           if (missing.length) throw new Error(`Missing required GitHub production variables/secrets: ${missing.join(', ')}`);
@@ -92,7 +91,7 @@ jobs:
             'NEXTJS_ENV', 'NEXT_PUBLIC_APP_NAME', 'NEXT_PUBLIC_APP_URL', 'NEXT_PUBLIC_SUPABASE_URL',
             'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY', 'TMDB_API_KEY',
             'TMDB_API_BASE_URL', 'WYZIE_API_KEY', 'WYZIE_SUBTITLE_TOKEN_SECRET',
-            'VIDNEST_API_URL', 'VIDNEST_API_SECRET', 'VIDNEST_CDN_BASE_URL',
+            'VIDNEST_API_SECRET', 'WATCH_PARTY_SECRET', 'WATCH_PARTY_WORKER_URL',
             'ADSTERRA_KEY_LEADERBOARD', 'ADSTERRA_KEY_RECTANGLE', 'ADSTERRA_KEY_PREROLL',
           ];
           for (const name of runtimeNames) {
@@ -106,12 +105,19 @@ jobs:
             return url;
           };
           httpsUrl('NEXT_PUBLIC_APP_URL', true);
-          httpsUrl('NEXT_PUBLIC_SUPABASE_URL', true);
+          const supabaseValues = ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
+          const configuredSupabaseValues = supabaseValues.filter((name) => Boolean(process.env[name]));
+          if (configuredSupabaseValues.length !== 0 && configuredSupabaseValues.length !== supabaseValues.length) {
+            throw new Error('All Supabase bindings must be configured together or all left empty');
+          }
+          if (configuredSupabaseValues.length) httpsUrl('NEXT_PUBLIC_SUPABASE_URL', true);
           httpsUrl('TMDB_API_BASE_URL');
-          httpsUrl('VIDNEST_API_URL', true);
-          if (process.env.VIDNEST_CDN_BASE_URL) {
-            const cdn = httpsUrl('VIDNEST_CDN_BASE_URL');
-            if (cdn.pathname !== '/media' || cdn.search) throw new Error('VIDNEST_CDN_BASE_URL must end exactly in /media');
+          const hasWatchPartySecret = Boolean(process.env.WATCH_PARTY_SECRET);
+          const hasWatchPartyUrl = Boolean(process.env.WATCH_PARTY_WORKER_URL);
+          if (hasWatchPartySecret !== hasWatchPartyUrl) throw new Error('WATCH_PARTY_SECRET and WATCH_PARTY_WORKER_URL must be configured together');
+          if (hasWatchPartySecret) {
+            if (process.env.WATCH_PARTY_SECRET.length < 32) throw new Error('WATCH_PARTY_SECRET must contain at least 32 characters');
+            httpsUrl('WATCH_PARTY_WORKER_URL', true);
           }
           const bindings = Object.fromEntries(runtimeNames.map((name) => [name, process.env[name] ?? '']));
           fs.writeFileSync(process.env.RUNTIME_SECRETS_FILE, JSON.stringify(bindings), { mode: 0o600 });

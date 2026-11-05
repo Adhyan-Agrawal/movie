@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { buttonClasses } from '@/components/ui/Button';
 import { toggleWatchlistAction } from '@/features/watchlist/actions';
+import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
 
 /**
  * Watchlist toggle (Spec Section 4). Optimistic UI backed by the real
@@ -19,12 +20,14 @@ export function WatchlistButton({
   initialInWatchlist = false,
   size = 'lg',
   className,
+  available = true,
 }: {
   titleId: string;
   titleName: string;
   initialInWatchlist?: boolean;
   size?: 'sm' | 'md' | 'lg';
   className?: string;
+  available?: boolean;
 }) {
   const [inList, setInList] = useState(initialInWatchlist);
   const [needsSignIn, setNeedsSignIn] = useState(false);
@@ -33,19 +36,23 @@ export function WatchlistButton({
   const pathname = usePathname();
 
   function toggle() {
+    if (!available || pending) return;
     const target = !inList;
     setInList(target); // optimistic
     setNeedsSignIn(false);
     setFailed(false);
     startTransition(async () => {
+      try {
       const result = await toggleWatchlistAction(titleId, !target);
       if (!result.ok) {
         setInList(!target); // roll back
-        if (!result.signedIn) setNeedsSignIn(true);
+        if (result.error) setFailed(true);
+        else if (!result.signedIn) setNeedsSignIn(true);
         else setFailed(true);
       } else {
         setInList(result.inWatchlist);
       }
+      } catch { setInList(!target); setFailed(true); }
     });
   }
 
@@ -56,7 +63,8 @@ export function WatchlistButton({
       <button
         type="button"
         onClick={toggle}
-        disabled={pending}
+        disabled={pending || !available}
+        title={!available ? ACCOUNT_SERVICES_UNAVAILABLE : undefined}
         aria-pressed={inList}
         aria-label={inList ? `Remove ${titleName} from your watchlist` : `Add ${titleName} to your watchlist`}
         className={cn(
@@ -66,7 +74,7 @@ export function WatchlistButton({
         )}
       >
         <span aria-hidden="true">{inList ? '✓' : '+'}</span>
-        {inList ? 'In Watchlist' : 'Watchlist'}
+        {!available ? 'Watchlist unavailable' : inList ? 'In Watchlist' : 'Watchlist'}
       </button>
       {needsSignIn ? (
         <span className="text-xs text-content-muted" role="status">

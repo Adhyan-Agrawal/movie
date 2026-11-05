@@ -7,6 +7,8 @@ import {
   normalizeTv,
   posterSrc,
   slugify,
+  tmdbImageUrl,
+  TMDB_IMAGE_ORIGIN,
   validYear,
   type TmdbCredits,
   type TmdbMovieDetail,
@@ -103,10 +105,26 @@ describe('validYear', () => {
 });
 
 describe('posterSrc', () => {
-  it('passes through http(s) urls only', () => {
+  it('passes through direct TMDB urls only', () => {
     expect(posterSrc('https://image.tmdb.org/t/p/w500/x.jpg')).toBe('https://image.tmdb.org/t/p/w500/x.jpg');
+    expect(posterSrc('https://example.com/x.jpg')).toBeNull();
+    expect(posterSrc('https://app.example/_next/image?url=https://image.tmdb.org/x.jpg')).toBeNull();
     expect(posterSrc('linear-gradient(...)')).toBeNull();
     expect(posterSrc(null)).toBeNull();
+  });
+});
+
+describe('tmdbImageUrl', () => {
+  it('always builds a direct image.tmdb.org URL without an optimizer path', () => {
+    const url = tmdbImageUrl('/poster_1.jpg', 'w500');
+    expect(url).toBe(`${TMDB_IMAGE_ORIGIN}/t/p/w500/poster_1.jpg`);
+    expect(new URL(url!).origin).toBe('https://image.tmdb.org');
+    expect(url).not.toContain('/_next/image');
+    expect(url).not.toContain('/cdn-cgi/image');
+  });
+
+  it.each(['https://evil.example/x.jpg', '/_next/image', '/cdn-cgi/image/x.jpg', 'data:image/png;base64,abc', '/nested/x.jpg'])('rejects non-TMDB image path %s', (path) => {
+    expect(tmdbImageUrl(path, 'w500')).toBeNull();
   });
 });
 

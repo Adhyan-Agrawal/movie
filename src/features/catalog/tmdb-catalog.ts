@@ -1,19 +1,159 @@
 import 'server-only';
 
 import { cache } from 'react';
+import { getCloudflareContext } from '@opennextjs/cloudflare';
 import { serverEnv } from '@/lib/env';
-import { normalizeCast, normalizeEpisodes, normalizeMovie, normalizeTv, slugify, validYear, type TmdbCredits, type TmdbMovieDetail, type TmdbSeasonDetail, type TmdbTvDetail } from './tmdb-normalize';
+import { normalizeCast, normalizeEpisodes, normalizeMovie, normalizeTv, slugify, tmdbImageUrl, validYear, type TmdbMovieDetail, type TmdbSeasonDetail, type TmdbTvDetail } from './tmdb-normalize';
 import type { CastMember, Episode, Season, Title, TitleType } from './types';
 import type { TitleFilters } from './queries';
 import { normalizeCountryFilter, normalizeLanguageFilter, providerGenre } from './discovery';
+import { PublicDataCache } from './public-data-cache';
 
-type TmdbListItem = { id: number; title?: string; name?: string; original_title?: string; original_name?: string; original_language?: string | null; origin_country?: string[]; overview?: string; release_date?: string; first_air_date?: string; poster_path?: string | null; backdrop_path?: string | null; vote_average?: number; genre_ids?: number[] };
-const IMAGE = 'https://image.tmdb.org/t/p';
+type TmdbListItem = { id: number; title?: string | null; name?: string | null; original_title?: string | null; original_name?: string | null; original_language?: string | null; origin_country?: string[] | null; overview?: string | null; release_date?: string | null; first_air_date?: string | null; poster_path?: string | null; backdrop_path?: string | null; vote_average?: number | null; genre_ids?: number[] | null };
 const CACHE_SECONDS = 21_600;
-// Only public provider requests are coalesced; Next owns the bounded-time cache.
-const pendingRequests = new Map<string, Promise<unknown>>();
-let activeRequests = 0;
-const waitingRequests: Array<() => void> = [];
+const LIST_CACHE_SECONDS = 3_600;
+const SEARCH_CACHE_SECONDS = 600;
+const REQUEST_TIMEOUT_MS = 6_000;
+const publicData = new PublicDataCache<unknown>({
+  maxEntries: 128,
+  maxPending: 48,
+  positiveTtlMs: CACHE_SECONDS * 1000,
+  negativeTtlMs: 5 * 60 * 1000,
+  staleTtlMs: 24 * 60 * 60 * 1000,
+  negativeStaleTtlMs: 10 * 60 * 1000,
+  errorRetryMs: 30 * 1000,
+});
+interface RequestState {
+  activeRequests: number;
+  waitingRequests: Array<{
+    resume: (release: () => void) => void;
+    timeout: ReturnType<typeof setTimeout>;
+  }>;
+}
+const localRequestState: RequestState = { activeRequests: 0, waitingRequests: [] };
+const workerRequestStates = new WeakMap<object, RequestState>();
+
+function requestState(): RequestState {
+  if (!('WebSocketPair' in globalThis)) return localRequestState;
+  const { ctx } = getCloudflareContext();
+  let state = workerRequestStates.get(ctx);
+  if (!state) {
+    state = { activeRequests: 0, waitingRequests: [] };
+    workerRequestStates.set(ctx, state);
+  }
+  return state;
+}
+
+function releaseRequestSlot(state: RequestState): void {
+  const waiting = state.waitingRequests.shift();
+  if (waiting) {
+    clearTimeout(waiting.timeout);
+    waiting.resume(() => releaseRequestSlot(state));
+  } else {
+    state.activeRequests--;
+  }
+}
+
+async function acquireRequestSlot(state: RequestState): Promise<() => void> {
+  if (state.activeRequests < 6) {
+    state.activeRequests++;
+    return () => releaseRequestSlot(state);
+  }
+  return new Promise((resume, reject) => {
+    const waiting = {
+      resume,
+      timeout: setTimeout(() => {
+        const index = state.waitingRequests.indexOf(waiting);
+        if (index !== -1) state.waitingRequests.splice(index, 1);
+        reject(new Error('TMDB request queue deadline exceeded'));
+      }, REQUEST_TIMEOUT_MS),
+    };
+    state.waitingRequests.push(waiting);
+  });
+}
+
+function cacheSeconds(path: string): number {
+  if (path.startsWith('/search/')) return SEARCH_CACHE_SECONDS;
+  if (path.startsWith('/discover/') || path.startsWith('/trending/')) return LIST_CACHE_SECONDS;
+  return CACHE_SECONDS;
+}
+
+function cacheTags(path: string): string[] {
+  const scope = path.split('/').filter(Boolean).slice(0, 2).join(':');
+  return ['tmdb-public', `tmdb:${scope || 'root'}`];
+}
+
+function isNegativePayload(value: unknown): boolean {
+  if (value === null) return true;
+  if (!value || typeof value !== 'object') return false;
+  const record = value as { results?: unknown; genres?: unknown };
+  return (Array.isArray(record.results) && record.results.length === 0)
+    || (Array.isArray(record.genres) && record.genres.length === 0);
+}
+
+function publicRequestKey(baseUrl: string, path: string, params: Record<string, string>): string {
+  const query = new URLSearchParams({ language: 'en-US' });
+  for (const key of Object.keys(params).sort()) if (params[key]) query.set(key, params[key]);
+  return `${baseUrl.replace(/\/$/, '')}${path}?${query}`;
+}
+
+/** Test/invalidation hook; no resolved value or failed response survives a clear. */
+export function clearTmdbPublicDataCache(): void {
+  publicData.clear();
+}
+
+class TmdbRequestError extends Error {
+  constructor(path: string, readonly status: number) {
+    super(`TMDB ${path} responded ${status}`);
+  }
+}
+
+function publicPayload(path: string, value: unknown): Record<string, unknown> {
+  const record = (value: unknown): Record<string, unknown> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  const rows = (value: unknown) => Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => Boolean(row) && typeof row === 'object' && !Array.isArray(row)) : [];
+  const text = (value: unknown) => typeof value === 'string' ? value : null;
+  const number = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
+  const data = record(value);
+  const invalid = () => new Error(`TMDB ${path} returned an invalid payload`);
+  if (data !== value || data.success === false) throw invalid();
+  if (/^\/(search|discover|trending)\//.test(path) && !Array.isArray(data.results)) throw invalid();
+  if (path.startsWith('/genre/')) {
+    if (!Array.isArray(data.genres)) throw invalid();
+    return { ...data, genres: rows(data.genres).filter((genre) => Number.isSafeInteger(genre.id) && typeof genre.name === 'string') };
+  }
+  const detail = /^\/(movie|tv)\/(\d+)$/.exec(path);
+  if (!detail) return data;
+  const name = data[detail[1] === 'movie' ? 'title' : 'name'];
+  if (data.id !== Number(detail[2]) || !Number.isSafeInteger(data.id) || typeof name !== 'string' || !name.trim()) throw invalid();
+
+  const normalized: Record<string, unknown> = { ...data, overview: text(data.overview) ?? '' };
+  for (const field of ['original_title', 'original_name', 'original_language', 'release_date', 'first_air_date', 'poster_path', 'backdrop_path', 'imdb_id']) {
+    normalized[field] = text(data[field]);
+  }
+  normalized.runtime = number(data.runtime);
+  normalized.vote_average = number(data.vote_average) !== null && Number(data.vote_average) <= 10 ? data.vote_average : null;
+  normalized.episode_run_time = Array.isArray(data.episode_run_time) ? data.episode_run_time.filter((runtime) => number(runtime) !== null) : [];
+  normalized.genres = rows(data.genres).filter((genre) => Number.isSafeInteger(genre.id) && typeof genre.name === 'string' && genre.name.trim());
+  normalized.origin_country = Array.isArray(data.origin_country) ? data.origin_country.filter((country) => typeof country === 'string') : undefined;
+  normalized.production_countries = rows(data.production_countries).filter((country) => typeof country.iso_3166_1 === 'string');
+  normalized.external_ids = { imdb_id: text(record(data.external_ids).imdb_id) };
+  normalized.release_dates = { results: rows(record(data.release_dates).results).map((country) => ({
+    iso_3166_1: text(country.iso_3166_1),
+    release_dates: rows(country.release_dates).map((release) => ({ certification: text(release.certification) })),
+  })) };
+  normalized.content_ratings = { results: rows(record(data.content_ratings).results).map((country) => ({
+    iso_3166_1: text(country.iso_3166_1), rating: text(country.rating),
+  })) };
+  normalized.credits = { cast: rows(record(data.credits).cast).filter((member) => Number.isSafeInteger(member.id) && typeof member.name === 'string').map((member) => ({
+    ...member, character: text(member.character), profile_path: text(member.profile_path), known_for_department: text(member.known_for_department),
+  })) };
+  normalized.videos = { results: rows(record(data.videos).results).filter((video) => typeof video.key === 'string' && /^[A-Za-z0-9_-]+$/.test(video.key)) };
+  normalized.seasons = rows(data.seasons).filter((season) => Number.isSafeInteger(season.season_number)).map((season) => ({
+    ...season, name: text(season.name), overview: text(season.overview), air_date: text(season.air_date),
+    poster_path: text(season.poster_path), episode_count: number(season.episode_count),
+  }));
+  return normalized;
+}
 
 async function request<T>(path: string, params: Record<string, string> = {}): Promise<T> {
   const { TMDB_API_BASE_URL, TMDB_API_KEY } = serverEnv();
@@ -22,35 +162,29 @@ async function request<T>(path: string, params: Record<string, string> = {}): Pr
   url.searchParams.set('api_key', TMDB_API_KEY);
   url.searchParams.set('language', 'en-US');
   for (const [key, value] of Object.entries(params)) if (value) url.searchParams.set(key, value);
-  const key = url.toString();
-  const pending = pendingRequests.get(key);
-  if (pending) return pending as Promise<T>;
-  if (pendingRequests.size >= 48) throw new Error('TMDB public request queue is full');
-  const read = (async () => {
-    if (activeRequests >= 6) {
-      await new Promise<void>((resolve, reject) => {
-        const resume = () => { clearTimeout(timeout); resolve(); };
-        const timeout = setTimeout(() => {
-          const index = waitingRequests.indexOf(resume);
-          if (index !== -1) waitingRequests.splice(index, 1);
-          reject(new Error('TMDB request queue deadline exceeded'));
-        }, 2500);
-        waitingRequests.push(resume);
-      });
-    } else activeRequests++;
+  const key = publicRequestKey(TMDB_API_BASE_URL, path, params);
+  const ttlSeconds = cacheSeconds(path);
+  const state = requestState();
+  return publicData.read(key, async () => {
+    const release = await acquireRequestSlot(state);
     try {
-      const response = await fetch(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(2500), next: { revalidate: CACHE_SECONDS } });
-      if (!response.ok) throw new Error(`TMDB ${path} responded ${response.status}`);
-      return await response.json() as T;
+      const response = await fetch(url, {
+        headers: { accept: 'application/json' },
+        credentials: 'omit',
+        redirect: 'manual',
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+        next: { revalidate: ttlSeconds, tags: cacheTags(path) },
+      });
+      if (!response.ok) throw new TmdbRequestError(path, response.status);
+      return publicPayload(path, await response.json());
     } finally {
-      const next = waitingRequests.shift();
-      if (next) next();
-      else activeRequests--;
+      release();
     }
-  })();
-  pendingRequests.set(key, read);
-  try { return await read; }
-  finally { pendingRequests.delete(key); }
+  }, {
+    scope: state,
+    isNegative: isNegativePayload,
+    positiveTtlMs: ttlSeconds * 1000,
+  }) as Promise<T>;
 }
 
 function maturity(value: string): Title['maturity'] {
@@ -65,7 +199,7 @@ function fromNormalized(value: NonNullable<ReturnType<typeof normalizeMovie>>): 
 
 function idFromSlug(slug: string): number | null {
   const id = Number(/-(\d+)$/.exec(slug)?.[1]);
-  return Number.isInteger(id) && id > 0 ? id : null;
+  return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
 const genreNames = cache(async (type: TitleType): Promise<Map<number, string>> => {
@@ -79,17 +213,61 @@ function listTitle(type: TitleType, item: TmdbListItem, genres: Map<number, stri
   const originalName = type === 'movie' ? item.original_title : item.original_name;
   const originalLanguage = item.original_language && /^[a-z]{2}$/i.test(item.original_language) ? item.original_language.toLowerCase() : undefined;
   const originCountries = item.origin_country?.map(normalizeCountryFilter).filter((value): value is string => Boolean(value));
-  return { id: `tmdb:${type}:${item.id}`, type, slug: `${slugify(name)}-${item.id}`, name, ...(originalName && originalName !== name ? { originalName } : {}), ...(originalLanguage ? { originalLanguage } : {}), ...(originCountries?.length ? { originCountries } : {}), synopsis: item.overview ?? '', releaseYear: validYear(date ?? null) ?? 0, maturity: type === 'tv' ? 'TV-14' : 'PG-13', genres: (item.genre_ids ?? []).map((id) => genres.get(id)).filter((name): name is string => Boolean(name)), ...(item.poster_path ? { posterUrl: `${IMAGE}/w500${item.poster_path}` } : {}), ...(item.backdrop_path ? { backdropUrl: `${IMAGE}/w1280${item.backdrop_path}` } : {}), ...(typeof item.vote_average === 'number' ? { score: Math.round(item.vote_average * 10) } : {}), tmdbId: String(item.id) };
+  const posterUrl = tmdbImageUrl(item.poster_path, 'w500');
+  const backdropUrl = tmdbImageUrl(item.backdrop_path, 'w1280');
+  return { id: `tmdb:${type}:${item.id}`, type, slug: `${slugify(name)}-${item.id}`, name, ...(originalName && originalName !== name ? { originalName } : {}), ...(originalLanguage ? { originalLanguage } : {}), ...(originCountries?.length ? { originCountries } : {}), synopsis: item.overview ?? '', releaseYear: validYear(date ?? null) ?? 0, maturity: type === 'tv' ? 'TV-14' : 'PG-13', genres: (item.genre_ids ?? []).map((id) => genres.get(id)).filter((genre): genre is string => Boolean(genre)), ...(posterUrl ? { posterUrl } : {}), ...(backdropUrl ? { backdropUrl } : {}), ...(typeof item.vote_average === 'number' ? { score: Math.round(item.vote_average * 10) } : {}), tmdbId: String(item.id) };
+}
+
+type TmdbTitleDetail = TmdbMovieDetail & TmdbTvDetail & {
+  original_language?: string | null;
+  origin_country?: string[];
+  production_countries?: Array<{ iso_3166_1: string }>;
+};
+
+function titleDetail(type: TitleType, id: string | number): Promise<TmdbTitleDetail> {
+  const append = type === 'movie' ? 'release_dates,external_ids,credits,videos' : 'content_ratings,external_ids,credits,videos';
+  return request<TmdbTitleDetail>(`/${type}/${id}`, { append_to_response: append });
+}
+
+export function getTmdbMovieMetadata(id: string): Promise<TmdbTitleDetail> {
+  if (!/^[1-9]\d{0,9}$/.test(id)) return Promise.reject(new Error('Invalid movie identifier.'));
+  return titleDetail('movie', id);
+}
+
+export function getTmdbShowMetadata(id: string): Promise<TmdbTitleDetail> {
+  if (!/^[1-9]\d{0,9}$/.test(id)) return Promise.reject(new Error('Invalid series identifier.'));
+  return titleDetail('tv', id);
+}
+
+export function getTmdbSeasonMetadata(id: string, season: number): Promise<TmdbSeasonDetail> {
+  if (!/^[1-9]\d{0,9}$/.test(id) || !Number.isSafeInteger(season) || season < 0 || season > 999) {
+    return Promise.reject(new Error('Invalid season identifier.'));
+  }
+  return request<TmdbSeasonDetail>(`/tv/${id}/season/${season}`);
 }
 
 export async function getTmdbTitle(type: TitleType, slug: string): Promise<Title | null> {
   const id = idFromSlug(slug);
   if (!id) return null;
-  const append = type === 'movie' ? 'release_dates,external_ids,credits,videos' : 'content_ratings,external_ids,credits,videos';
-  const data = await request<TmdbMovieDetail & TmdbTvDetail & { original_language?: string | null; origin_country?: string[]; production_countries?: Array<{ iso_3166_1: string }> }>(`/${type}/${id}`, { append_to_response: append });
+  let data: TmdbTitleDetail;
+  try {
+    data = await titleDetail(type, id);
+  } catch (error) {
+    if (error instanceof TmdbRequestError && error.status === 404) return null;
+    throw error;
+  }
   const normalized = type === 'movie' ? normalizeMovie(data) : normalizeTv(data);
-  if (!normalized) return null;
-  const title = fromNormalized(normalized);
+  // A confirmed title can legitimately have no synopsis. Keep its known listing
+  // fields instead of turning missing optional text into a false not-found.
+  const title = normalized ? fromNormalized(normalized) : listTitle(type, {
+    ...data, genre_ids: data.genres.map((genre) => genre.id),
+  }, new Map(data.genres.map((genre) => [genre.id, genre.name])));
+  if (!normalized) {
+    const runtime = type === 'movie' ? data.runtime : data.episode_run_time[0];
+    if (runtime != null && runtime > 0) title.runtimeMinutes = runtime;
+    const imdbId = data.imdb_id ?? data.external_ids?.imdb_id;
+    if (imdbId) title.imdbId = imdbId;
+  }
   const originalLanguage = data.original_language && /^[a-z]{2}$/i.test(data.original_language) ? data.original_language.toLowerCase() : undefined;
   if (originalLanguage) title.originalLanguage = originalLanguage;
   const countries = (data.origin_country ?? data.production_countries?.map((country) => country.iso_3166_1))?.map(normalizeCountryFilter).filter((value): value is string => Boolean(value));
@@ -170,7 +348,7 @@ export async function listTmdbGenres(): Promise<string[]> {
 
 export async function tmdbSeasons(title: Title): Promise<Season[]> {
   if (title.type !== 'tv' || !title.tmdbId) return [];
-  const detail = await request<TmdbTvDetail>(`/tv/${title.tmdbId}`);
+  const detail = await titleDetail('tv', title.tmdbId);
   return Promise.all((detail.seasons ?? []).filter((season) => season.season_number > 0).map(async (season) => {
     const data = await request<TmdbSeasonDetail>(`/tv/${title.tmdbId}/season/${season.season_number}`);
     const episodes = normalizeEpisodes(data).map((episode): Episode => ({ id: `tmdb:episode:${episode.tmdbId}`, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, name: episode.name, overview: episode.overview, airDate: episode.airDate, runtimeMinutes: episode.runtimeMinutes, stillUrl: episode.stillUrl }));
@@ -180,6 +358,6 @@ export async function tmdbSeasons(title: Title): Promise<Season[]> {
 
 export async function tmdbCast(title: Title): Promise<CastMember[]> {
   if (!title.tmdbId) return [];
-  const data = await request<TmdbCredits>(`/${title.type}/${title.tmdbId}/credits`);
-  return normalizeCast(data).map((member) => ({ personId: `tmdb:person:${member.tmdbId}`, name: member.name, character: member.character, profileUrl: member.profileUrl }));
+  const detail = await titleDetail(title.type, title.tmdbId);
+  return normalizeCast(detail.credits).map((member) => ({ personId: `tmdb:person:${member.tmdbId}`, name: member.name, character: member.character, profileUrl: member.profileUrl }));
 }
