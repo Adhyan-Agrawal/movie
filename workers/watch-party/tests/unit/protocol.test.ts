@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import mediaVectors from '../fixtures/media-identities.json';
 import {
   WATCH_PARTY_PROTOCOL_VERSION,
   bestClockOffsetMs,
@@ -28,6 +29,14 @@ const playback: WatchPartyPlaybackState = {
 };
 
 describe('Watch Party protocol v1', () => {
+  it('accepts only explicit canonical catalogue namespaces and preserves UUID identities', () => {
+    for (const media of mediaVectors.valid) expect(parseWatchPartyMediaIdentity(media)).toEqual(media);
+    for (const media of mediaVectors.invalid) expect(parseWatchPartyMediaIdentity(media)).toBeNull();
+    expect(sameWatchPartyMediaIdentity(
+      { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 2 },
+      { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 3 },
+    )).toBe(false);
+  });
   it('strictly validates versioned messages and media identities', () => {
     expect(parseWatchPartyMediaIdentity({ kind: 'movie', mediaId: TITLE_ID })).toEqual({
       kind: 'movie', mediaId: TITLE_ID,

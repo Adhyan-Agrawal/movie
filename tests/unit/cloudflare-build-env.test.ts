@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -7,8 +7,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   buildCloudflare, cloudflareBuild, createBuildEnvironment, createCommandEnvironment,
   loadCloudflareEnvironment, PUBLIC_BUILD_NAMES, sanitizeEnvModule, sanitizeGeneratedEnvironment,
+  validateBuiltEnvironment,
 } from '../../scripts/build-cloudflare.mjs';
-import { deployCloudflare } from '../../scripts/deploy-cloudflare.mjs';
+import { deployCloudflare, validateRuntimeBindings } from '../../scripts/deploy-cloudflare.mjs';
 
 const projectRoot = fileURLToPath(new URL('../../', import.meta.url));
 const modes = ['production', 'development', 'test'];
@@ -36,6 +37,7 @@ const privateValues = {
   VIDNEST_CDN_PUBLIC_URL: 'https://retired.fixture.dev/media',
 };
 const inherited = {
+  NODE_ENV: 'production' as const,
   PATH: process.env.PATH ?? process.env.Path ?? '',
   SystemRoot: process.env.SystemRoot ?? '',
   CLOUDFLARE_API_TOKEN: authValue,
@@ -66,6 +68,14 @@ function emitBuild(root: string) {
   writeFileSync(generatedPath(root), generatedSource());
 }
 
+function emitPartyCsp(root: string, connectSource: string) {
+  const directory = join(root, '.open-next', 'server-functions', 'default', '.next');
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'routes-manifest.json'), JSON.stringify({ headers: [{
+    source: '/((?!api/ad-frame).*)', headers: [{ key: 'Content-Security-Policy', value: `default-src 'self'; connect-src 'self' https: ${connectSource}` }],
+  }] }));
+}
+
 function assertPublicModule(source: string) {
   expect(source.includes(privateValue)).toBe(false);
   expect(source.includes(authValue)).toBe(false);
@@ -83,6 +93,8 @@ function assertPublicModule(source: string) {
 
 afterEach(() => {
   for (const root of directories.splice(0)) rmSync(root, { recursive: true, force: true });
+  vi.unstubAllEnvs();
+  vi.resetModules();
 });
 
 describe('Cloudflare build environment gate', () => {
@@ -252,13 +264,27 @@ describe('Cloudflare build environment gate', () => {
     expect(commands[1]).toContain('--dry-run');
   });
 
+  it('validates an existing artifact without requiring or loading new local public settings', () => {
+    const root = fixture();
+    emitBuild(root);
+    writeFileSync(join(root, '.env'), 'NEXT_PUBLIC_APP_NAME=\nNEXT_PUBLIC_APP_URL=not-an-origin\n');
+    let invoked = false;
+    cloudflareBuild(['--dry-run', '--skip-build'], { root, inherited, runCommand: (_label, _executable, args, environment) => {
+      expect(args).toContain('--dry-run');
+      expect(environment.NEXT_PUBLIC_APP_URL).toBeUndefined();
+      assertPublicModule(readFileSync(generatedPath(root), 'utf8'));
+      invoked = true;
+    } });
+    expect(invoked).toBe(true);
+  });
+
   it.each([
     ['--preserve-runtime'],
     ['--preserve-runtime', '--skip-build', '--secrets-file', 'runtime.json'],
     ['--preserve-runtime', '--skip-build', '--secrets-file=runtime.json'],
   ])('rejects an ambiguous runtime-preserving release before invoking any command', async (...args) => {
     let invoked = false;
-    await expect(deployCloudflare(args, { runCommand: () => { invoked = true; } }))
+    await expect(deployCloudflare(args, { root: fixture(), inherited, runCommand: () => { invoked = true; } }))
       .rejects.toThrow('Runtime-preserving deploy requires --skip-build without --secrets-file.');
     expect(invoked).toBe(false);
   });
@@ -315,7 +341,7 @@ describe('Cloudflare build environment gate', () => {
       let invoked = false;
       let message = '';
       try {
-        await deployCloudflare(args, { runCommand: () => { invoked = true; } });
+        await deployCloudflare(args, { root: fixture(), inherited, runCommand: () => { invoked = true; } });
       } catch (error) { message = (error as Error).message; }
       expect(invoked).toBe(false);
       expect(message === 'Invalid Cloudflare deploy options.').toBe(true);
@@ -352,5 +378,171 @@ describe('Cloudflare build environment gate', () => {
       throw new Error('Synthetic build failure.');
     } })).toThrow('Synthetic build failure.');
     assertPublicModule(readFileSync(generatedPath(root), 'utf8'));
+  });
+});
+
+describe('Cloudflare feature configuration boundaries', () => {
+  const configuration = { ...publicValues, ...privateValues };
+  const party = { WATCH_PARTY_WORKER_URL: 'https://party.fixture.dev', WATCH_PARTY_SECRET: 'synthetic-party-signing-key-at-least-32-characters' };
+
+  it('permits auth-only public Supabase configuration without granting service-role access', async () => {
+    const root = fixture();
+    emitBuild(root);
+    const inputPath = join(root, 'auth-only.json');
+    writeFileSync(inputPath, JSON.stringify({ ...configuration, SUPABASE_SERVICE_ROLE_KEY: '' }));
+    let uploaded = false;
+    await deployCloudflare(['--skip-build', '--secrets-file', inputPath], { root, inherited,
+      runCommand: (_label, _executable, args) => {
+        if (!args.includes('--secrets-file')) return;
+        const bindings = JSON.parse(readFileSync(args[args.indexOf('--secrets-file') + 1]!, 'utf8'));
+        expect(bindings.SUPABASE_SERVICE_ROLE_KEY === '').toBe(true);
+        expect(bindings.NEXT_PUBLIC_SUPABASE_ANON_KEY === publicValues.NEXT_PUBLIC_SUPABASE_ANON_KEY).toBe(true);
+        uploaded = true;
+      },
+    });
+    expect(uploaded).toBe(true);
+  });
+
+  it('keeps auth and guest Watch Party independent and rejects half-configured services', () => {
+    const noAuth = { ...configuration, NEXT_PUBLIC_SUPABASE_URL: '', NEXT_PUBLIC_SUPABASE_ANON_KEY: '', SUPABASE_SERVICE_ROLE_KEY: '' };
+    expect(validateRuntimeBindings(noAuth).NEXT_PUBLIC_SUPABASE_URL === '').toBe(true);
+    expect(validateRuntimeBindings({ ...noAuth, ...party }).WATCH_PARTY_SECRET === party.WATCH_PARTY_SECRET).toBe(true);
+    expect(() => validateRuntimeBindings({ ...configuration, NEXT_PUBLIC_SUPABASE_ANON_KEY: '' })).toThrow('configured together');
+    expect(() => validateRuntimeBindings({ ...configuration, NEXT_PUBLIC_SUPABASE_URL: '' })).toThrow('configured together');
+    expect(() => validateRuntimeBindings({ ...noAuth, SUPABASE_SERVICE_ROLE_KEY: privateValue })).toThrow('requires the public Supabase');
+    expect(() => validateRuntimeBindings({ ...configuration, WATCH_PARTY_SECRET: party.WATCH_PARTY_SECRET })).toThrow('configured together');
+    expect(() => validateRuntimeBindings({ ...configuration, WATCH_PARTY_WORKER_URL: party.WATCH_PARTY_WORKER_URL })).toThrow('configured together');
+  });
+
+  it('accepts public anon JWTs and publishable keys while defaulting only the runtime mode', () => {
+    for (const key of ['sb_publishable_synthetic_fixture',
+      `eyJhbGciOiJIUzI1NiJ9.${Buffer.from('{"role":"anon"}').toString('base64url')}.synthetic`]) {
+      const bindings = validateRuntimeBindings({ ...configuration, NEXTJS_ENV: '', NEXT_PUBLIC_SUPABASE_ANON_KEY: key });
+      expect(bindings.NEXT_PUBLIC_SUPABASE_ANON_KEY === key).toBe(true);
+      expect(bindings.NEXTJS_ENV === 'production').toBe(true);
+      expect(Object.hasOwn(bindings, 'UNKNOWN_PRIVATE_BINDING')).toBe(false);
+    }
+  });
+
+  it.each([
+    ['private key prefix', 'sb_secret_synthetic_fixture'],
+    ['privileged JWT', `eyJhbGciOiJIUzI1NiJ9.${Buffer.from('{"role":"service_role"}').toString('base64url')}.synthetic`],
+    ['same private key', privateValue],
+  ])('rejects a %s in the public Supabase field before building or uploading', async (_label, key) => {
+    const values = { ...configuration, NEXT_PUBLIC_SUPABASE_ANON_KEY: key };
+    expect(() => createBuildEnvironment(inherited, values, new Set())).toThrow('must not contain a private Supabase key');
+    const root = fixture();
+    const path = join(root, 'private-key.json');
+    writeFileSync(path, JSON.stringify(values));
+    let invoked = false;
+    let message = '';
+    try { await deployCloudflare(['--secrets-file', path], { root, inherited, runCommand: () => { invoked = true; } }); }
+    catch (error) { message = (error as Error).message; }
+    expect(invoked).toBe(false);
+    expect(message.includes(key)).toBe(false);
+  });
+
+  it.each([
+    ['insecure app URL', { NEXT_PUBLIC_APP_URL: 'http://app.fixture.dev' }],
+    ['private IP', { NEXT_PUBLIC_APP_URL: 'https://127.0.0.1' }],
+    ['local host', { NEXT_PUBLIC_APP_URL: 'https://localhost' }],
+    ['reserved host', { NEXT_PUBLIC_APP_URL: 'https://app.invalid' }],
+    ['credentials', { NEXT_PUBLIC_APP_URL: `https://viewer:${privateValue}@app.fixture.dev` }],
+    ['fragment', { NEXT_PUBLIC_APP_URL: `https://app.fixture.dev/#${privateValue}` }],
+    ['non-origin app URL', { NEXT_PUBLIC_APP_URL: 'https://app.fixture.dev/private' }],
+    ['invalid provider URL', { TMDB_API_BASE_URL: privateValue }],
+    ['insecure provider URL', { TMDB_API_BASE_URL: 'http://api.fixture.dev/3' }],
+    ['app whitespace', { NEXT_PUBLIC_APP_URL: ' https://app.fixture.dev' }],
+    ['embedded URL tab', { NEXT_PUBLIC_APP_URL: 'https://app.\tfixture.dev' }],
+    ['empty required key', { TMDB_API_KEY: '' }],
+    ['secret whitespace', { VIDNEST_API_SECRET: ' '.repeat(40) }],
+    ['short signing key', { VIDNEST_API_SECRET: 'short' }],
+    ['secret newline', { VIDNEST_API_SECRET: `${privateValue}\n` }],
+    ['runtime test mode', { NEXTJS_ENV: 'test' }],
+    ['runtime development mode', { NEXTJS_ENV: 'development' }],
+    ['party path', { ...party, WATCH_PARTY_WORKER_URL: 'https://party.fixture.dev/v1/ws' }],
+    ['short party key', { ...party, WATCH_PARTY_SECRET: 'short' }],
+    ['non-string binding', { TMDB_API_KEY: 123 }],
+  ])('rejects %s with a value-free validation error', (_label, overrides) => {
+    let message = '';
+    try { validateRuntimeBindings({ ...configuration, ...overrides }); } catch (error) { message = (error as Error).message; }
+    expect(Boolean(message)).toBe(true);
+    expect(message.includes(privateValue)).toBe(false);
+  });
+
+  it.each(PUBLIC_BUILD_NAMES)('blocks stale compiled %s before any command without rewriting public values', async (name) => {
+    const root = fixture();
+    emitBuild(root);
+    const stale = { ...publicValues, [name]: name === 'NEXT_PUBLIC_APP_NAME' ? 'Old Fixture' : '' };
+    writeFileSync(generatedPath(root), generatedSource(stale));
+    let invoked = false;
+    await expect(deployCloudflare(['--skip-build'], { root, inherited, runCommand: () => { invoked = true; } }))
+      .rejects.toThrow(`differs from runtime bindings: ${name}`);
+    expect(invoked).toBe(false);
+    expect(readFileSync(generatedPath(root), 'utf8') === generatedSource(stale)).toBe(true);
+  });
+
+  it('checks every generated mode and rechecks after dry-run before uploading', async () => {
+    const root = fixture();
+    emitBuild(root);
+    let uploaded = false;
+    await expect(deployCloudflare(['--skip-build'], { root, inherited, runCommand: (_label, _executable, args) => {
+      if (args.includes('--dry-run')) {
+        writeFileSync(generatedPath(root), modes.map((mode) => `export const ${mode} = ${JSON.stringify({
+          ...publicValues, NEXT_PUBLIC_APP_NAME: mode === 'test' ? 'Stale Fixture' : publicValues.NEXT_PUBLIC_APP_NAME,
+        })};\n`).join(''));
+      } else if (args[0] === 'deploy') uploaded = true;
+    } })).rejects.toThrow('differs from runtime bindings: NEXT_PUBLIC_APP_NAME');
+    expect(uploaded).toBe(false);
+  });
+
+  it('passes only the nonsecret party origin into the actual CSP build and keeps four public env exports', async () => {
+    const environment = createBuildEnvironment(inherited, { ...configuration, ...party }, new Set(Object.keys(party)));
+    expect(environment.WATCH_PARTY_WORKER_URL === party.WATCH_PARTY_WORKER_URL).toBe(true);
+    expect(environment.WATCH_PARTY_SECRET === '').toBe(true);
+    expect(sanitizeEnvModule(generatedSource({ ...configuration, ...party }), environment).includes('WATCH_PARTY')).toBe(false);
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WATCH_PARTY_WORKER_URL', environment.WATCH_PARTY_WORKER_URL);
+    const { default: nextConfig } = await import('../../next.config.mjs');
+    expect(typeof nextConfig.headers).toBe('function');
+    const rules = await nextConfig.headers!();
+    const policy = rules[0]!.headers.find((header) => header.key === 'Content-Security-Policy')?.value ?? '';
+    expect(policy.includes('wss://party.fixture.dev')).toBe(true);
+    expect(policy.includes(party.WATCH_PARTY_SECRET)).toBe(false);
+    expect(policy.includes("'unsafe-eval'")).toBe(false);
+  });
+
+  it('requires the configured party WebSocket origin in the bundled CSP, not a newer root manifest', async () => {
+    const root = fixture();
+    emitBuild(root);
+    const bindings = { ...configuration, ...party };
+    const path = join(root, 'party-runtime.json');
+    writeFileSync(path, JSON.stringify(bindings));
+    mkdirSync(join(root, '.next'));
+    writeFileSync(join(root, '.next', 'routes-manifest.json'), JSON.stringify({ headers: [{
+      source: '/((?!api/ad-frame).*)', headers: [{ key: 'Content-Security-Policy', value: "connect-src 'self' wss://party.fixture.dev" }],
+    }] }));
+    let invoked = false;
+    await expect(deployCloudflare(['--skip-build', '--secrets-file', path], { root, inherited, runCommand: () => { invoked = true; } }))
+      .rejects.toThrow('Built Watch Party CSP does not match');
+    expect(invoked).toBe(false);
+    emitPartyCsp(root, 'wss://other.fixture.dev');
+    expect(() => validateBuiltEnvironment(root, bindings)).toThrow('Built Watch Party CSP does not match');
+    emitPartyCsp(root, 'wss://party.fixture.dev');
+    expect(() => validateBuiltEnvironment(root, bindings)).not.toThrow();
+    await deployCloudflare(['--skip-build', '--secrets-file', path], { root, inherited, runCommand: () => { invoked = true; } });
+    expect(invoked).toBe(true);
+  });
+
+  it('keeps manual CI on the shared validator and supplies the same public/CSP build inputs', () => {
+    const workflow = readFileSync(join(projectRoot, '.github', 'workflows', 'deploy-lumora-cloudflare.yml'), 'utf8');
+    const buildStep = workflow.split('- name: Build OpenNext Worker')[1]!.split('- name: Validate Worker upload')[0]!;
+    for (const name of [...PUBLIC_BUILD_NAMES, 'WATCH_PARTY_WORKER_URL']) expect(buildStep.includes(`${name}:`)).toBe(true);
+    expect(buildStep.includes('secrets.')).toBe(false);
+    expect(workflow.includes('validateRuntimeBindings(process.env)')).toBe(true);
+    expect(workflow.includes('new URL(process.env')).toBe(false);
+    expect(workflow.includes('workflow_dispatch:')).toBe(true);
+    expect(/^\s+(?:push|pull_request):/m.test(workflow)).toBe(false);
+    expect(workflow.includes('workers/watch-party')).toBe(false);
   });
 });

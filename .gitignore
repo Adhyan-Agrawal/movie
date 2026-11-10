@@ -7,6 +7,7 @@
 # next.js
 /.next/
 /.open-next/
+/.netlify/
 /out/
 next-env.d.ts
 

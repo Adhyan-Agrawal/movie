@@ -63,6 +63,8 @@ export async function toggleWatchlistAction(
     .from('watchlists')
     .select('id')
     .eq('profile_id', profileId)
+    .eq('account_id', user.user.id)
+    .eq('name', 'My list')
     .maybeSingle();
   if (listErr || !list) {
     return {

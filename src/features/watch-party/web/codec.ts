@@ -182,6 +182,7 @@ function decodeSnapshot(value: Record<string, unknown>): WatchPartyServerMessage
   if (!self || self.role !== selfValue.role
     || !parsedParticipants.some((participant) => participant.participantId === room.hostParticipantId
       && participant.role === 'host')
+    || parsedParticipants.some((participant) => participant.role === 'host' && participant.participantId !== room.hostParticipantId)
     || new Set(parsedParticipants.map((participant) => participant.participantId)).size !== parsedParticipants.length
     || parsedChat.some((message, index) => message.revision > roomRevision
       || (index > 0 && message.revision <= parsedChat[index - 1]!.revision))) return null;
@@ -279,7 +280,8 @@ function validWebSocketUrl(value: unknown): value is string {
   try {
     const url = new URL(value);
     const local = url.protocol === 'ws:' && (url.hostname === 'localhost' || url.hostname === '127.0.0.1' || url.hostname === '[::1]');
-    return (url.protocol === 'wss:' || local) && !url.username && !url.password && !url.hash;
+    return (url.protocol === 'wss:' || local) && !url.username && !url.password && !url.hash
+      && !url.search && url.pathname === '/v1/ws';
   } catch {
     return false;
   }

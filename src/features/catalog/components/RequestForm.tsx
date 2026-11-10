@@ -1,6 +1,6 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { REQUEST_INITIAL_STATE, type TitleRequestState } from '../request-state';
@@ -17,15 +17,36 @@ const fieldClass =
  * signed-in session, so nothing sensitive ships to the browser.
  */
 export function RequestForm() {
+  // React requests a form reset even when an action returns a validation error.
+  const resetAllowed = useRef(false);
+  const formRef = useRef<HTMLFormElement>(null);
+  const errorRef = useRef<HTMLParagraphElement>(null);
   const [state, formAction, pending] = useActionState<TitleRequestState, FormData>(
-    submitTitleRequestAction,
+    async (previous, data) => {
+      resetAllowed.current = false;
+      try {
+        const result = await submitTitleRequestAction(previous, data);
+        resetAllowed.current = result.status === 'ok';
+        return result;
+      } catch {
+        return { status: 'error', message: 'Could not submit your request. Please try again.' };
+      }
+    },
     REQUEST_INITIAL_STATE,
   );
+  useEffect(() => {
+    const form = formRef.current;
+    // Reset runs during React's commit, while its delegated event handlers are disabled.
+    const onReset = (event: Event) => { if (!resetAllowed.current) event.preventDefault(); };
+    form?.addEventListener('reset', onReset);
+    return () => form?.removeEventListener('reset', onReset);
+  }, []);
+  useEffect(() => { if (state.status === 'error') errorRef.current?.focus(); }, [state]);
 
   return (
-    <form action={formAction} className="flex flex-col gap-4" noValidate>
+    <form ref={formRef} action={formAction} className="flex flex-col gap-4" noValidate>
       {state.status === 'error' ? (
-        <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
+        <p ref={errorRef} role="alert" tabIndex={-1} className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
           {state.message}
         </p>
       ) : null}
@@ -43,6 +64,7 @@ export function RequestForm() {
         <input
           id="request-title-name"
           name="title_name"
+          disabled={pending}
           type="text"
           required
           autoComplete="off"
@@ -55,7 +77,7 @@ export function RequestForm() {
         <label htmlFor="request-media-type" className="text-sm font-medium text-content">
           Type
         </label>
-        <select id="request-media-type" name="media_type" defaultValue="movie" className={fieldClass}>
+        <select id="request-media-type" name="media_type" defaultValue="movie" disabled={pending} className={fieldClass}>
           <option value="movie">Movie</option>
           <option value="tv">Series</option>
         </select>
@@ -68,6 +90,7 @@ export function RequestForm() {
         <input
           id="request-year"
           name="year"
+          disabled={pending}
           type="number"
           min={1878}
           max={2100}
@@ -83,6 +106,7 @@ export function RequestForm() {
         <textarea
           id="request-note"
           name="note"
+          disabled={pending}
           rows={3}
           className="rounded-md border border-border bg-surface-raised px-3 py-2 text-sm text-content placeholder:text-content-subtle focus-visible:outline-none focus-visible:border-primary"
           placeholder="Anything that helps us find the right title — director, language, why you want it…"

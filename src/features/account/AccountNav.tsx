@@ -41,6 +41,7 @@ export function AccountNav() {
             <li key={item.href} className="shrink-0">
               <Link
                 href={item.href}
+                prefetch={false}
                 aria-current={active ? 'page' : undefined}
                 className={cn(
                   'inline-flex h-11 items-center whitespace-nowrap border-b-2 px-3 text-sm font-medium transition-colors',

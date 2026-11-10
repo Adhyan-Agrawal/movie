@@ -42,7 +42,7 @@ export function ResumePlayButton({
   serverResume?: PlayResumeInfo | null;
   className?: string;
 }) {
-  const [guestResume, setGuestResume] = useState<PlayResumeInfo | null>(null);
+  const [guestResume, setGuestResume] = useState<(PlayResumeInfo & { baseHref: string }) | null>(null);
 
   useEffect(() => {
     if (signedIn) {
@@ -50,8 +50,8 @@ export function ResumePlayButton({
       return;
     }
     // Guest store entries carry season/episode for TV (see guest-watch.ts).
-    const slug = baseHref.split('/').pop() ?? '';
-    const entry = readGuestEntries().find((e) => e.slug === slug && (e.progress !== undefined || e.seasonNumber !== undefined));
+    const entry = readGuestEntries().find((e) => `/watch/${e.type}/${e.slug}` === baseHref
+      && (e.progress !== undefined || e.seasonNumber !== undefined));
     if (!entry) {
       setGuestResume(null);
       return;
@@ -59,6 +59,7 @@ export function ResumePlayButton({
     const isTv = entry.type === 'tv';
     const hasEp = entry.seasonNumber !== undefined && entry.episodeNumber !== undefined;
     setGuestResume({
+      baseHref,
       href:
         isTv && hasEp
           ? `/watch/tv/${entry.slug}?season=${entry.seasonNumber}&episode=${entry.episodeNumber}`
@@ -69,7 +70,7 @@ export function ResumePlayButton({
     });
   }, [signedIn, baseHref]);
 
-  const resume = signedIn ? (serverResume ?? null) : guestResume;
+  const resume = signedIn ? (serverResume ?? null) : guestResume?.baseHref === baseHref ? guestResume : null;
 
   if (!playable) {
     return (
@@ -95,7 +96,7 @@ export function ResumePlayButton({
       <Link
         href={primaryHref}
         prefetch={false}
-        aria-label={resume ? `Resume ${label}` : 'Play'}
+        aria-label={label}
         className={buttonClasses({ size: 'lg', variant: 'primary' })}
       >
         <span aria-hidden="true">{resume ? '↻' : '▶'}</span> {label}

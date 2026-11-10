@@ -1,5 +1,5 @@
+import Link from 'next/link';
 import { PageHeader } from '@/components/ui/PageHeader';
-import { EmptyState } from '@/components/ui/EmptyState';
 import { SettingsEditor } from '@/features/admin/SettingsEditor';
 import { listFeatureFlags, listSiteSettings } from '@/features/admin/queries';
 
@@ -8,29 +8,25 @@ export const metadata = {
   description: 'Site settings and feature flags.',
 };
 
-/** Settings (Spec Section 10). Real rows from site_settings and feature_flags
+/** Settings (Spec Section 10). Allowlisted public settings and feature_flags
  * (settings.manage / is_public policies). Edited in place through
  * permission-gated server actions; no fake toggles. */
 export default async function AdminSettingsPage() {
   const [settings, flags] = await Promise.all([listSiteSettings(), listFeatureFlags()]);
-  const empty = settings.length === 0 && flags.length === 0;
 
   return (
     <div className="py-6">
       <PageHeader
         title="Settings"
-        description="Site settings and feature flags from the database (settings.manage), editable in place. Values are stored as jsonb — booleans and numbers are typed, everything else is plain text."
+        description="Only explicitly supported public settings are editable here (settings.manage). Stored feature flags are managed separately below. Private and specialized settings are excluded."
       />
 
-      {empty ? (
-        <EmptyState
-          icon="⚙"
-          title="No settings or feature flags stored yet"
-          description="Values configured through the settings phase will appear here. Until then, app behavior comes from code defaults."
-        />
-      ) : (
-        <SettingsEditor settings={settings} flags={flags} />
-      )}
+      <p className="mb-6 text-sm text-content-muted">
+        Use <Link href="/admin/email" className="text-primary underline">Email settings</Link> for SMTP,{' '}
+        <Link href="/admin/email/templates" className="text-primary underline">Email templates</Link> for messages, and{' '}
+        <Link href="/admin/ads" className="text-primary underline">Ads</Link> for playback advertising. Each panel keeps its own permission checks.
+      </p>
+      <SettingsEditor settings={settings} flags={flags} />
     </div>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import Link from 'next/link';
 import Image from 'next/image';
 import { cn } from '@/lib/cn';
@@ -104,12 +104,15 @@ export function SeasonEpisodeList({
   // leads with real detail), falling back to the first season.
   const firstWithEpisodes = seasons.findIndex((s) => s.episodes.length > 0);
   const [selected, setSelected] = useState(firstWithEpisodes >= 0 ? firstWithEpisodes : 0);
-  const season = seasons[selected];
+  const tabs = useRef<(HTMLButtonElement | null)[]>([]);
+  const activeIndex = seasons[selected] ? selected : Math.max(0, firstWithEpisodes);
+  const season = seasons[activeIndex];
   if (!season) return null;
 
   const watchBaseHref = `/watch/tv/${titleSlug}`;
-  const selectNext = (dir: 1 | -1) => {
-    setSelected((prev) => Math.min(seasons.length - 1, Math.max(0, prev + dir)));
+  const selectTab = (index: number) => {
+    setSelected(index);
+    tabs.current[index]?.focus();
   };
 
   return (
@@ -121,22 +124,23 @@ export function SeasonEpisodeList({
         onKeyDown={(e) => {
           if (e.key === 'ArrowRight' || e.key === 'ArrowLeft') {
             e.preventDefault();
-            selectNext(e.key === 'ArrowRight' ? 1 : -1);
+            selectTab((activeIndex + (e.key === 'ArrowRight' ? 1 : -1) + seasons.length) % seasons.length);
           } else if (e.key === 'Home') {
             e.preventDefault();
-            setSelected(0);
+            selectTab(0);
           } else if (e.key === 'End') {
             e.preventDefault();
-            setSelected(seasons.length - 1);
+            selectTab(seasons.length - 1);
           }
         }}
       >
         {seasons.map((s, i) => {
           const label = s.name ?? `Season ${s.seasonNumber}`;
-          const active = i === selected;
+          const active = i === activeIndex;
           return (
             <button
               key={s.id}
+              ref={(node) => { tabs.current[i] = node; }}
               type="button"
               role="tab"
               id={`season-tab-${s.id}`}
@@ -160,6 +164,7 @@ export function SeasonEpisodeList({
 
       <div
         role="tabpanel"
+        tabIndex={0}
         id={`season-panel-${season.id}`}
         aria-labelledby={`season-tab-${season.id}`}
         className="flex flex-col gap-4"

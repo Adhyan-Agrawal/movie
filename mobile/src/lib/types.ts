@@ -121,6 +121,7 @@ export interface Subtitle extends MediaTrack {
 export interface DirectStream {
   id: string;
   url: string;
+  expiresAt?: number;
   startupLatencyMs?: number;
   qualities: Quality[];
   audioTracks: MediaTrack[];
@@ -130,6 +131,7 @@ export interface DirectStream {
 export interface StreamCatalog {
   streams: DirectStream[];
   recommendedStreamId?: string;
+  expiresAt?: number;
 }
 
 /** Optional bridge extensions. Native ad execution is supplied separately. */

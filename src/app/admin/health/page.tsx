@@ -1,10 +1,11 @@
-import { headers } from 'next/headers';
+import { notFound } from 'next/navigation';
 import { PageHeader } from '@/components/ui/PageHeader';
 import { Badge } from '@/components/ui/Badge';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { publicEnv } from '@/lib/env';
-import { getAdapter } from '@/lib/providers/registry';
-import { listProviderConfigs } from '@/lib/providers/config';
+import { GET as getHealthResponse } from '@/app/api/health/route';
+import { getAdapter, getActiveProviderConfigs, refreshProviderRegistry } from '@/lib/providers/registry';
+import { hasPermission } from '@/lib/permissions/check';
+import { PERMISSIONS } from '@/lib/permissions/permissions';
 import type { HealthResult, HealthStatus } from '@/lib/providers/types';
 import { listPlaybackReports, type AdminPlaybackReport } from '@/features/admin/queries';
 
@@ -24,15 +25,6 @@ interface HealthApiPayload {
   };
   error: unknown;
   requestId: string;
-}
-
-/** Resolve the self-URL for GET /api/health from the incoming request headers. */
-async function healthEndpointUrl(): Promise<URL> {
-  const h = await headers();
-  const host = h.get('x-forwarded-host') ?? h.get('host');
-  const protocol = h.get('x-forwarded-proto') ?? 'http';
-  const base = host ? `${protocol}://${host}` : publicEnv.NEXT_PUBLIC_APP_URL;
-  return new URL('/api/health', base);
 }
 
 function statusTone(status: string): 'success' | 'warning' | 'neutral' {
@@ -57,26 +49,27 @@ function healthStatusTone(status: HealthStatus): 'success' | 'warning' | 'danger
 
 /**
  * Health (Spec Sections 14/15). The live service state comes from the real
- * GET /api/health endpoint (fetched server-side as the signed-in admin, so the
- * health.read-gated detail is included), and playback-provider status comes
+ * GET /api/health handler in the current request context, and provider status comes
  * from an on-demand probe of each configured adapter (HEAD to its base origin
  * with its configured timeout). Every number here is a real measurement —
  * nothing is fabricated.
  */
 export default async function AdminHealthPage() {
+  if (!(await hasPermission(PERMISSIONS.HEALTH_READ))) notFound();
   let endpoint: HealthApiPayload | null = null;
   let endpointError: string | null = null;
   try {
-    const res = await fetch(await healthEndpointUrl(), { cache: 'no-store' });
+    const res = await getHealthResponse();
     if (!res.ok) throw new Error(`Health endpoint returned HTTP ${res.status}.`);
     endpoint = (await res.json()) as HealthApiPayload;
-  } catch (err) {
-    endpointError = err instanceof Error ? err.message : String(err);
+  } catch {
+    endpointError = 'The protected service-status check did not complete.';
   }
 
+  await refreshProviderRegistry(false);
   const providerChecks = (
     await Promise.all(
-      listProviderConfigs().map(async (config) => {
+      getActiveProviderConfigs().map(async (config) => {
         const adapter = getAdapter(config.id);
         if (!adapter) return null;
         try {
@@ -108,7 +101,7 @@ export default async function AdminHealthPage() {
     <div className="py-6">
       <PageHeader
         title="Health"
-        description="Live service status as reported by /api/health, plus on-demand playback-provider probes."
+        description="Application liveness and configured services, plus on-demand playback-provider reachability probes."
       />
 
       <section aria-label="Service health" className="flex flex-col gap-3">
@@ -118,7 +111,7 @@ export default async function AdminHealthPage() {
           <EmptyState
             tone="danger"
             icon="!"
-            title="Health endpoint unreachable"
+            title="Service status unavailable"
             description={`${endpointError} The page still rendered, so the app itself is up.`}
           />
         ) : endpoint ? (
@@ -153,7 +146,7 @@ export default async function AdminHealthPage() {
                             <code className="font-mono text-content">{component}</code>
                           </th>
                           <td className="px-3 py-2.5">
-                            <Badge tone={statusTone(status)}>{status}</Badge>
+                              <Badge tone={statusTone(status)}>{component !== 'app' && status === 'ok' ? 'configured' : status}</Badge>
                           </td>
                         </tr>
                       ))
@@ -177,7 +170,7 @@ export default async function AdminHealthPage() {
             </details>
 
             <p className="text-xs text-content-subtle">
-              The machine-readable endpoint is GET /api/health; the detailed dependency payload requires health.read.
+              The same protected handler serves GET /api/health. Configured services are not a guarantee of valid credentials or connectivity.
             </p>
           </>
         ) : null}
@@ -235,7 +228,7 @@ export default async function AdminHealthPage() {
         )}
         <p className="text-xs text-content-subtle">
           Probes run server-side on page load — a HEAD request to each provider&apos;s base origin with its configured
-          timeout.
+          timeout. Reachability is not proof of working video playback.
         </p>
       </section>
 

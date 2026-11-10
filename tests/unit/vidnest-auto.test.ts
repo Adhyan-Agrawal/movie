@@ -3,9 +3,10 @@ import { NextRequest } from 'next/server';
 import type { DirectStream } from '@/lib/providers/types';
 
 const lifetime = vi.hoisted(() => ({ pending: [] as Promise<unknown>[] }));
-vi.mock('@opennextjs/cloudflare', () => ({ getCloudflareContext: () => ({
-  ctx: { waitUntil(promise: Promise<unknown>) { lifetime.pending.push(promise); } },
-}) }));
+vi.mock('next/server', async (importOriginal) => ({
+  ...await importOriginal<typeof import('next/server')>(),
+  after(task: () => Promise<unknown>) { lifetime.pending.push(task()); },
+}));
 
 const SECRET = 'vidnest-auto-test-secret-at-least-32-characters';
 const MEDIA = '#EXTM3U\n#EXT-X-TARGETDURATION:6\n#EXTINF:6,\nsegment.ts\n';

@@ -1,9 +1,10 @@
 'use server';
 
-import { getSupabaseServerClient } from '@/lib/supabase/server';
 import type { TitleRequestState } from './request-state';
 import { features } from '@/lib/env';
 import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
+import { AUTH_EMAIL_UNVERIFIED } from '@/features/auth/state';
+import { getVerifiedAccount } from '@/features/auth/verified-account';
 
 /**
  * Request-a-title server action (Spec Section 4: "request a movie/series not
@@ -48,30 +49,23 @@ export async function submitTitleRequestAction(
   }
 
   try {
-  const db = await getSupabaseServerClient();
+    const account = await getVerifiedAccount();
+    if (account.status === 'unauthenticated') return { status: 'error', message: 'Sign in to request a title.' };
+    if (account.status === 'unverified') return { status: 'error', message: AUTH_EMAIL_UNVERIFIED };
+    if (account.status !== 'authenticated') return { status: 'error', message: ACCOUNT_SERVICES_UNAVAILABLE };
 
-  // Require a signed-in session up front — the form is a public route but the
-  // request is attributable to the viewer's account (RLS scopes it to them).
-  const { data: user, error: userError } = await db.auth.getUser();
-  if (userError || !user.user) {
-    return { status: 'error', message: 'Sign in to request a title.' };
-  }
-
-  // title_requests is not yet in the generated Supabase types (migration 0007
-  // landed ahead of the type regen) — cast pragmatically.
-  const { error } = await (db as any)
-    .from('title_requests')
-    .insert({
-    account_id: user.user.id,
-    title_name: titleName,
-    media_type: mediaType,
-    year,
-    note: note || null,
-  });
-  if (error) {
-    return { status: 'error', message: 'Could not save your request. Please try again.' };
-  }
-
-  return { status: 'ok', message: 'Got it — we will look into adding it.' };
+    // Keep the insert user-scoped; form fields never select the owning account.
+    // title_requests is not yet represented in the generated database types.
+    const { error } = await (account.client as any)
+      .from('title_requests')
+      .insert({
+        account_id: account.user.id,
+        title_name: titleName,
+        media_type: mediaType,
+        year,
+        note: note || null,
+      });
+    if (error) return { status: 'error', message: 'Could not save your request. Please try again.' };
+    return { status: 'ok', message: 'Got it — we will look into adding it.' };
   } catch { return { status: 'error', message: ACCOUNT_SERVICES_UNAVAILABLE }; }
 }

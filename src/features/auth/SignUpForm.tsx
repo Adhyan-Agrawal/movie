@@ -5,22 +5,25 @@ import Link from 'next/link';
 import { Button } from '@/components/ui/Button';
 import { AUTH_INITIAL_STATE, type AuthActionState } from '@/features/auth/state';
 import { signUpAction } from '@/features/auth/actions';
+import { safeAuthReturnPath } from '@/features/auth/return-path';
 
 /**
  * Sign-up form (Spec Section 8). Client component using useActionState for
  * inline, accessible validation, service errors, and confirmation instructions.
  */
-export function SignUpForm() {
+export function SignUpForm({ next, initialError }: { next?: string; initialError?: string }) {
   const [state, formAction, pending] = useActionState<AuthActionState, FormData>(
     signUpAction,
     AUTH_INITIAL_STATE,
   );
+  const returnPath = safeAuthReturnPath(next);
+  const error = state.error ?? (state.message ? null : initialError);
 
   return (
     <form action={formAction} className="flex flex-col gap-4" noValidate>
-      {state.error ? (
+      {error ? (
         <p role="alert" className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-sm text-danger">
-          {state.error}
+          {error}
         </p>
       ) : null}
       {state.message ? (
@@ -75,13 +78,15 @@ export function SignUpForm() {
         />
       </div>
 
+      <input type="hidden" name="next" value={returnPath} />
+
       <Button type="submit" disabled={pending} className="w-full">
         {pending ? 'Creating account…' : 'Create account'}
       </Button>
 
       <p className="text-center text-sm text-content-muted">
         Already have an account?{' '}
-        <Link href="/signin" className="text-primary hover:underline">
+        <Link href={`/signin?next=${encodeURIComponent(returnPath)}`} className="text-primary hover:underline">
           Sign in
         </Link>
       </p>

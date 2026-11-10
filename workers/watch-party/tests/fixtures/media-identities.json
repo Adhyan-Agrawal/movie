@@ -1,0 +1,36 @@
+{
+  "description": "v1 message envelope with explicit public TMDB media identities; updated clients required for TMDB rooms",
+  "valid": [
+    { "kind": "movie", "mediaId": "10000000-0000-4000-8000-000000000001" },
+    { "kind": "episode", "mediaId": "10000000-0000-4000-8000-000000000001", "episodeId": "10000000-0000-4000-8000-000000000002" },
+    { "kind": "episode", "mediaId": "10000000-0000-4000-8000-000000000001", "seasonNumber": 1, "episodeNumber": 2 },
+    { "kind": "movie", "mediaId": "tmdb:movie:27205" },
+    { "kind": "movie", "mediaId": "tmdb:movie:9999999999" },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 1, "episodeNumber": 2 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 0, "episodeNumber": 1 }
+  ],
+  "invalid": [
+    { "kind": "movie", "mediaId": "https://provider.example/video" },
+    { "kind": "movie", "mediaId": "tmdb:movie:27205", "url": "https://provider.example/video" },
+    { "kind": "movie", "mediaId": "tmdb:tv:1396" },
+    { "kind": "episode", "mediaId": "tmdb:movie:27205", "seasonNumber": 1, "episodeNumber": 2 },
+    { "kind": "movie", "mediaId": "tmdb:movie:0" },
+    { "kind": "movie", "mediaId": "tmdb:movie:027205" },
+    { "kind": "movie", "mediaId": "tmdb:movie:-1" },
+    { "kind": "movie", "mediaId": "tmdb:movie:1.2" },
+    { "kind": "movie", "mediaId": "tmdb:movie:10000000000" },
+    { "kind": "movie", "mediaId": "TMDB:movie:27205" },
+    { "kind": "movie", "mediaId": "tmdb:movie:27205 " },
+    { "kind": "movie", "mediaId": "tmdb:movie:27205?token=secret" },
+    { "kind": "movie", "mediaId": "tmdb:movie:27205/stream" },
+    { "kind": "movie", "mediaId": "tmdb:movie:27205", "seasonNumber": 1, "episodeNumber": 2 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396" },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 1 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": -1, "episodeNumber": 2 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 1, "episodeNumber": 0 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 1000, "episodeNumber": 2 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 1, "episodeNumber": 10000 },
+    { "kind": "episode", "mediaId": "tmdb:tv:1396", "seasonNumber": 1, "episodeNumber": 2, "episodeId": "10000000-0000-4000-8000-000000000002" },
+    { "kind": "episode", "mediaId": "10000000-0000-4000-8000-000000000001", "episodeId": "tmdb:tv:1396" }
+  ]
+}

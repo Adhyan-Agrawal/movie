@@ -7,7 +7,9 @@ import {
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   WATCH_PARTY_SUBPROTOCOL,
+  WATCH_PARTY_LIMITS,
   normalizeWatchPartyChat,
+  type WatchPartyMediaIdentity,
   type WatchPartyRoomSnapshotMessage,
   type WatchPartyServerMessage,
 } from '../../../../src/features/watch-party/protocol';
@@ -15,10 +17,13 @@ import {
   generateWatchPartyId,
   generateWatchPartyRoomCode,
   signWatchPartyToken,
+  verifyWatchPartyToken,
   watchPartySubprotocols,
   watchPartyTokenBase,
   type WatchPartyConnectTicketClaims,
 } from '../../../../src/features/watch-party/tickets';
+import worker from '../../src/index';
+import { decodeWatchPartyServerMessage } from '../../../../src/features/watch-party/web/codec';
 
 const SECRET = 'test-watch-party-secret-that-is-at-least-32-bytes';
 const ORIGIN = 'https://app.example.com';
@@ -65,7 +70,7 @@ class MessageReader {
   }
 }
 
-async function createTicket(options: { roomCode?: string; nowMs?: number } = {}): Promise<{
+async function createTicket(options: { roomCode?: string; nowMs?: number; media?: WatchPartyMediaIdentity } = {}): Promise<{
   token: string;
   claims: WatchPartyConnectTicketClaims;
 }> {
@@ -82,7 +87,7 @@ async function createTicket(options: { roomCode?: string; nowMs?: number } = {})
     kind: 'connect',
     action: 'create',
     role: 'host',
-    media: { kind: 'movie', mediaId: TITLE_ID },
+    media: options.media ?? { kind: 'movie', mediaId: TITLE_ID },
   };
   return { claims, token: await signWatchPartyToken(claims, SECRET) };
 }
@@ -171,9 +176,65 @@ describe('Watch Party Worker edge authentication', () => {
     expect(forbidden.status).toBe(403);
     expect((await errorBody(forbidden)).error.code).toBe('ORIGIN_FORBIDDEN');
   });
+
+  it('accepts the explicit React Native app origin but rejects foreign native origins and missing service configuration', async () => {
+    const created = await createTicket();
+    const native = await signWatchPartyToken({ ...created.claims, platform: 'android' }, SECRET);
+    expect((await exports.default.fetch(upgradeRequest(native, 'https://evil.example.com'))).status).toBe(403);
+    expect((await exports.default.fetch(upgradeRequest(native, 'null'))).status).toBe(403);
+    const connected = await connect(native);
+    expect(connected.snapshot.self.role).toBe('host');
+    const noOrigin = upgradeRequest(native); noOrigin.headers.delete('Origin');
+    const response = await exports.default.fetch(noOrigin);
+    expect(response.status).toBe(101);
+    response.webSocket!.accept(); openSockets.add(response.webSocket!);
+    const missing = await worker.fetch(upgradeRequest(created.token), { ...env, WATCH_PARTY_SECRET: '' });
+    expect(missing.status).toBe(503);
+    const invalid = await worker.fetch(upgradeRequest(created.token), { ...env, WATCH_PARTY_SECRET: `${SECRET}\n` });
+    expect(invalid.status).toBe(503);
+  });
 });
 
 describe('Watch Party room protocol', () => {
+  it('smokes public TMDB create, Android join, host-only controls, persisted episode state, resume and leave locally', async () => {
+    const created = await createTicket({ media: { kind: 'movie', mediaId: 'tmdb:movie:27205' } });
+    const host = await connect(created.token);
+    expect(decodeWatchPartyServerMessage(host.snapshot)).toMatchObject({ ok: true });
+    expect(host.snapshot.playback.media).toEqual({ kind: 'movie', mediaId: 'tmdb:movie:27205' });
+    const joined = await joinTicket(created.claims.roomCode);
+    const androidTicket = await signWatchPartyToken({ ...joined.claims, platform: 'android' }, SECRET);
+    const android = await connect(androidTicket);
+    expect(android.snapshot.self.role).toBe('member');
+    expect(decodeWatchPartyServerMessage(android.snapshot)).toMatchObject({ ok: true });
+    sendMessage(android.socket, { type: 'playback.command', requestId: 'tmdb-denied', baseRevision: 0, command: { kind: 'play' } });
+    expect((await android.messages.next('server.error', (message) => message.requestId === 'tmdb-denied')).code).toBe('HOST_REQUIRED');
+    sendMessage(host.socket, { type: 'playback.command', requestId: 'tmdb-seek', baseRevision: 0,
+      command: { kind: 'seek', positionSeconds: 42 } });
+    const seek = await android.messages.next('playback.state', (message) => message.playback.positionSeconds === 42);
+    const episode: WatchPartyMediaIdentity = { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 2 };
+    sendMessage(host.socket, { type: 'playback.command', requestId: 'tmdb-episode', baseRevision: seek.playback.revision,
+      command: { kind: 'media', media: episode } });
+    const switched = await android.messages.next('playback.state', (message) => message.playback.media.kind === 'episode');
+    expect(switched.playback.media).toEqual(episode);
+    expect(decodeWatchPartyServerMessage(switched)).toMatchObject({ ok: true });
+    android.socket.close(1000, 'reconnect'); openSockets.delete(android.socket);
+    await host.messages.next('presence.state', (message) => message.participants.some((participant) => participant.participantId === joined.claims.participantId && !participant.connected));
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await evictDurableObject(stub);
+    const token = await verifyWatchPartyToken(android.snapshot.self.resumeToken, SECRET, { expectedKind: 'resume' });
+    if (!token.ok || token.claims.kind !== 'resume') throw new Error('Expected valid Android resume token');
+    const resumed = await connect(await signWatchPartyToken({ ...watchPartyTokenBase({
+      roomCode: token.claims.roomCode, roomId: token.claims.roomId, participantId: token.claims.participantId,
+      displayName: token.claims.displayName, platform: 'android', ttlSeconds: 120,
+    }), kind: 'connect', action: 'resume', role: 'member' }, SECRET));
+    expect(resumed.snapshot.playback.media).toEqual(episode);
+    expect(resumed.snapshot.self.participantId).toBe(joined.claims.participantId);
+    sendMessage(resumed.socket, { type: 'room.leave', requestId: 'tmdb-member-leave' });
+    await resumed.messages.next('server.ack', (message) => message.requestId === 'tmdb-member-leave');
+    sendMessage(host.socket, { type: 'room.leave', requestId: 'tmdb-host-leave' });
+    await host.messages.next('room.closed');
+    expect((await exports.default.fetch(upgradeRequest(androidTicket))).status).not.toBe(101);
+  });
   it('coordinates create/join, host playback, chat, replay, reconnect, and explicit transfer', async () => {
     const created = await createTicket();
     const host = await connect(created.token);
@@ -288,6 +349,186 @@ describe('Watch Party room protocol', () => {
       command: { kind: 'play' },
     });
     expect((await host.messages.next('playback.state')).playback.mode).toBe('playing');
+  });
+
+  it('does not let an original join ticket resurrect an explicitly departed participant', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const joined = await joinTicket(created.claims.roomCode);
+    const member = await connect(joined.token);
+    sendMessage(member.socket, { type: 'room.leave', requestId: 'leave-member' });
+    await member.messages.next('server.ack', (message) => message.requestId === 'leave-member');
+    await host.messages.next('presence.state', (message) =>
+      !message.participants.some((participant) => participant.participantId === joined.claims.participantId));
+    await evictDurableObject(env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode));
+    const replay = await exports.default.fetch(upgradeRequest(joined.token));
+    expect(replay.status).toBe(403);
+    expect((await errorBody(replay)).error.code).toBe('PARTICIPANT_NOT_FOUND');
+  });
+
+  it('does not recreate a closed room by replaying its original create ticket', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    sendMessage(host.socket, { type: 'room.leave', requestId: 'leave-last-host' });
+    await host.messages.next('room.closed');
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await evictDurableObject(stub);
+    const replay = await exports.default.fetch(upgradeRequest(created.token));
+    expect(replay.status).toBe(403);
+    expect((await errorBody(replay)).error.code).toBe('ROOM_CLOSED');
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM room').one().count).toBe(0);
+    });
+  });
+
+  it('transfers an abandoned host to the first later member without a repeated past-due alarm', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    host.socket.close(1000, 'host offline');
+    openSockets.delete(host.socket);
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec('UPDATE room SET host_disconnect_deadline_ms = ?', Date.now() - 1);
+      await instance.alarm();
+      expect(await state.storage.getAlarm()).toBeGreaterThan(Date.now() + 1_000);
+    });
+    const joined = await joinTicket(created.claims.roomCode);
+    const member = await connect(joined.token);
+    expect(member.snapshot.self.role).toBe('host');
+    expect(member.snapshot.room.hostParticipantId).toBe(joined.claims.participantId);
+  });
+
+  it('refreshes only the requesting participant resume credential during a long session', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const joined = await joinTicket(created.claims.roomCode);
+    const member = await connect(joined.token);
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await runInDurableObject(stub, (_instance, state) => {
+      for (const socket of state.getWebSockets()) {
+        const attachment = socket.deserializeAttachment() as Record<string, unknown>;
+        if (attachment.participantId !== joined.claims.participantId) continue;
+        attachment.resumeIssuedAtMs = Date.now() - WATCH_PARTY_LIMITS.resumeTtlSeconds * 1_000;
+        socket.serializeAttachment(attachment);
+      }
+    });
+    sendMessage(member.socket, { type: 'client.ping', requestId: 'refresh-resume', clientSentAtMs: Date.now() });
+    await member.messages.next('server.pong', (message) => message.requestId === 'refresh-resume');
+    const refreshed = await member.messages.next('room.snapshot');
+    expect(refreshed.self.participantId).toBe(joined.claims.participantId);
+    expect(refreshed.self.resumeToken).not.toBe(member.snapshot.self.resumeToken);
+    expect(await verifyWatchPartyToken(refreshed.self.resumeToken, SECRET, { expectedKind: 'resume' }))
+      .toMatchObject({ ok: true, claims: { participantId: joined.claims.participantId, roomId: created.claims.roomId } });
+    expect(JSON.stringify(refreshed.participants)).not.toContain('wp1.');
+    expect(host.snapshot.self.resumeToken).not.toBe(refreshed.self.resumeToken);
+  });
+
+  it('isolates room identity and rejects messages after membership is removed', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const otherRoom = await createTicket();
+    const otherHost = await connect(otherRoom.token);
+    const crossed = await signWatchPartyToken({ ...watchPartyTokenBase({
+      roomCode: created.claims.roomCode, roomId: otherRoom.claims.roomId,
+      participantId: otherHost.snapshot.self.participantId, displayName: 'Host', platform: 'web', ttlSeconds: 120,
+    }), kind: 'connect', action: 'resume', role: 'member' }, SECRET);
+    expect(await verifyWatchPartyToken(crossed, SECRET, { expectedKind: 'connect' })).toMatchObject({ ok: true });
+    const crossedResponse = await exports.default.fetch(upgradeRequest(crossed));
+    expect((await errorBody(crossedResponse)).error.code).toBe('INVALID_TICKET');
+    expect(crossedResponse.status).toBe(401);
+
+    const joined = await joinTicket(created.claims.roomCode);
+    const member = await connect(joined.token);
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await runInDurableObject(stub, (_instance, state) => {
+      state.storage.sql.exec('DELETE FROM participants WHERE participant_id = ?', joined.claims.participantId);
+    });
+    sendMessage(member.socket, { type: 'chat.send', requestId: 'removed-chat', text: 'not a member' });
+    expect((await member.messages.next('server.error', (message) => message.requestId === 'removed-chat')).code)
+      .toBe('PARTICIPANT_NOT_FOUND');
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM chat').one().count).toBe(0);
+    });
+    sendMessage(host.socket, { type: 'client.sync', requestId: 'isolated-state', sinceRevision: 0 });
+    const replay = await host.messages.next('room.replay');
+    expect(JSON.stringify(replay)).not.toContain(otherHost.snapshot.self.participantId);
+    expect(JSON.stringify(replay)).not.toContain(otherHost.snapshot.self.resumeToken);
+  });
+
+  it('retains admission tombstones through command-history pruning, then expires them', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await runInDurableObject(stub, (_instance, state) => {
+      for (let index = 0; index < 410; index += 1) {
+        state.storage.sql.exec('INSERT INTO requests (participant_id, request_id, revision) VALUES (?, ?, ?)',
+          created.claims.participantId, `old-${index}`, 0);
+      }
+    });
+    sendMessage(host.socket, { type: 'playback.command', requestId: 'prune-requests', baseRevision: 0,
+      command: { kind: 'pause' } });
+    await host.messages.next('server.ack', (message) => message.requestId === 'prune-requests');
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM requests WHERE request_id LIKE 'ticket:%'")
+        .one().count).toBe(1);
+      expect(state.storage.sql.exec<{ count: number }>("SELECT COUNT(*) AS count FROM requests WHERE request_id NOT LIKE 'ticket:%'")
+        .one().count).toBeLessThanOrEqual(WATCH_PARTY_LIMITS.replayHistory * 2);
+    });
+    sendMessage(host.socket, { type: 'room.leave', requestId: 'clear-room' });
+    await host.messages.next('room.closed');
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec('UPDATE requests SET revision = ?', Date.now() - 1);
+      await instance.alarm();
+      expect(state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM requests').one().count).toBe(0);
+      expect(await state.storage.getAlarm()).toBeNull();
+    });
+  });
+
+  it('keeps a multibyte chat snapshot within the web frame bound without deleting durable chat', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await runInDurableObject(stub, (_instance, state) => {
+      for (let index = 0; index < WATCH_PARTY_LIMITS.chatHistory; index += 1) {
+        state.storage.sql.exec(`INSERT INTO chat (message_id, participant_id, client_message_id, display_name, text, server_time_ms, revision)
+          VALUES (?, ?, ?, ?, ?, ?, ?)`, `chat-${index}`, created.claims.participantId, `chat-${index}`, 'Host',
+        String.fromCodePoint(0x1f30a).repeat(WATCH_PARTY_LIMITS.maxChatCharacters), Date.now(), index + 2);
+      }
+      state.storage.sql.exec('UPDATE room SET revision = ?', WATCH_PARTY_LIMITS.chatHistory + 1);
+    });
+    sendMessage(host.socket, { type: 'client.sync', requestId: 'large-snapshot', sinceRevision: 1 });
+    const bounded = await host.messages.next('room.snapshot');
+    expect(new TextEncoder().encode(JSON.stringify(bounded)).byteLength).toBeLessThanOrEqual(WATCH_PARTY_LIMITS.maxServerMessageBytes);
+    expect(bounded.chat.length).toBeGreaterThan(0);
+    expect(bounded.chat.length).toBeLessThan(WATCH_PARTY_LIMITS.chatHistory);
+    expect(bounded.chat.at(-1)?.revision).toBe(WATCH_PARTY_LIMITS.chatHistory + 1);
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(state.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM chat').one().count)
+        .toBe(WATCH_PARTY_LIMITS.chatHistory);
+    });
+  });
+
+  it('falls back to a snapshot when a retained presence replay exceeds the frame bound', async () => {
+    const created = await createTicket();
+    const host = await connect(created.token);
+    const stub = env.WATCH_PARTY_ROOMS.getByName(created.claims.roomCode);
+    await runInDurableObject(stub, (_instance, state) => {
+      const participants = Array.from({ length: WATCH_PARTY_LIMITS.maxParticipants }, () => ({
+        participantId: generateWatchPartyId(), displayName: 'Viewer'.repeat(6), role: 'member',
+        joinedAtMs: Date.now(), lastSeenAtMs: Date.now(), connected: true,
+      }));
+      participants[0] = { ...participants[0]!, participantId: created.claims.participantId, role: 'host' };
+      for (let revision = 2; revision <= 61; revision += 1) {
+        state.storage.sql.exec('INSERT INTO events (revision, server_time_ms, payload_json) VALUES (?, ?, ?)', revision, Date.now(),
+          JSON.stringify({ v: 1, type: 'presence.state', revision, serverTimeMs: Date.now(), participants,
+            hostParticipantId: created.claims.participantId }));
+      }
+      state.storage.sql.exec('UPDATE room SET revision = 61');
+    });
+    sendMessage(host.socket, { type: 'client.sync', requestId: 'large-replay', sinceRevision: 1 });
+    const bounded = await host.messages.next('room.snapshot');
+    expect(bounded.room.revision).toBe(61);
+    expect(new TextEncoder().encode(JSON.stringify(bounded)).byteLength).toBeLessThanOrEqual(WATCH_PARTY_LIMITS.maxServerMessageBytes);
   });
 
   it('keeps source, ad, and background freezes until an explicit current-revision play', async () => {

@@ -3,6 +3,11 @@ import { readFileSync } from 'node:fs';
 import type { CastingHandle, CastingProgress } from '@/features/player/casting';
 import type { NativePlayerProps } from '@/features/player/NativePlayer';
 import type { DirectStream } from '@/lib/providers/types';
+import type { PartyPlayerIntent, PartyPlayerPort, PartyPlayerTarget } from '@/features/watch-party/web/player-port';
+import type { WatchPartyMediaIdentity } from '@/features/watch-party/protocol';
+import { readConsent, writeConsent } from '@/lib/consent';
+import type { VastAdBreakProps } from '@/features/ads/vast/VastAdBreak';
+import { DEFAULT_SETTINGS } from '@/features/account/types';
 
 // A commit/effect harness exercises the mounted component without a DOM dependency or network.
 const harness = vi.hoisted(() => ({
@@ -10,7 +15,8 @@ const harness = vi.hoisted(() => ({
   cursor: 0, dirty: false, effects: [] as Array<() => void>,
   players: [] as any[], events: [] as string[], checkpoint: null as any, createFailures: 0,
   write: vi.fn(), report: vi.fn(), casting: vi.fn(), adUpdate: vi.fn(), fetch: vi.fn(),
-  storageGet: vi.fn(), storageSet: vi.fn(), exitPictureInPicture: vi.fn(), navigate: vi.fn(),
+  storageGet: vi.fn(), storageSet: vi.fn(), storageRemove: vi.fn(), exitPictureInPicture: vi.fn(), navigate: vi.fn(),
+  consentRaw: null as string | null, mountVast: false, tracking: [] as string[],
   receiverProgress: null as ((progress: CastingProgress) => void) | null,
   receiverDisconnect: null as (() => void) | null,
 }));
@@ -55,7 +61,6 @@ vi.mock('@/features/playback/playback-checkpoint', () => ({
   writePlaybackCheckpoint: harness.write, markPlaybackCheckpointSynced: vi.fn(),
 }));
 vi.mock('@/features/player/fullscreen-orientation', () => ({ createFullscreenOrientation: () => ({ setFullscreen: vi.fn(), dispose: vi.fn() }) }));
-vi.mock('@/components/consent/ConsentBanner', () => ({ readConsent: () => ({ ads: true }) }));
 vi.mock('@/features/ads/vast/VastAdBreak', () => ({ VastAdBreak: () => null }));
 vi.mock('@/features/player/casting', () => ({ requestCasting: harness.casting }));
 vi.mock('@/features/ads/vast/scheduler', async () => {
@@ -88,6 +93,7 @@ vi.mock('video.js', () => ({ default: (_element: unknown, options: any) => {
     on(event: string | string[], listener: () => void) {
       for (const key of typeof event === 'string' ? [event] : event) listeners.set(key, [...(listeners.get(key) ?? []), listener]);
     },
+    off(event: string, listener: () => void) { listeners.set(event, (listeners.get(event) ?? []).filter((value) => value !== listener)); },
     el: () => element, qualityLevels: () => qualityList, audioTracks: () => audioList, textTracks: () => textList,
     currentTime: vi.fn((position?: number) => {
       if (position === undefined) return player.position;
@@ -99,9 +105,12 @@ vi.mock('video.js', () => ({ default: (_element: unknown, options: any) => {
     duration: () => player.seconds, paused: () => player.stopped, seeking: () => player.isSeeking, ended: () => player.hasEnded,
     readyState: () => player.readiness, isDisposed: () => player.disposed,
     error: (failure?: unknown) => { if (failure !== undefined) player.failure = failure; return player.failure; },
-    playbackRate: (rate?: number) => { if (rate !== undefined) player.rate = rate; return player.rate; },
+    playbackRate: (rate?: number) => {
+      if (rate !== undefined && rate !== player.rate) { player.rate = rate; player.emit('ratechange'); }
+      return player.rate;
+    },
     pause: vi.fn(() => { player.stopped = true; player.emit('pause'); }),
-    play: vi.fn(async () => { player.stopped = false; player.emit('playing'); }),
+    play: vi.fn(async () => { player.stopped = false; player.emit('play'); player.emit('playing'); }),
     src: vi.fn((source: { src: string }) => {
       player.url = source.src; player.readiness = 0; player.failure = null;
       player.position = 0; player.rate = 1; player.stopped = true;
@@ -171,6 +180,17 @@ class FakeElement {
   querySelector() { return video; }
 }
 class FakeVideo extends FakeElement { controlsList = { add: vi.fn() }; disablePictureInPicture = false; playsInline = false; }
+class AdVideo extends FakeElement {
+  src = ''; currentTime = 0; volume = 1; muted = false;
+  play = vi.fn(async () => {}); pause = vi.fn(); load = vi.fn();
+  removeAttribute(name: string) { this.attributes.delete(name); if (name === 'src') this.src = ''; }
+}
+const CONSENT_KEY = 'lumora.consent.v1';
+const AD_GRANT = { necessary: true as const, analytics: false, ads: true, decidedAt: '2026-11-07T12:00:00.000Z' };
+let actualVast: (props: VastAdBreakProps) => unknown;
+let adKey: string | null = null;
+let adTree: any = null;
+let adVideo: AdVideo | null = null;
 let video: FakeVideo;
 let fakeDocument: Record<string, any>;
 let NativePlayer: typeof import('@/features/player/NativePlayer')['NativePlayer'];
@@ -196,6 +216,17 @@ function button() { return nodes().find((node) => node.type === 'button' && node
 function render() {
   harness.cursor = 0; harness.dirty = false;
   tree = NativePlayer(props);
+  const parentSlots = harness.cursor;
+  const ad = harness.mountVast ? nodes().find((node) => node.props?.creative && node.props?.onDone) : undefined;
+  if ((ad?.key ?? null) !== adKey) {
+    for (const slot of harness.slots.slice(parentSlots)) slot?.cleanup?.();
+    harness.slots.length = parentSlots;
+    adKey = ad?.key ?? null;
+    adVideo = ad ? new AdVideo() : null;
+  }
+  adTree = ad ? actualVast(ad.props) : null;
+  const adElement = nodes(adTree).find((node) => node.type === 'video');
+  if (adElement) adElement.props.ref.current = adVideo;
   for (const node of nodes()) {
     if (node.props?.['data-vjs-player'] !== undefined) node.props.ref.current = container;
     if (node.type === 'a' && node.props?.['data-player-up-next'] !== undefined && node.props.ref) {
@@ -267,16 +298,28 @@ beforeEach(async () => {
   harness.slots = []; harness.effects = []; harness.players = []; harness.cursor = 0;
   harness.dirty = false; harness.events = []; harness.checkpoint = null; harness.receiverProgress = null; harness.receiverDisconnect = null; harness.createFailures = 0;
   vi.clearAllMocks(); vi.useFakeTimers();
+  harness.mountVast = false; harness.tracking = []; adKey = null; adTree = null; adVideo = null;
+  harness.consentRaw = JSON.stringify(AD_GRANT);
   harness.report.mockResolvedValue({ ok: false });
   harness.fetch.mockResolvedValue(response({ startSeconds: 0, endSeconds: 10.25 }));
   harness.casting.mockResolvedValue(null);
-  harness.storageGet.mockReturnValue(null);
+  harness.storageGet.mockReset().mockImplementation((key: string) => key === CONSENT_KEY ? harness.consentRaw : null);
+  harness.storageSet.mockReset().mockImplementation((key: string, value: string) => { if (key === CONSENT_KEY) harness.consentRaw = value; });
+  harness.storageRemove.mockReset().mockImplementation((key: string) => { if (key === CONSENT_KEY) harness.consentRaw = null; });
   video = new FakeVideo();
   vi.stubGlobal('fetch', harness.fetch);
   vi.stubGlobal('Element', FakeElement); vi.stubGlobal('HTMLVideoElement', FakeVideo);
   fakeDocument = { createElement: () => new FakeElement(), visibilityState: 'visible', activeElement: null, pictureInPictureEnabled: false, pictureInPictureElement: null, exitPictureInPicture: harness.exitPictureInPicture, addEventListener: vi.fn(), removeEventListener: vi.fn() };
   vi.stubGlobal('document', fakeDocument);
-  vi.stubGlobal('window', { location: { href: 'https://movies.example/watch', origin: 'https://movies.example' }, localStorage: { getItem: harness.storageGet, setItem: harness.storageSet }, addEventListener: vi.fn(), removeEventListener: vi.fn() });
+  const consentEvents = new EventTarget();
+  vi.stubGlobal('window', { location: { href: 'https://movies.example/watch', origin: 'https://movies.example' },
+    localStorage: { getItem: harness.storageGet, setItem: harness.storageSet, removeItem: harness.storageRemove },
+    addEventListener: vi.fn(consentEvents.addEventListener.bind(consentEvents)),
+    removeEventListener: vi.fn(consentEvents.removeEventListener.bind(consentEvents)),
+    dispatchEvent: consentEvents.dispatchEvent.bind(consentEvents) });
+  vi.stubGlobal('Image', class { referrerPolicy = ''; set src(value: string) { harness.tracking.push(value); } });
+  writeConsent(AD_GRANT);
+  harness.storageGet.mockClear(); harness.storageSet.mockClear();
   vi.stubGlobal('navigator', { maxTouchPoints: 0, onLine: true });
   ({ NativePlayer } = await import('@/features/player/NativePlayer'));
   props = { source: { url: '/movie.mp4', kind: 'mp4' }, introCatalogUrl: INTRO_URL, titleId: 'fixture', titleSlug: 'fixture', viewerKey: 'guest' };
@@ -285,6 +328,508 @@ beforeEach(async () => {
 afterEach(() => {
   for (const slot of harness.slots) slot?.cleanup?.();
   vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals();
+});
+
+describe('native account language and caption defaults', () => {
+  const owner = '10000000-0000-4000-8000-000000000001';
+  const saved = (language = 'en', captions = true) => ({ accountId: owner,
+    settings: { ...DEFAULT_SETTINGS, language, captions, reducedMotion: true }, hasSavedPreferences: true });
+  async function mount(language = 'en', captions = true, viewerKey = `account:${owner}:profile:one`) {
+    props = { ...props, viewerKey, accountPreferences: saved(language, captions) }; await remount();
+  }
+  function tracks() {
+    const english = { id: 'en', label: 'English', language: 'eng-US', enabled: false };
+    const hindi = { id: 'hi', label: 'Hindi', language: 'hi', enabled: true };
+    player().audioList[0] = english; player().audioList[1] = hindi; player().audioList.length = 2;
+    const captions = installSubtitle();
+    return { english, hindi, captions };
+  }
+
+  it('applies offered audio/captions without restarting media, seeking, or changing a party timeline', async () => {
+    await mount(); const installed = tracks(); const sources = player().src.mock.calls.length;
+    await ready(24, 120);
+    expect(installed.english.enabled).toBe(true); expect(installed.hindi.enabled).toBe(false);
+    expect(installed.captions.mode).toBe('hidden');
+    expect(player().addRemoteTextTrack).toHaveBeenCalledWith(expect.objectContaining({ label: 'Lumora subtitle presentation' }), true);
+    expect(player().src).toHaveBeenCalledTimes(sources); expect(player().position).toBe(24);
+    expect(tree.props['data-viewing-motion']).toBe('reduce');
+  });
+
+  it('keeps automatic captions off without downloading sidecar payloads', async () => {
+    await mount('en', false); const installed = tracks(); installed.captions.mode = 'showing';
+    props = { ...props, subtitleCatalogUrl: '/synthetic-subtitles' };
+    harness.fetch.mockResolvedValue(response({ tracks: [{ id: 'sidecar', label: 'English', language: 'en', kind: 'subtitles', url: '/synthetic.vtt' }] }));
+    render(); await pump(); await ready();
+    expect(installed.captions.mode).toBe('disabled');
+    expect(player().addRemoteTextTrack.mock.calls.some(([track]: any[]) => Boolean(track.src))).toBe(false);
+  });
+
+  it('keeps unavailable language explicit instead of translating or choosing another video stream', async () => {
+    await mount('ja'); const installed = tracks(); const sources = player().src.mock.calls.length;
+    await ready(); await openSettings();
+    expect(installed.hindi.enabled).toBe(true); expect(installed.english.enabled).toBe(false); expect(installed.captions.mode).toBe('disabled');
+    expect(player().src).toHaveBeenCalledTimes(sources);
+    expect(nodes().some((node) => node.props?.role === 'status' && String(node.props.children).includes('not offered by this native source'))).toBe(true);
+  });
+
+  it('applies late-arriving offered tracks without reloading playback', async () => {
+    await mount(); await ready(); const sources = player().src.mock.calls.length;
+    const installed = tracks(); player().audioList.emit('addtrack'); await pump();
+    expect(installed.english.enabled).toBe(true); expect(installed.captions.mode).toBe('hidden');
+    expect(player().src).toHaveBeenCalledTimes(sources);
+  });
+
+  it('preserves accepted explicit audio/caption choices across preference refreshes and source replacement', async () => {
+    await mount(); const installed = tracks(); await ready();
+    for (const [label, value] of [['Audio', 'hi::'], ['Subtitles', 'off']]) {
+      nodes().find((node) => node.props?.label === label && node.props.onClick).props.onClick({ currentTarget: new FakeElement() });
+      await pump();
+      nodes().find((node) => node.props?.label === label && node.props.onChange).props.onChange(value);
+      await pump();
+    }
+    props = { ...props, accountPreferences: saved('en', true) }; render(); await pump();
+    expect(installed.hindi.enabled).toBe(true); expect(installed.captions.mode).toBe('disabled');
+    props = { ...props, source: { url: '/another.mp4', kind: 'mp4' } }; render(); await pump(); await ready();
+    expect(installed.hindi.enabled).toBe(true); expect(installed.captions.mode).toBe('disabled');
+  });
+
+  it.each(['guest', 'unavailable', 'account:another'])('does not apply another identity snapshot to %s', async (viewer) => {
+    await mount('en', true, viewer); const installed = tracks(); await ready();
+    expect(installed.hindi.enabled).toBe(true); expect(installed.captions.mode).toBe('disabled');
+    expect(tree.props['data-viewing-motion']).toBeUndefined();
+  });
+
+  it('refreshes account defaults on the same media without reviving disposed source callbacks', async () => {
+    await mount(); const installed = tracks(); await ready();
+    props = { ...props, accountPreferences: saved('hi', false) }; render(); await pump();
+    expect(installed.hindi.enabled).toBe(true); expect(installed.captions.mode).toBe('disabled');
+    const old = player(); for (const slot of harness.slots) slot?.cleanup?.();
+    const changes = old.src.mock.calls.length; old.audioList.emit('addtrack'); await pump();
+    expect(old.src).toHaveBeenCalledTimes(changes);
+  });
+});
+
+describe('mounted native ad consent withdrawal', () => {
+  const policy = { enabled: true, firstBreakSeconds: 5, intervalSeconds: 10, maxBreaks: 4, allowSkip: true, skipAfterSeconds: 2 };
+  const creative: VastAdBreakProps['creative'] = {
+    id: 'repeat-creative', mediaUrl: 'https://ads.example.com/ad.mp4', durationSeconds: 20, skipAfterSeconds: 2,
+    tracking: { impression: ['https://ads.example.com/impression'], start: ['https://ads.example.com/start'],
+      complete: ['https://ads.example.com/complete'], error: ['https://ads.example.com/error'] },
+  };
+  const adNode = () => nodes().find((node) => node.props?.creative && node.props?.onDone);
+  const videoNode = () => nodes(adTree).find((node) => node.type === 'video');
+  const requests = () => harness.fetch.mock.calls.filter(([url]) => url === '/api/vast?consent=1');
+  function storageEvent(key: string | null = CONSENT_KEY) {
+    const event = new Event('storage');
+    Object.defineProperties(event, { key: { value: key }, newValue: { value: JSON.stringify(AD_GRANT) } });
+    window.dispatchEvent(event);
+  }
+  async function prepare(overrides: Partial<NativePlayerProps> = {}) {
+    actualVast = (await vi.importActual<typeof import('@/features/ads/vast/VastAdBreak')>('@/features/ads/vast/VastAdBreak')).VastAdBreak;
+    harness.mountVast = true;
+    harness.fetch.mockImplementation((url: string) => Promise.resolve(url === '/api/vast?consent=1'
+      ? Response.json({ creative }) : response({ startSeconds: 0, endSeconds: 10.25 })));
+    props = { ...props, adPolicy: policy, ...overrides };
+    await remount(); await ready(0, 180);
+  }
+  async function start(time = 6) {
+    player().position = time; player().stopped = false; player().emit('timeupdate');
+    await pump(); await vi.advanceTimersByTimeAsync(0); await pump();
+  }
+
+  it('stops the actual ad and tracking on same-tab withdrawal and restores content without changing preferences', async () => {
+    await prepare(); const content = player();
+    content.loudness = 0.35; content.silenced = true; content.playbackRate(1.5);
+    content.qualityList[0] = { id: '720', enabled: true }; content.qualityList.length = 1;
+    content.audioList[0] = { id: 'en', enabled: true }; content.audioList.length = 1;
+    const subtitle = installSubtitle(); await pump();
+    nodes().find((node) => node.props?.label === 'Subtitles' && node.props.onClick).props.onClick({ currentTarget: new FakeElement() }); await pump();
+    nodes().find((node) => node.props?.label === 'Subtitles' && node.props.onChange).props.onChange('en::'); await pump();
+    const sourceCalls = content.src.mock.calls.length;
+    await start();
+    const advertisement = adVideo!; const handlers = videoNode().props; const done = adNode().props.onDone;
+    handlers.onPlaying(); expect(harness.tracking).toHaveLength(2);
+    const signal = requests()[0]![1]!.signal as AbortSignal;
+    expect(writeConsent({ ...AD_GRANT, ads: false })).toBe(true);
+    expect(signal.aborted).toBe(true);
+    await pump();
+    expect(adNode()).toBeUndefined(); expect(adTree).toBeNull();
+    expect(advertisement.pause).toHaveBeenCalled(); expect(advertisement.load).toHaveBeenCalled(); expect(advertisement.src).toBe('');
+    expect(content.position).toBe(6); expect(content.stopped).toBe(false); expect(content.rate).toBe(1.5);
+    expect(content.loudness).toBe(0.35); expect(content.silenced).toBe(true); expect(content.src).toHaveBeenCalledTimes(sourceCalls);
+    expect(content.qualityList[0].enabled).toBe(true); expect(content.audioList[0].enabled).toBe(true); expect(subtitle.mode).toBe('hidden');
+    handlers.onPlaying(); handlers.onEnded(); done('complete'); await pump(); expect(harness.tracking).toHaveLength(2);
+    await start(16); await start(26); expect(requests()).toHaveLength(1); expect(adNode()).toBeUndefined();
+  });
+
+  it.each(['removed', 'cleared', 'malformed', 'inaccessible', 'failed-persistence'])('fails closed for %s consent, not event payload grants', async (kind) => {
+    await prepare(); await start(); const advertisement = adVideo!;
+    if (kind === 'failed-persistence') {
+      harness.storageRemove.mockImplementationOnce(() => { throw new Error('blocked storage'); });
+      expect(writeConsent(null)).toBe(false); expect(harness.consentRaw).toBe(JSON.stringify(AD_GRANT));
+    } else if (kind === 'inaccessible') {
+      Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('blocked getter'); } });
+      window.dispatchEvent(new Event('focus'));
+    } else {
+      harness.consentRaw = kind === 'malformed' ? '{"ads":true}' : null;
+      storageEvent(kind === 'cleared' ? null : CONSENT_KEY);
+    }
+    expect(readConsent()).toBeNull(); await pump();
+    expect(adNode()).toBeUndefined(); expect(advertisement.src).toBe(''); expect(player().position).toBe(6);
+    await start(16); expect(requests()).toHaveLength(1);
+  });
+
+  it('cancels pending metadata and ignores its response after withdrawal without issuing future ads', async () => {
+    await prepare(); const body = deferred<{ creative: typeof creative }>();
+    harness.fetch.mockImplementation((url: string) => Promise.resolve(url === '/api/vast?consent=1'
+      ? { ok: true, status: 200, json: () => body.promise } as Response : response(null)));
+    await start(); const signal = requests()[0]![1]!.signal as AbortSignal;
+    expect(adNode()).toBeUndefined(); expect(player().stopped).toBe(true);
+    writeConsent(null); await pump(); expect(signal.aborted).toBe(true); expect(player().stopped).toBe(false);
+    body.resolve({ creative }); await pump(); await vi.advanceTimersByTimeAsync(0); await pump();
+    expect(adNode()).toBeUndefined(); expect(harness.tracking).toEqual([]);
+    await start(16); expect(requests()).toHaveLength(1);
+  });
+
+  it('re-reads current consent before mounting a fetched creative even without a delivered notification', async () => {
+    await prepare(); const responseReady = deferred<Response>();
+    harness.fetch.mockImplementation((url: string) => url === '/api/vast?consent=1' ? responseReady.promise : Promise.resolve(response(null)));
+    await start(); harness.consentRaw = null;
+    responseReady.resolve(Response.json({ creative })); await pump(); await vi.advanceTimersByTimeAsync(0); await pump();
+    expect(adNode()).toBeUndefined(); expect(player().stopped).toBe(false); expect(requests()[0]![1]!.signal?.aborted).toBe(true);
+    expect(harness.tracking).toEqual([]);
+  });
+
+  it('does not issue an ad request if consent is synchronously withdrawn while pausing content to start it', async () => {
+    await prepare(); const content = player();
+    content.pause.mockImplementationOnce(() => { content.stopped = true; content.emit('pause'); writeConsent(null); });
+    await start();
+    expect(requests()).toHaveLength(0); expect(adNode()).toBeUndefined(); expect(content.stopped).toBe(false);
+    expect(content.position).toBe(6); expect(harness.tracking).toEqual([]);
+  });
+
+  it('does not let a cancelled startup finish a newer break after synchronous consent changes', async () => {
+    await prepare(); const content = player();
+    content.pause.mockImplementationOnce(() => {
+      content.stopped = true; content.emit('pause'); writeConsent(null); writeConsent(AD_GRANT);
+      content.position = 16; content.stopped = false; content.emit('timeupdate');
+    });
+    await start();
+    expect(requests()).toHaveLength(1); expect(adNode()).toBeDefined(); expect(content.position).toBe(16);
+    expect(content.stopped).toBe(true); expect(requests()[0]![1]!.signal?.aborted).toBe(false);
+  });
+
+  it('keeps the frozen room and base rate while restoring a registered party port without echo', async () => {
+    const media: WatchPartyMediaIdentity = { kind: 'movie', mediaId: '10000000-0000-4000-8000-000000000001' };
+    const intents = vi.fn(); let port: PartyPlayerPort | null = null;
+    await prepare({ titleId: media.mediaId, watchPartyMedia: media, watchPartyActive: true,
+      registerPartyPlayerPort(value) { port = value; value?.subscribe(intents); } });
+    const initial = port as unknown as PartyPlayerPort;
+    await initial.apply({ playback: { media, mode: 'playing', positionSeconds: 1, playbackRate: 1.25, revision: 1, anchorServerTimeMs: Date.now() },
+      mode: 'playing', playbackRate: 1.30, positionSeconds: 1, seek: true, reason: 'snapshot' });
+    await start(); expect(port).toBeNull(); writeConsent(null); await pump();
+    const resumed = port as unknown as PartyPlayerPort;
+    expect(resumed).not.toBe(initial); expect(resumed.read()).toMatchObject({ mode: 'frozen', freezeReason: 'ad-break', positionSeconds: 6, playbackRate: 1.25 });
+    expect(player().stopped).toBe(true); expect(intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['freeze']);
+  });
+
+  it('fences old completion handlers and unmounts repeated creative IDs before a newly consented break', async () => {
+    await prepare(); await start(); const old = adNode(); const oldHandlers = videoNode().props; const oldVideo = adVideo!;
+    writeConsent(null); await pump(); writeConsent(AD_GRANT); await start(16);
+    const current = adNode(); expect(current).toBeDefined(); expect(current.key).not.toBe(old.key); expect(adVideo).not.toBe(oldVideo);
+    old.props.onDone('complete'); oldHandlers.onPlaying(); oldHandlers.onEnded(); await pump();
+    expect(adNode()).toBe(current); expect(player().position).toBe(16); expect(player().stopped).toBe(true);
+    expect(harness.tracking).toEqual([]);
+    videoNode().props.onPlaying(); expect(harness.tracking).toHaveLength(2);
+    props = { ...props, source: { url: '/replacement.mp4', kind: 'mp4' } }; render(); await pump();
+    const sourceCalls = player().src.mock.calls.length;
+    current.props.onDone('complete'); await pump(); expect(adNode()).toBeUndefined(); expect(player().src).toHaveBeenCalledTimes(sourceCalls);
+  });
+
+  it('unsubscribes on unmount and fences retained callbacks, pending responses and timers after disposal', async () => {
+    await prepare(); const pending = deferred<Response>();
+    harness.fetch.mockImplementation((url: string) => url === '/api/vast?consent=1' ? pending.promise : Promise.resolve(response(null)));
+    await start(); const content = player();
+    const subscriptions = vi.mocked(window.addEventListener).mock.calls.filter(([event]) => event === 'lumora:consent-change');
+    const callback = subscriptions.at(-1)![1] as EventListener;
+    for (const slot of harness.slots) { slot?.cleanup?.(); if (slot) slot.cleanup = undefined; }
+    harness.dirty = false; harness.storageGet.mockClear();
+    callback(new Event('lumora:consent-change')); window.dispatchEvent(new Event('focus'));
+    expect(harness.storageGet).not.toHaveBeenCalled();
+    expect(window.removeEventListener).toHaveBeenCalledWith('lumora:consent-change', callback);
+    expect(requests()[0]![1]!.signal?.aborted).toBe(true); expect(vi.getTimerCount()).toBe(0);
+    const playCalls = content.play.mock.calls.length;
+    pending.resolve(Response.json({ creative })); await pump(); await vi.advanceTimersByTimeAsync(0); await pump();
+    expect(harness.dirty).toBe(false); expect(content.play).toHaveBeenCalledTimes(playCalls); expect(harness.tracking).toEqual([]);
+  });
+});
+
+describe('mounted native Watch Party registration', () => {
+  const media: WatchPartyMediaIdentity = { kind: 'movie', mediaId: '10000000-0000-4000-8000-000000000001' };
+  const otherMedia: WatchPartyMediaIdentity = { kind: 'movie', mediaId: '10000000-0000-4000-8000-000000000002' };
+  const target = (position = 40, rate = 1, baseRate = rate): PartyPlayerTarget => ({
+    playback: { media, mode: 'playing', positionSeconds: position, playbackRate: baseRate,
+      anchorServerTimeMs: Date.now(), revision: 1 },
+    positionSeconds: position, mode: 'playing', playbackRate: rate, seek: true, reason: 'snapshot',
+  });
+  async function mountParty(overrides: Partial<typeof props> = {}, makeReady = true) {
+    let current: PartyPlayerPort | null = null;
+    let unsubscribe: (() => void) | undefined;
+    const intents = vi.fn<(intent: PartyPlayerIntent) => void>();
+    const register = vi.fn((port: PartyPlayerPort | null) => {
+      unsubscribe?.(); current = port; unsubscribe = port?.subscribe(intents);
+    });
+    props = { ...props, titleId: media.mediaId, watchPartyMedia: media, watchPartyActive: true,
+      registerPartyPlayerPort: register, ...overrides };
+    await remount();
+    if (makeReady) await ready(20, 180);
+    return { register, intents, port: () => current };
+  }
+  async function setting(label: string, value: string) {
+    const tab = nodes().find((node) => node.props?.label === label && typeof node.props.onClick === 'function');
+    if (tab) { tab.props.onClick({ currentTarget: new FakeElement() }); await pump(); }
+    const select = nodes().find((node) => node.props?.label === label && typeof node.props.onChange === 'function');
+    select.props.onChange(value); await pump();
+  }
+
+  it('registers the real instance only after metadata, restore and playable readiness; forwards no media URLs', async () => {
+    const room = await mountParty({ initialPosition: 18 }, false);
+    expect(room.register).not.toHaveBeenCalled();
+    player().readyCallback(); await pump(); expect(room.port()).toBeNull();
+    player().readiness = 1; player().emit('loadedmetadata'); await pump();
+    expect(room.port()).toBeNull();
+    player().readiness = 2; player().emit('canplay'); await pump();
+    expect(room.port()?.read()).toMatchObject({ media, positionSeconds: 18, mode: 'paused', playbackRate: 1 });
+    expect(JSON.stringify(room.port()?.read())).not.toContain('/movie.mp4');
+    player().emit('loadeddata'); player().emit('canplay'); await pump();
+    expect(room.register.mock.calls.filter(([port]) => port)).toHaveLength(1);
+  });
+
+  it.each([null, { kind: 'movie', mediaId: 'tmdb-movie-123' }, otherMedia])('refuses unsupported or mismatched identity %j', async (identity) => {
+    const room = await mountParty({ watchPartyMedia: identity as WatchPartyMediaIdentity | null });
+    expect(room.port()).toBeNull();
+    expect(room.register.mock.calls.filter(([port]) => port)).toHaveLength(0);
+  });
+
+  it.each([
+    { kind: 'movie', mediaId: 'tmdb:movie:27205' },
+    { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 2 },
+  ] as WatchPartyMediaIdentity[])('registers the explicit public catalogue identity %j without fabricating a database UUID', async (identity) => {
+    const room = await mountParty({ titleId: identity.mediaId, watchPartyMedia: identity,
+      ...(identity.kind === 'episode' ? { seasonNumber: identity.seasonNumber, episodeNumber: identity.episodeNumber } : {}) });
+    expect(room.port()?.read()?.media).toEqual(identity);
+    const remote = target(44); remote.playback.media = identity;
+    await room.port()!.apply(remote);
+    expect(player().position).toBe(44); expect(room.intents).not.toHaveBeenCalled();
+  });
+
+  it('does not fabricate a position or rate when the media tech has no finite snapshot', async () => {
+    const room = await mountParty({}, false);
+    const readTime = player().currentTime.getMockImplementation();
+    player().currentTime.mockImplementation(() => Number.NaN);
+    await ready(Number.NaN, 180); expect(room.port()).toBeNull();
+    player().currentTime.mockImplementation(readTime);
+    player().position = 20;
+    await ready(20, 180); const port = room.port()!;
+    player().position = Number.POSITIVE_INFINITY; expect(port.read()).toBeNull();
+    await port.apply(target(80)); expect(player().position).toBe(Number.POSITIVE_INFINITY);
+    player().position = 20; player().rate = Number.NaN; expect(port.read()).toBeNull();
+    await port.apply(target(80, 2)); expect(player().position).toBe(20); expect(player().rate).toBeNaN();
+  });
+
+  it('applies remote seek/play/rate and pause on the same video without synchronous or delayed echo', async () => {
+    const room = await mountParty(); const instance = player(); const port = room.port()!;
+    instance.loudness = 0.35; instance.silenced = true;
+    const initialSources = instance.src.mock.calls.length;
+    instance.currentTime.mockImplementation((position?: number) => {
+      if (position !== undefined) {
+        instance.position = position; instance.isSeeking = true;
+        setTimeout(() => { instance.isSeeking = false; instance.emit('seeked'); }, 20);
+      }
+      return instance.position;
+    });
+    instance.playbackRate = (rate?: number) => {
+      if (rate !== undefined) { instance.rate = rate; setTimeout(() => instance.emit('ratechange'), 30); }
+      return instance.rate;
+    };
+    instance.play.mockImplementation(() => {
+      instance.stopped = false;
+      return new Promise<void>((resolve) => setTimeout(() => { instance.emit('play'); instance.emit('playing'); resolve(); }, 40));
+    });
+    const applied = port.apply(target(44.5, 1.04, 1));
+    await vi.advanceTimersByTimeAsync(50); await applied; await pump();
+    instance.emit('seeked'); instance.emit('ratechange'); instance.emit('play'); await pump();
+    expect(room.intents).not.toHaveBeenCalled();
+    expect(instance.position).toBe(44.5); expect(instance.rate).toBe(1.04); expect(instance.stopped).toBe(false);
+    expect(instance.loudness).toBe(0.35); expect(instance.silenced).toBe(true);
+    expect(harness.players).toHaveLength(1); expect(instance.src).toHaveBeenCalledTimes(initialSources);
+    const paused = target(44.5, 1.04, 1); paused.mode = 'paused'; paused.playback.mode = 'paused'; paused.seek = false;
+    await port.apply(paused); instance.emit('pause'); await pump();
+    expect(instance.stopped).toBe(true); expect(room.intents).not.toHaveBeenCalled();
+  });
+
+  it('emits real local play, pause, seek and rate intents, never frame-driven commands', async () => {
+    const room = await mountParty(); const instance = player();
+    await instance.play(); instance.pause(); instance.currentTime(31); instance.playbackRate(1.5); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['play', 'pause', 'seek', 'rate']);
+    expect(room.intents.mock.calls[2]![0].snapshot.positionSeconds).toBe(31);
+    room.intents.mockClear(); harness.fetch.mockClear();
+    for (let frame = 0; frame < 120; frame++) { instance.position += 0.01; instance.emit('timeupdate'); }
+    await pump(); expect(room.intents).not.toHaveBeenCalled(); expect(harness.fetch).not.toHaveBeenCalled();
+  });
+
+  it('excludes drift correction from saved rate and preserves quality/audio/subtitles across a source replacement', async () => {
+    const room = await mountParty(); const instance = player();
+    instance.qualityList[0] = { id: '720', width: 1280, height: 720, enabled: true }; instance.qualityList.length = 1;
+    instance.audioList[0] = { id: 'en', label: '', language: 'en', enabled: true }; instance.audioList.length = 1;
+    instance.textList[0] = { id: 'en', label: '', language: 'en', kind: 'subtitles', mode: 'disabled', cues: [] };
+    instance.textList.length = 1; instance.emit('loadeddata'); await pump();
+    await setting('Quality', 'quality:720'); await setting('Audio', 'en::'); await setting('Subtitles', 'en::');
+    const before = room.port()!;
+    await before.apply(target(35, 1.30, 1.25)); await pump();
+    instance.emit('timeupdate'); instance.emit('pause');
+    props = { ...props, source: { url: '/replacement.mp4', kind: 'mp4' } }; render(); await pump();
+    expect(before.read()).toBeNull(); expect(room.port()).toBeNull();
+    expect(room.intents.mock.calls.filter(([intent]) => intent.kind === 'freeze').map(([intent]) => intent.freezeReason))
+      .toEqual(['source-change']);
+    instance.qualityList[0] = { id: '720', width: 1280, height: 720, enabled: true }; instance.qualityList.length = 1;
+    instance.audioList[0] = { id: 'en', label: '', language: 'en', enabled: true }; instance.audioList.length = 1;
+    instance.textList[0] = { id: 'en', label: '', language: 'en', kind: 'subtitles', mode: 'disabled', cues: [] }; instance.textList.length = 1;
+    instance.readiness = 2; instance.emit('loadedmetadata'); instance.emit('canplay'); await pump();
+    expect(player()).toBe(instance); expect(instance.position).toBe(35); expect(instance.rate).toBe(1.25);
+    expect(instance.stopped).toBe(true); expect(room.port()?.read()?.freezeReason).toBe('source-change');
+    expect(instance.audioList[0].enabled).toBe(true); expect(instance.textList[0].mode).toBe('hidden');
+    expect(instance.qualityList[0].enabled).toBe(true);
+    room.intents.mockClear(); await before.apply(target(80)); expect(instance.position).toBe(35);
+    instance.emit('seeked'); instance.emit('ratechange'); await pump(); expect(room.intents).not.toHaveBeenCalled();
+    props = { ...props, watchPartyActive: false }; render(); await pump();
+    expect(room.port()?.read()?.mode).toBe('paused');
+  });
+
+  it('restores the authoritative base rate on room disconnect without another user intent', async () => {
+    const room = await mountParty(); await room.port()!.apply(target(20, 0.96, 1)); await pump();
+    props = { ...props, watchPartyActive: false }; render(); await pump();
+    expect(player().rate).toBe(1); expect(room.intents).not.toHaveBeenCalled();
+    await room.port()!.apply(target(90, 2)); expect(player().position).toBe(20); expect(player().rate).toBe(1);
+  });
+
+  it('does not turn a pending remote rate event into an intent when the user pauses or adjusts another control', async () => {
+    const room = await mountParty(); const instance = player();
+    instance.playbackRate = (rate?: number) => {
+      if (rate !== undefined) { instance.rate = rate; setTimeout(() => instance.emit('ratechange'), 50); }
+      return instance.rate;
+    };
+    await room.port()!.apply(target(20, 1.04, 1)); await pump();
+    const volume = new FakeElement(); volume.closestMatch = '.vjs-volume-panel';
+    instance.el().emit('pointerdown', { target: volume, pointerType: 'mouse' });
+    keydown('k'); await pump();
+    await vi.advanceTimersByTimeAsync(60); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['pause']);
+    props = { ...props, source: { url: '/next-source.mp4', kind: 'mp4' } }; render(); await pump();
+    instance.readiness = 2; instance.emit('loadedmetadata'); instance.emit('canplay'); await pump();
+    expect(instance.rate).toBe(1);
+  });
+
+  it('does not suppress a genuine keyboard scrub back to an earlier remote seek target', async () => {
+    const room = await mountParty(); await room.port()!.apply(target(40)); await pump();
+    player().position = 60; player().emit('timeupdate');
+    const control = new FakeElement();
+    control.closest = (selector: string) => selector.includes('.vjs-control-bar') || selector.includes('.vjs-progress-control') ? control : null;
+    keydown('ArrowLeft', { target: control });
+    player().currentTime(40); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['seek']);
+    expect(room.intents.mock.calls[0]![0].snapshot.positionSeconds).toBe(40);
+  });
+
+  it('keeps stale unsubscribe and replaced registration callbacks from removing the current subscription', async () => {
+    const room = await mountParty(); const old = room.port()!;
+    const listener = vi.fn(); const oldUnsubscribe = old.subscribe(listener);
+    player().emit('waiting'); player().emit('canplay'); await pump();
+    const current = room.port()!; current.subscribe(listener); oldUnsubscribe();
+    await player().play(); expect(listener).toHaveBeenCalledOnce();
+    const owner = vi.fn(); props = { ...props, registerPartyPlayerPort: owner }; render(); await pump();
+    expect(room.register).toHaveBeenLastCalledWith(null);
+    expect(owner).toHaveBeenCalledWith(expect.objectContaining({ read: expect.any(Function), apply: expect.any(Function) }));
+    expect(current.read()).toBeNull();
+  });
+
+  it('suspends buffering, preserves frozen state through seeks, and thaws only on explicit local play', async () => {
+    const room = await mountParty(); const first = room.port()!;
+    const frozen: PartyPlayerTarget = { ...target(20), mode: 'frozen', freezeReason: 'source-change',
+      playback: { ...target(20).playback, mode: 'frozen', freezeReason: 'source-change' } };
+    await first.apply(frozen); player().emit('waiting'); await pump();
+    expect(first.read()).toBeNull(); expect(room.port()).toBeNull();
+    await first.apply(target(80)); expect(player().position).toBe(20);
+    player().emit('canplay'); await pump();
+    expect(room.port()?.read()?.freezeReason).toBe('source-change');
+    player().currentTime(30); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['seek']);
+    expect(room.intents.mock.calls[0]![0].snapshot.mode).toBe('frozen');
+    await player().play(); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['seek', 'play']);
+    expect(room.port()?.read()?.mode).toBe('playing');
+  });
+
+  it('freezes once for background, rejects hidden targets and does not autoplay merely on visibility return', async () => {
+    const room = await mountParty(); await player().play(); room.intents.mockClear();
+    const port = room.port()!;
+    fakeDocument.visibilityState = 'hidden';
+    for (const [event, callback] of fakeDocument.addEventListener.mock.calls) if (event === 'visibilitychange') callback();
+    await pump(); expect(room.port()).toBeNull(); expect(port.read()).toBeNull();
+    await port.apply(target(80)); expect(player().position).toBe(20); expect(player().stopped).toBe(true);
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind === 'freeze' ? intent.freezeReason : intent.kind)).toEqual(['background']);
+    fakeDocument.visibilityState = 'visible';
+    for (const [event, callback] of fakeDocument.addEventListener.mock.calls) if (event === 'visibilitychange') callback();
+    await pump(); expect(room.port()?.read()?.freezeReason).toBe('background'); expect(player().stopped).toBe(true);
+  });
+
+  it('blocks room targets during an ad and restores content without clearing the ad freeze or echoing restore events', async () => {
+    const ad = deferred<Response>();
+    harness.fetch.mockImplementation((url: string) => url === '/api/vast?consent=1' ? ad.promise
+      : Promise.resolve(response({ startSeconds: 0, endSeconds: 10.25 })));
+    const room = await mountParty({ adPolicy: { enabled: true, firstBreakSeconds: 5, intervalSeconds: 30,
+      maxBreaks: 1, allowSkip: true, skipAfterSeconds: 5 } });
+    const port = room.port()!; const instance = player();
+    instance.stopped = false; instance.position = 25; instance.emit('timeupdate'); await pump();
+    expect(room.port()).toBeNull();
+    expect(harness.fetch).toHaveBeenCalledWith('/api/vast?consent=1', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+    const position = instance.position; await port.apply(target(80, 2)); expect(instance.position).toBe(position); expect(instance.rate).toBe(1);
+    ad.resolve(Response.json({ creative: { id: 'ad', mediaUrl: 'https://ads.example.test/ad.mp4', durationSeconds: 10, tracking: {} } })); await pump();
+    await vi.advanceTimersByTimeAsync(0); await pump();
+    const adNode = nodes().find((node) => node.props?.creative && node.props?.onDone);
+    expect(adNode).toBeDefined(); adNode.props.onDone('complete'); await pump();
+    expect(room.port()?.read()?.positionSeconds).toBe(25); expect(instance.stopped).toBe(true);
+    instance.emit('seeked'); instance.emit('ratechange'); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind === 'freeze' ? intent.freezeReason : intent.kind)).toEqual(['ad-break']);
+  });
+
+  it('rejects other-media targets and makes old ports inert immediately across media changes and unmount', async () => {
+    const room = await mountParty(); const old = room.port()!; const previous = player();
+    const mismatch = target(75); mismatch.playback.media = otherMedia;
+    await old.apply(mismatch); expect(previous.position).toBe(20);
+    props = { ...props, titleId: otherMedia.mediaId, watchPartyMedia: otherMedia, source: { url: '/next.mp4', kind: 'mp4' } };
+    render(); await pump(); expect(old.read()).toBeNull(); expect(room.port()).toBeNull();
+    await ready(5, 160); const current = room.port()!; await old.apply(target(85)); expect(player().position).toBe(5);
+    room.intents.mockClear(); for (const slot of harness.slots) slot?.cleanup?.(); harness.dirty = false;
+    await current.apply(target(90)); previous.emit('seeked'); previous.emit('ratechange'); previous.emit('play'); await pump();
+    expect(room.port()).toBeNull(); expect(room.intents).not.toHaveBeenCalled(); expect(harness.dirty).toBe(false);
+  });
+
+  it('survives StrictMode-style cleanup/setup and ignores late play rejection from the retired instance', async () => {
+    const room = await mountParty(); const old = room.port()!; const previous = player();
+    const play = deferred<void>(); previous.play.mockImplementation(() => play.promise);
+    const apply = old.apply(target(20));
+    for (const slot of harness.slots) {
+      if (slot?.cleanup) { slot.cleanup(); slot.cleanup = undefined; }
+      if (slot?.deps) slot.deps = undefined;
+    }
+    render(); await pump(); await ready(9, 180); const current = room.port();
+    expect(current).not.toBe(old); expect(old.read()).toBeNull();
+    play.reject(new Error('play aborted by source disposal')); await apply; await pump();
+    expect(room.port()).toBe(current); expect(player().position).toBe(9);
+    room.intents.mockClear(); await player().play(); await pump();
+    expect(room.intents.mock.calls.map(([intent]) => intent.kind)).toEqual(['play']);
+  });
 });
 
 describe('web Skip Intro visibility and seeking', () => {
@@ -507,7 +1052,7 @@ describe('native video display modes', () => {
   it('restores a valid preference and safely defaults invalid or unavailable storage to Fit', async () => {
     harness.storageGet.mockReturnValue('zoom');
     await remount();
-    expect(harness.storageGet).toHaveBeenLastCalledWith('lumora:player:display-mode:v1');
+    expect(harness.storageGet).toHaveBeenCalledWith('lumora:player:display-mode:v1');
     expect(player().el().classList.contains('lumora-display-zoom')).toBe(true);
     harness.storageGet.mockReturnValue('overscan');
     await remount();
@@ -1244,7 +1789,7 @@ describe('web player selection and reload correctness', () => {
     props = { ...props, retryKey: 1 }; render(); await pump();
     expect(player().src).toHaveBeenCalledTimes(loads + 1);
     expect(directLookups()).toHaveLength(1);
-    expect(player().src.mock.calls.every(([source]) => source.src.includes('?token='))).toBe(true);
+    expect(player().src.mock.calls.every(([source]: [{ src: string }]) => source.src.includes('?token='))).toBe(true);
   });
 
   it('honors an explicitly requested numeric Direct source from the same initial catalog', async () => {

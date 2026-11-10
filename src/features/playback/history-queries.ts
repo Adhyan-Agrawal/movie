@@ -1,8 +1,9 @@
 import 'server-only';
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
-import { getTitleById } from '@/features/catalog/queries';
+import { getTitleCardsByIds, type TitleCard } from '@/features/catalog/card-queries';
 import type { WatchEpisodeContext } from '@/features/catalog/types';
+import { resolveActiveProfileId } from '@/features/account/active-profile';
 
 /**
  * Watch history reads (Spec Sections 4, 8, 18). Rows come from the viewer's
@@ -23,9 +24,14 @@ export interface HistoryEntry {
 }
 
 export async function listWatchHistory(limit = 50): Promise<HistoryEntry[]> {
+  const readLimit = Number.isFinite(limit) ? Math.min(50, Math.max(1, Math.floor(limit))) : 50;
   const db = await getSupabaseServerClient();
   const { data: user } = await db.auth.getUser();
   if (!user.user) return [];
+  let profileId: string | null;
+  try { profileId = await resolveActiveProfileId(db, user.user.id); }
+  catch { return []; }
+  if (!profileId) return [];
 
   const { data, error } = await db
     .from('playback_sessions')
@@ -34,8 +40,9 @@ export async function listWatchHistory(limit = 50): Promise<HistoryEntry[]> {
     // analytics.read holders see every row — the account pages must never show
     // another user's sessions (security audit finding).
     .eq('account_id', user.user.id)
+    .eq('profile_id', profileId)
     .order('started_at', { ascending: false })
-    .limit(limit);
+    .limit(readLimit);
   if (error) {
     console.warn('history.listWatchHistory failed', { message: error.message });
     return [];
@@ -86,11 +93,11 @@ export async function listWatchHistory(limit = 50): Promise<HistoryEntry[]> {
 /** History entries with their titles resolved (skips deleted titles). */
 export async function listWatchHistoryWithTitles(
   limit = 50,
-): Promise<Array<{ entry: HistoryEntry; title: Awaited<ReturnType<typeof getTitleById>> }>> {
+): Promise<Array<{ entry: HistoryEntry; title: TitleCard }>> {
   const entries = await listWatchHistory(limit);
-  return (
-    await Promise.all(
-      entries.map(async (entry) => ({ entry, title: await getTitleById(entry.titleId) })),
-    )
-  ).filter((x) => x.title !== null);
+  const titles = await getTitleCardsByIds(entries.map((entry) => entry.titleId));
+  return entries.flatMap((entry) => {
+    const title = titles.get(entry.titleId);
+    return title ? [{ entry, title }] : [];
+  });
 }

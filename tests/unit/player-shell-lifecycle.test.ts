@@ -2,10 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlayerShellProps } from '@/features/player/PlayerShell';
 import type { PlaybackSource } from '@/lib/providers/types';
 import type { EpisodeNavigation } from '@/features/player/episode-navigation';
+import { readConsent, writeConsent } from '@/lib/consent';
+import { DEFAULT_SETTINGS } from '@/features/account/types';
 
 const harness = vi.hoisted(() => ({
   slots: [] as any[], cursor: 0, effects: [] as Array<() => void>, dirty: false,
-  refresh: vi.fn(), push: vi.fn(), record: vi.fn(), report: vi.fn(), fetch: vi.fn(), storageGet: vi.fn(), storageSet: vi.fn(),
+  refresh: vi.fn(), push: vi.fn(), record: vi.fn(), report: vi.fn(), fetch: vi.fn(), storageGet: vi.fn(), storageSet: vi.fn(), storageRemove: vi.fn(), preferenceSave: vi.fn(),
+  consentRaw: null as string | null,
   partyOptions: vi.fn(),
   native: () => null, controls: () => null,
   party: { state: { room: null, participants: [], phase: 'idle' }, registerPlayerPort: vi.fn() } as any,
@@ -50,12 +53,12 @@ vi.mock('@/features/watch-party/web', () => ({ WatchPartyPanel: () => null, useW
   return { ...harness.party, available: options.configured === true };
 } }));
 vi.mock('@/features/playback/guest-watch', () => ({ recordGuestWatch: harness.record }));
-vi.mock('@/components/consent/ConsentBanner', () => ({ readConsent: () => null }));
 vi.mock('@/features/playback/session-actions', () => ({
   reportPlaybackStartAction: vi.fn(async () => ({ ok: false })), reportPlaybackEndAction: vi.fn(async () => undefined),
   reportPlaybackHeartbeatAction: vi.fn(),
 }));
 vi.mock('@/features/playback/report-actions', () => ({ reportPlaybackIssueAction: harness.report }));
+vi.mock('@/features/account/preference-actions', () => ({ saveAccountPreferencesAction: harness.preferenceSave }));
 
 import { PlayerShell } from '@/features/player/PlayerShell';
 
@@ -85,18 +88,30 @@ const direct: PlaybackSource = { id: 'native', url: '/fixture.m3u8?token=one', k
     episodeSelection: false, providerResume: false, telemetry: true, skipMarkers: false } };
 const embedded: PlaybackSource = { id: 'embed', url: 'https://embed.example/movie', kind: 'embed', label: 'Server 2', providerId: 'embed', consentRequired: true,
   capabilities: { ...direct.capabilities, qualitySelection: false, subtitles: false, audioTracks: false, playbackRate: false, telemetry: false } };
+const CONSENT_KEY = 'lumora.consent.v1';
+const AD_GRANT = { necessary: true as const, analytics: false, ads: true, decidedAt: '2026-11-07T12:00:00.000Z' };
 
 beforeEach(async () => {
   vi.useFakeTimers(); harness.slots = []; harness.effects = []; harness.cursor = 0; harness.dirty = false;
   harness.refresh.mockClear(); harness.record.mockClear();
   harness.push.mockReset(); harness.fetch.mockReset(); harness.fetch.mockResolvedValue({ ok: true, json: async () => null });
-  harness.storageGet.mockReset(); harness.storageGet.mockReturnValue(null); harness.storageSet.mockReset();
+  harness.consentRaw = null;
+  harness.storageGet.mockReset().mockImplementation((key: string) => key === CONSENT_KEY ? harness.consentRaw : null);
+  harness.storageSet.mockReset().mockImplementation((key: string, value: string) => { if (key === CONSENT_KEY) harness.consentRaw = value; });
+  harness.storageRemove.mockReset().mockImplementation((key: string) => { if (key === CONSENT_KEY) harness.consentRaw = null; });
   harness.report.mockReset(); harness.report.mockResolvedValue({ ok: true }); harness.partyOptions.mockClear();
+  harness.preferenceSave.mockReset().mockImplementation(async (accountId, changes) => ({ ok: true,
+    snapshot: { accountId, settings: { ...DEFAULT_SETTINGS, ...changes }, hasSavedPreferences: true } }));
   harness.party.state = { room: null, participants: [], phase: 'idle' };
   vi.stubGlobal('fetch', harness.fetch);
+  const consentEvents = new EventTarget();
   vi.stubGlobal('window', { setTimeout, clearTimeout, setInterval, clearInterval,
     location: new URL('https://app.example/watch/tv/fixture?season=1&episode=2'),
-    localStorage: { getItem: harness.storageGet, setItem: harness.storageSet } });
+    localStorage: { getItem: harness.storageGet, setItem: harness.storageSet, removeItem: harness.storageRemove },
+    addEventListener: vi.fn(consentEvents.addEventListener.bind(consentEvents)),
+    removeEventListener: vi.fn(consentEvents.removeEventListener.bind(consentEvents)),
+    dispatchEvent: consentEvents.dispatchEvent.bind(consentEvents) });
+  writeConsent(null); harness.storageGet.mockClear(); harness.storageRemove.mockClear();
   vi.stubGlobal('sessionStorage', { getItem: () => null, setItem: vi.fn() });
   props = { title: { id: 'fixture', slug: 'fixture', type: 'tv', name: 'Fixture' }, source: direct,
     sources: [direct, embedded], viewerKey: 'guest', seasonNumber: 1, episodeNumber: 2 };
@@ -107,10 +122,89 @@ afterEach(() => {
   vi.clearAllTimers(); vi.useRealTimers(); vi.unstubAllGlobals();
 });
 
+describe('shell advertising consent subscription', () => {
+  const preroll = { adsterraKey: 'synthetic-zone', width: 320, height: 50 };
+  const advertisement = () => nodes().find((node) => node.props?.adsterraKey === preroll.adsterraKey);
+  async function mount(source: PlaybackSource = direct, grant = true) {
+    for (const slot of harness.slots) slot?.cleanup?.();
+    harness.slots = []; harness.effects = [];
+    props = { ...props, source, sources: [source], preroll };
+    writeConsent(grant ? AD_GRANT : null);
+    render(); await pump();
+  }
+
+  it('ends the current pre-roll on withdrawal and resumes an already allowed native source without another ad gate', async () => {
+    await mount(); expect(advertisement()).toBeDefined(); expect(native()).toBeUndefined();
+    writeConsent(null); await pump();
+    expect(advertisement()).toBeUndefined(); expect(native().props.source.url).toBe(direct.url);
+    writeConsent(AD_GRANT); await pump();
+    expect(advertisement()).toBeUndefined(); expect(native().props.source.url).toBe(direct.url);
+  });
+
+  it('never treats ad consent as provider consent and does not revoke a separately accepted source', async () => {
+    await mount(embedded); expect(consent()).toBeDefined(); expect(iframe()).toBeUndefined();
+    writeConsent(null); await pump(); expect(consent()).toBeDefined(); expect(iframe()).toBeUndefined();
+    writeConsent(AD_GRANT); await pump(); expect(consent()).toBeDefined(); expect(iframe()).toBeUndefined();
+    consent().props.onLoad(); await pump(); const source = iframe().props.src;
+    writeConsent(null); await pump(); expect(iframe().props.src).toBe(source); expect(consent()).toBeUndefined();
+  });
+
+  it.each(['malformed', 'inaccessible'])('removes an active pre-roll for %s storage without accepting event-payload permission', async (kind) => {
+    await mount(); expect(advertisement()).toBeDefined();
+    if (kind === 'inaccessible') {
+      Object.defineProperty(window, 'localStorage', { configurable: true, get() { throw new Error('storage blocked'); } });
+      window.dispatchEvent(new Event('pageshow'));
+    } else {
+      harness.consentRaw = '{"ads":true}';
+      const event = new Event('storage'); Object.defineProperties(event, { key: { value: CONSENT_KEY }, newValue: { value: JSON.stringify(AD_GRANT) } });
+      window.dispatchEvent(event);
+    }
+    await pump(); expect(readConsent()).toBeNull(); expect(advertisement()).toBeUndefined(); expect(native()).toBeDefined();
+  });
+
+  it('removes replaced and unmounted subscriptions and ignores retained old callbacks', async () => {
+    await mount();
+    const old = vi.mocked(window.addEventListener).mock.calls.filter(([name]) => name === 'lumora:consent-change').at(-1)![1] as EventListener;
+    props = { ...props, preroll: { ...preroll } }; render(); await pump();
+    expect(window.removeEventListener).toHaveBeenCalledWith('lumora:consent-change', old);
+    harness.storageGet.mockClear(); old(new Event('lumora:consent-change')); expect(harness.storageGet).not.toHaveBeenCalled();
+    for (const slot of harness.slots) { slot?.cleanup?.(); if (slot) slot.cleanup = undefined; }
+    harness.dirty = false; window.dispatchEvent(new Event('focus'));
+    expect(harness.storageGet).not.toHaveBeenCalled(); expect(harness.dirty).toBe(false);
+  });
+});
+
+describe('typed native party wiring', () => {
+  const media = { kind: 'episode' as const, mediaId: '10000000-0000-4000-8000-000000000001', seasonNumber: 1, episodeNumber: 2 };
+
+  it.each(['connected', 'reconnecting', 'idle'])('forwards the server identity and real registration callback while %s', async (phase) => {
+    props = { ...props, title: { ...props.title, id: media.mediaId }, watchPartyConfigured: true, watchPartyMedia: media };
+    harness.party.state.phase = phase; render(); await pump();
+    expect(native().props.watchPartyMedia).toBe(media);
+    expect(native().props.registerPartyPlayerPort).toBe(harness.party.registerPlayerPort);
+    expect(native().props.watchPartyActive).toBe(phase === 'connected');
+  });
+
+  it('does not activate an unconfigured service or fabricate a UUID for virtual media', async () => {
+    props = { ...props, title: { ...props.title, id: 'tmdb-tv-123' }, watchPartyConfigured: false };
+    harness.party.state.phase = 'connected'; render(); await pump();
+    expect(native().props.watchPartyActive).toBe(false);
+    expect(native().props.watchPartyMedia).toBeNull();
+  });
+
+  it('does not mount a native party bridge before consent', async () => {
+    const source = { ...direct, id: 'consented-native', consentRequired: true };
+    props = { ...props, source, sources: [source], watchPartyConfigured: true, watchPartyMedia: media };
+    render(); await pump();
+    expect(native()).toBeUndefined(); expect(consent()).toBeDefined();
+    consent().props.onLoad(); await pump(); expect(native().props.watchPartyMedia).toBe(media);
+  });
+});
+
 describe('web shell fatal errors and explicit Retry', () => {
   it('renders a verified legacy next-episode target without accessing browser globals during SSR', () => {
     props = { ...props, episodeNavigationUrl: undefined,
-      nextEpisode: { href: '/watch/tv/fixture?season=1&episode=3', label: 'Next episode', name: 'Episode 3', season: 1, episode: 3 } };
+      nextEpisode: { label: 'Next episode', name: 'Episode 3', season: 1, episode: 3 } };
     harness.slots = []; harness.effects = [];
     vi.stubGlobal('window', undefined);
     expect(() => render()).not.toThrow();
@@ -387,6 +481,117 @@ describe('opt-in web Auto Next and party fences', () => {
     expect(controls().props.episodeNavigation.onNavigate('next')).toBe(false);
     native().props.onAutoNextChange(false); native().props.onContentEnded(); await pump();
     expect(harness.push).not.toHaveBeenCalled(); expect(harness.storageSet).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('account-scoped Auto Next preferences', () => {
+  const accountA = '10000000-0000-4000-8000-000000000001';
+  const accountB = '20000000-0000-4000-8000-000000000002';
+  const snapshot = (accountId: string, enabled: boolean) => ({ accountId,
+    settings: { ...DEFAULT_SETTINGS, autoplayNext: enabled }, hasSavedPreferences: true });
+  async function mount(enabled = false) {
+    props = { ...props, viewerKey: `account:${accountA}`, initialAccountPreferences: snapshot(accountA, enabled),
+      nextEpisode: { label: 'Next', name: 'Next verified episode', season: 1, episode: 3 } };
+    await remountShell();
+  }
+
+  it('applies the verified server preference during SSR without reading guest storage', async () => {
+    await mount(true);
+    harness.slots = []; harness.effects = []; harness.storageGet.mockClear();
+    vi.stubGlobal('window', undefined);
+    render(); expect(native().props.autoNext).toBe(true);
+    expect(harness.storageGet).not.toHaveBeenCalled();
+    expect(harness.preferenceSave).not.toHaveBeenCalled();
+  });
+
+  it('uses account preferences for profile-qualified viewer keys and navigates only at content end', async () => {
+    await mount(true);
+    props = { ...props, viewerKey: `account:${accountA}:profile:profile-one` }; render(); await pump();
+    expect(native().props.autoNext).toBe(true); expect(harness.push).not.toHaveBeenCalled();
+    native().props.onContentEnded(); await pump(); expect(harness.push).toHaveBeenCalledWith(episodeTarget(3).href);
+  });
+
+  it('never substitutes a guest or other account preference for an unavailable/mismatched account', async () => {
+    harness.storageGet.mockReturnValue('true'); await mount(false); harness.storageGet.mockClear();
+    for (const viewerKey of [`account:${accountB}`, 'unavailable']) {
+      props = { ...props, viewerKey }; render(); await pump();
+      expect(native().props.autoNext).toBe(false);
+      native().props.onContentEnded(); await pump(); expect(harness.push).not.toHaveBeenCalled();
+    }
+    expect(harness.storageGet).not.toHaveBeenCalledWith(AUTO_NEXT_KEY);
+  });
+
+  it('persists only an account autoplay patch, never the guest key, and immediately honors uncheck', async () => {
+    await mount(true); harness.storageSet.mockClear();
+    native().props.onAutoNextChange(false); native().props.onContentEnded(); await pump();
+    expect(harness.push).not.toHaveBeenCalled();
+    expect(harness.preferenceSave).toHaveBeenCalledExactlyOnceWith(accountA, { autoplayNext: false });
+    expect(harness.storageSet).not.toHaveBeenCalled();
+    expect(native().props.autoNext).toBe(false);
+    expect(nodes().some((node) => node.props?.children === 'Auto Next saved to your account.')).toBe(true);
+  });
+
+  it('serializes rapid changes so a delayed earlier save cannot overwrite the latest toggle', async () => {
+    await mount(false);
+    const first = deferred<any>(); harness.preferenceSave.mockImplementationOnce(() => first.promise);
+    native().props.onAutoNextChange(true); native().props.onAutoNextChange(false); await pump();
+    expect(harness.preferenceSave).toHaveBeenCalledTimes(1); expect(native().props.autoNext).toBe(false);
+    first.resolve({ ok: true, snapshot: snapshot(accountA, true) }); await pump();
+    expect(harness.preferenceSave.mock.calls).toEqual([[accountA, { autoplayNext: true }], [accountA, { autoplayNext: false }]]);
+    expect(native().props.autoNext).toBe(false);
+  });
+
+  it('cancels an automatic transition disabled while the checkpoint is flushing, without blocking manual Next', async () => {
+    await mount(true);
+    const flushed = deferred<boolean>(); native().props.registerEpisodeTransition(() => flushed.promise);
+    native().props.onContentEnded(); await pump();
+    native().props.onAutoNextChange(false); flushed.resolve(true); await pump();
+    expect(harness.push).not.toHaveBeenCalled();
+    expect(native().props.onNavigateEpisode('next')).toBe(true); await pump();
+    expect(harness.push).toHaveBeenCalledOnce();
+  });
+
+  it.each(['failed', 'thrown'])('retains an explicit session choice but truthfully reports a %s account save', async (failure) => {
+    await mount(false);
+    if (failure === 'failed') harness.preferenceSave.mockResolvedValue({ ok: false, reason: 'unavailable', message: 'synthetic error' });
+    else harness.preferenceSave.mockRejectedValue(new Error('synthetic private detail'));
+    native().props.onAutoNextChange(true); await pump();
+    expect(native().props.autoNext).toBe(true);
+    expect(nodes().some((node) => node.props?.role === 'alert' && String(node.props.children).includes('save was not confirmed'))).toBe(true);
+    expect(harness.storageSet).not.toHaveBeenCalled();
+  });
+
+  it('fences old identity callbacks and pending saves, including returning to the first account', async () => {
+    await mount(false);
+    const oldSave = deferred<any>(); harness.preferenceSave.mockImplementationOnce(() => oldSave.promise);
+    const oldNative = native(); oldNative.props.onAutoNextChange(true); await pump();
+    props = { ...props, viewerKey: `account:${accountB}`, initialAccountPreferences: snapshot(accountB, false) };
+    render(); expect(native().props.autoNext).toBe(false);
+    oldNative.props.onAutoNextChange(true); oldNative.props.onContentEnded(); await pump();
+    expect(harness.push).not.toHaveBeenCalled(); expect(harness.preferenceSave).toHaveBeenCalledTimes(1);
+    props = { ...props, viewerKey: `account:${accountA}`, initialAccountPreferences: snapshot(accountA, false) }; render(); await pump();
+    native().props.onAutoNextChange(true); await pump();
+    expect(harness.preferenceSave).toHaveBeenCalledTimes(2);
+    oldSave.resolve({ ok: false, reason: 'unavailable', message: 'stale failure' }); await pump();
+    expect(nodes().some((node) => node.props?.children === 'Auto Next saved to your account.')).toBe(true);
+  });
+
+  it('keeps account Auto Next disabled in a connected party without changing the saved preference', async () => {
+    await mount(true);
+    harness.party.state = { phase: 'connected', room: { id: 'party' }, participants: [] }; render(); await pump();
+    expect(native().props.autoNext).toBe(false);
+    native().props.onAutoNextChange(false); native().props.onContentEnded(); await pump();
+    expect(harness.preferenceSave).not.toHaveBeenCalled(); expect(harness.push).not.toHaveBeenCalled();
+    harness.party.state = { phase: 'idle', room: null, participants: [] }; render(); await pump();
+    expect(native().props.autoNext).toBe(true);
+  });
+
+  it('never saves unavailable identity choices as guest choices or as a guessed account', async () => {
+    props = { ...props, viewerKey: `account:${accountA}`, initialAccountPreferences: null };
+    render(); await pump(); native().props.onAutoNextChange(true); await pump();
+    expect(native().props.autoNext).toBe(true); expect(harness.preferenceSave).not.toHaveBeenCalled();
+    expect(harness.storageSet).not.toHaveBeenCalled();
+    expect(nodes().some((node) => node.props?.role === 'alert' && String(node.props.children).includes('could not be loaded'))).toBe(true);
   });
 });
 

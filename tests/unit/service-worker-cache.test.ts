@@ -53,6 +53,14 @@ describe('narrow service-worker static request reduction', () => {
     expect(subject.cache.put).not.toHaveBeenCalled();
   });
 
+  it('does not intercept an explicitly no-store asset even when it was cached earlier', async () => {
+    const subject = worker();
+    subject.seed(asset);
+    expect(await subject.dispatch('fetch', subject.request(asset, { cache: 'no-store' }))).toBeUndefined();
+    expect(subject.cache.match).not.toHaveBeenCalled();
+    expect(subject.fetch).not.toHaveBeenCalled();
+  });
+
   it('fetches and caches a miss once, reuses hits, and fetches a new build URL independently', async () => {
     const subject = worker();
     await subject.dispatch('fetch', subject.request(asset));

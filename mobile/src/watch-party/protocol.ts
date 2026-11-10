@@ -185,6 +185,8 @@ export type WatchPartyDriftAction =
 
 const ROOM_CODE_RE = /^[A-HJ-KM-NP-TV-Z2-9]{10}$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+// Public catalogue identity only, never a database key or a playback capability.
+const TMDB_MEDIA_ID_RE = /^tmdb:(movie|tv):[1-9][0-9]{0,9}$/;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -229,12 +231,16 @@ export function normalizeWatchPartyChat(value: unknown): string | null {
 export function parseWatchPartyMediaIdentity(value: unknown): WatchPartyMediaIdentity | null {
   if (!isRecord(value) || !hasOnlyKeys(value, ['kind', 'mediaId', 'episodeId', 'seasonNumber', 'episodeNumber'])
     || (value.kind !== 'movie' && value.kind !== 'episode')
-    || typeof value.mediaId !== 'string' || !UUID_RE.test(value.mediaId)) return null;
+    || typeof value.mediaId !== 'string') return null;
+  const tmdbKind = TMDB_MEDIA_ID_RE.exec(value.mediaId)?.[1];
+  if (!UUID_RE.test(value.mediaId) && !tmdbKind) return null;
+  if (tmdbKind && tmdbKind !== (value.kind === 'movie' ? 'movie' : 'tv')) return null;
   if (value.kind === 'movie') {
     return value.episodeId === undefined && value.seasonNumber === undefined && value.episodeNumber === undefined
       ? { kind: 'movie', mediaId: value.mediaId } : null;
   }
   const episodeId = value.episodeId;
+  if (tmdbKind && episodeId !== undefined) return null;
   if (episodeId !== undefined && (typeof episodeId !== 'string' || !UUID_RE.test(episodeId))) return null;
   const hasSeason = value.seasonNumber !== undefined;
   const hasEpisode = value.episodeNumber !== undefined;

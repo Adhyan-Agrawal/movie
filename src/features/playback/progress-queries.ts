@@ -2,7 +2,8 @@ import 'server-only';
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { getDefaultProfileId } from '@/features/watchlist/queries';
-import { getTitleById } from '@/features/catalog/queries';
+import { resolveActiveProfileId } from '@/features/account/active-profile';
+import { getTitleCardsByIds } from '@/features/catalog/card-queries';
 import type { ContinueWatchingEntry, WatchProgress } from '@/features/catalog/types';
 import { isResumable } from './progress';
 
@@ -41,10 +42,9 @@ export async function getPlaybackContext(
     viewerKey = `account:${data.user.id}`;
 
     // Use the same verified client/account instead of re-resolving auth elsewhere.
-    const { data: profiles, error: profileError } = await db.from('profiles').select('id')
-      .eq('account_id', data.user.id).order('created_at', { ascending: true }).limit(1);
-    if (profileError) return { viewerKey: 'unavailable', resumePosition: null };
-    const profileId = profiles?.[0]?.id;
+    let profileId: string | null;
+    try { profileId = await resolveActiveProfileId(db, data.user.id); }
+    catch { return { viewerKey: 'unavailable', resumePosition: null }; }
     if (!profileId) return { viewerKey, resumePosition: null };
     viewerKey += `:profile:${profileId}`;
     if (typeof titleId !== 'string' || !titleId.trim() ||
@@ -106,109 +106,109 @@ const SESSION_SCAN_LIMIT = 200;
  *     instead of a fabricated bar.
  */
 export async function getContinueWatching(limit = 12): Promise<ContinueWatchingEntry[]> {
+  const readLimit = Number.isFinite(limit) ? Math.min(50, Math.max(1, Math.floor(limit))) : 12;
   const db = await getSupabaseServerClient();
   const { data: user } = await db.auth.getUser();
   if (!user.user) return [];
 
   const profileId = await getDefaultProfileId();
+  if (!profileId) return [];
   const entries: ContinueWatchingEntry[] = [];
   const seen = new Set<string>();
 
-  if (profileId) {
-    const { data: rows, error } = await db
+  const since = new Date(Date.now() - SESSION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
+  // Read the bounded fallback window before hydration so missing/publicly hidden
+  // progress titles can still fall back without a second catalog query.
+  const [progressResult, sessionResult] = await Promise.all([
+    db
       .from('watch_progress')
       .select('title_id, progress, position_seconds, updated_at, episode_id')
+      .eq('account_id', user.user.id)
       .eq('profile_id', profileId)
       .eq('completed', false)
       .gte('progress', 0.02)
       .order('updated_at', { ascending: false })
-      .limit(limit);
-    if (error) {
-      console.warn('playback.getContinueWatching: watch_progress read failed', {
-        message: error.message,
+      .limit(readLimit),
+    db
+      .from('playback_sessions')
+      .select('title_id')
+      // Explicit ownership also applies to analytics.read holders and excludes
+      // unattributed sessions instead of mixing them into the selected profile.
+      .eq('account_id', user.user.id)
+      .eq('profile_id', profileId)
+      .gte('started_at', since)
+      .order('started_at', { ascending: false })
+      .limit(SESSION_SCAN_LIMIT),
+  ]);
+  if (progressResult.error) {
+    console.warn('playback.getContinueWatching: watch_progress read failed', {
+      message: progressResult.error.message,
+    });
+  }
+  if (sessionResult.error) {
+    console.warn('playback.getContinueWatching: playback_sessions read failed', {
+      message: sessionResult.error.message,
+    });
+  }
+  const rowsList = progressResult.data ?? [];
+  const candidates = [...new Set((sessionResult.data ?? []).map((session) => session.title_id))];
+  const titleIds = [...new Set(rowsList.filter((row) => isResumable(row.progress)).map((row) => row.title_id))];
+  const titleCards = getTitleCardsByIds([...titleIds, ...candidates]);
+  // Resolve episode context (season/episode numbers + name) for TV rows so
+  // the row links to the exact episode the viewer left off on.
+  const episodeIds = [
+    ...new Set(rowsList.map((r) => r.episode_id).filter((e): e is string => Boolean(e))),
+  ];
+  const episodes = new Map<
+    string,
+    { episodeId: string; seasonNumber: number; episodeNumber: number; name: string }
+  >();
+  for (let i = 0; i < episodeIds.length; i += 100) {
+    const part = episodeIds.slice(i, i + 100);
+    const { data: epRows, error: epErr } = await db
+      .from('episodes')
+      .select('id, season_number, episode_number, name')
+      .in('id', part);
+    if (epErr) {
+      console.warn('playback.getContinueWatching: episodes read failed', { message: epErr.message });
+      continue;
+    }
+    for (const e of epRows ?? []) {
+      if (e.season_number == null || e.episode_number == null) continue;
+      episodes.set(e.id, {
+        episodeId: e.id,
+        seasonNumber: e.season_number,
+        episodeNumber: e.episode_number,
+        name: e.name,
       });
-    }
-    const rowsList = rows ?? [];
-    const titleIds = [...new Set(rowsList.filter((row) => isResumable(row.progress)).map((row) => row.title_id))];
-    const progressTitles = Promise.all(titleIds.map(async (id) => [id, await getTitleById(id)] as const));
-    // Resolve episode context (season/episode numbers + name) for TV rows so
-    // the row links to the exact episode the viewer left off on.
-    const episodeIds = [
-      ...new Set(rowsList.map((r) => r.episode_id).filter((e): e is string => Boolean(e))),
-    ];
-    const episodes = new Map<
-      string,
-      { episodeId: string; seasonNumber: number; episodeNumber: number; name: string }
-    >();
-    for (let i = 0; i < episodeIds.length; i += 100) {
-      const part = episodeIds.slice(i, i + 100);
-      const { data: epRows, error: epErr } = await db
-        .from('episodes')
-        .select('id, season_number, episode_number, name')
-        .in('id', part);
-      if (epErr) {
-        console.warn('playback.getContinueWatching: episodes read failed', { message: epErr.message });
-        continue;
-      }
-      for (const e of epRows ?? []) {
-        if (e.season_number == null || e.episode_number == null) continue;
-        episodes.set(e.id, {
-          episodeId: e.id,
-          seasonNumber: e.season_number,
-          episodeNumber: e.episode_number,
-          name: e.name,
-        });
-      }
-    }
-
-    const titles = new Map(await progressTitles);
-    for (const row of rowsList) {
-      if (entries.length >= limit) break;
-      if (!isResumable(row.progress)) continue;
-      if (seen.has(row.title_id)) continue;
-      const title = titles.get(row.title_id);
-      if (!title) continue;
-      seen.add(row.title_id);
-      const progress: WatchProgress = {
-        titleId: row.title_id,
-        progress: row.progress,
-        positionSeconds: row.position_seconds,
-        updatedAt: row.updated_at,
-      };
-      const episode = row.episode_id ? episodes.get(row.episode_id) : undefined;
-      entries.push(episode ? { title, progress, episode } : { title, progress });
     }
   }
 
-  if (entries.length < limit) {
-    const since = new Date(Date.now() - SESSION_WINDOW_DAYS * 24 * 60 * 60 * 1000).toISOString();
-    const { data: sessions, error } = await db
-      .from('playback_sessions')
-      .select('title_id')
-      // Scoped to THIS account (playback_sessions_admin_read would otherwise
-      // expose every row to analytics.read holders — the account home must
-      // never surface another user's sessions).
-      .eq('account_id', user.user.id)
-      .gte('started_at', since)
-      .order('started_at', { ascending: false })
-      .limit(SESSION_SCAN_LIMIT);
-    if (error) {
-      console.warn('playback.getContinueWatching: playback_sessions read failed', {
-        message: error.message,
-      });
-    }
-    const candidates = [...new Set((sessions ?? []).map((session) => session.title_id))].filter((id) => !seen.has(id));
-    const batchSize = Math.max(1, Math.min(12, limit));
-    for (let offset = 0; offset < candidates.length && entries.length < limit; offset += batchSize) {
-      const ids = candidates.slice(offset, offset + batchSize);
-      const titles = await Promise.all(ids.map((id) => getTitleById(id)));
-      for (const title of titles) {
-        if (entries.length >= limit) break;
-        if (!title) continue;
-        seen.add(title.id);
-        entries.push({ title });
-      }
-    }
+  const titles = await titleCards;
+  for (const row of rowsList) {
+    if (entries.length >= readLimit) break;
+    if (!isResumable(row.progress)) continue;
+    if (seen.has(row.title_id)) continue;
+    const title = titles.get(row.title_id);
+    if (!title) continue;
+    seen.add(row.title_id);
+    const progress: WatchProgress = {
+      titleId: row.title_id,
+      progress: row.progress,
+      positionSeconds: row.position_seconds,
+      updatedAt: row.updated_at,
+    };
+    const episode = row.episode_id ? episodes.get(row.episode_id) : undefined;
+    entries.push(episode ? { title, progress, episode } : { title, progress });
+  }
+
+  for (const id of candidates) {
+    if (entries.length >= readLimit) break;
+    if (seen.has(id)) continue;
+    const title = titles.get(id);
+    if (!title) continue;
+    seen.add(id);
+    entries.push({ title });
   }
 
   return entries;

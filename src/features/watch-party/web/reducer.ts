@@ -15,7 +15,7 @@ import {
   type WatchPartyUiError,
 } from './errors';
 
-export type WatchPartyPhase = 'idle' | 'ticketing' | 'connecting' | 'reconnecting' | 'connected' | 'closed' | 'error';
+export type WatchPartyPhase = 'idle' | 'ticketing' | 'connecting' | 'reconnecting' | 'connected' | 'leaving' | 'closed' | 'error';
 
 export interface WatchPartyRoomView {
   roomCode: string;
@@ -105,7 +105,11 @@ function snapshotState(state: WatchPartySessionState, snapshot: WatchPartyRoomSn
 
 export function reduceWatchPartyServerMessage(state: WatchPartySessionState,
   message: WatchPartyServerMessage, receivedAtMs: number): WatchPartySessionState {
-  if (message.type === 'room.snapshot') return snapshotState(state, message);
+  if (message.type === 'room.snapshot') {
+    if (state.room?.roomCode === message.room.roomCode && state.self?.participantId === message.self.participantId
+      && state.room.revision > message.room.revision) return state;
+    return snapshotState(state, message);
+  }
   if (message.type === 'room.closed') return {
     ...state,
     phase: 'closed',
@@ -137,6 +141,7 @@ export function reduceWatchPartyServerMessage(state: WatchPartySessionState,
     ? { ...state, error: null } : state;
   if (!state.room) return state;
   if (message.type === 'room.replay') {
+    if (message.revision < state.room.revision) return state;
     if (message.fromRevision > state.room.revision) return { ...state, syncFromRevision: state.room.revision };
     let next = state;
     for (const event of message.events) {
@@ -162,6 +167,7 @@ export type WatchPartyStateAction =
   | { type: 'error'; error: WatchPartyUiError; fatal?: boolean }
   | { type: 'clear-error' }
   | { type: 'clear-rate-limit' }
+  | { type: 'leaving' }
   | { type: 'left' };
 
 export function watchPartyStateReducer(state: WatchPartySessionState,
@@ -186,5 +192,7 @@ export function watchPartyStateReducer(state: WatchPartySessionState,
         error: state.error?.code === 'RATE_LIMITED' ? null : state.error };
     case 'left':
       return { ...INITIAL_WATCH_PARTY_STATE, phase: 'closed' };
+    case 'leaving':
+      return { ...state, phase: 'leaving', error: null };
   }
 }

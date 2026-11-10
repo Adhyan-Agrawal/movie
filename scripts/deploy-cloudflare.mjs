@@ -1,5 +1,4 @@
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { isIP } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import {
   buildCloudflare, createBuildEnvironment, createCommandEnvironment,
   loadCloudflareEnvironment, runCloudflareCommand, sanitizeGeneratedEnvironment,
+  validateBuildConfiguration, validateBuiltEnvironment, validateHttpsUrl,
 } from './build-cloudflare.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('../', import.meta.url)));
@@ -17,7 +17,7 @@ const REQUIRED = [
   'TMDB_API_BASE_URL',
   'VIDNEST_API_SECRET',
 ];
-const RUNTIME_NAMES = [
+export const RUNTIME_NAMES = [
   'NEXTJS_ENV',
   ...REQUIRED,
   'NEXT_PUBLIC_SUPABASE_URL',
@@ -32,27 +32,38 @@ const RUNTIME_NAMES = [
   'ADSTERRA_KEY_PREROLL',
 ];
 
-function invalidPublicHostname(hostname) {
-  const host = hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
-  return !host || isIP(host) !== 0 || host === 'localhost' || host.endsWith('.localhost')
-    || host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.home.arpa')
-    || host.endsWith('.example') || host.endsWith('.invalid') || host.endsWith('.test');
-}
-
-function validateHttpsUrl(environment, name, { originOnly = false } = {}) {
-  let url;
-  try {
-    url = new URL(environment[name]);
-  } catch {
-    throw new Error(`${name} must be a public HTTPS URL.`);
+/** Pure validation shared with CI; errors contain field names, never values. */
+export function validateRuntimeBindings(environment) {
+  for (const name of RUNTIME_NAMES) {
+    const value = environment[name];
+    if (value !== undefined && (typeof value !== 'string' || /[\r\n\0]/.test(value) || value !== value.trim())) {
+      throw new Error(`${name} must be a single-line string without surrounding whitespace.`);
+    }
   }
-  if (url.protocol !== 'https:' || url.username || url.password || url.hash
-    || invalidPublicHostname(url.hostname)) {
-    throw new Error(`${name} must be a public HTTPS URL without credentials or a fragment.`);
+  const missing = REQUIRED.filter((name) => !environment[name]);
+  if (missing.length) throw new Error(`Missing required deployment bindings: ${missing.join(', ')}`);
+  if (environment.NEXTJS_ENV && environment.NEXTJS_ENV !== 'production') {
+    throw new Error('NEXTJS_ENV must be production for a deployment.');
   }
-  if (originOnly && (url.pathname !== '/' || url.search)) {
-    throw new Error(`${name} must be an HTTPS origin without a path or query.`);
+  if (environment.VIDNEST_API_SECRET.length < 32) {
+    throw new Error('VIDNEST_API_SECRET must contain at least 32 characters.');
   }
+  validateBuildConfiguration(environment);
+  // User sessions use the public pair and RLS. Privileged jobs are a separate opt-in.
+  if (environment.SUPABASE_SERVICE_ROLE_KEY && !environment.NEXT_PUBLIC_SUPABASE_URL) {
+    throw new Error('SUPABASE_SERVICE_ROLE_KEY requires the public Supabase URL and anon key.');
+  }
+  validateHttpsUrl(environment, 'TMDB_API_BASE_URL');
+  const hasWatchPartySecret = Boolean(environment.WATCH_PARTY_SECRET);
+  const hasWatchPartyUrl = Boolean(environment.WATCH_PARTY_WORKER_URL);
+  if (hasWatchPartySecret !== hasWatchPartyUrl) throw new Error('WATCH_PARTY_SECRET and WATCH_PARTY_WORKER_URL must be configured together.');
+  if (hasWatchPartySecret && environment.WATCH_PARTY_SECRET.length < 32) {
+    throw new Error('WATCH_PARTY_SECRET must contain at least 32 characters.');
+  }
+  return Object.fromEntries(RUNTIME_NAMES.map((name) => [
+    name,
+    name === 'NEXTJS_ENV' ? environment[name] || 'production' : environment[name] ?? '',
+  ]));
 }
 
 function validatedEnvironment(root, inherited, secretsFile) {
@@ -69,37 +80,7 @@ function validatedEnvironment(root, inherited, secretsFile) {
       throw new Error('Invalid runtime bindings JSON file.');
     }
   }
-  const missing = REQUIRED.filter((name) => !combinedEnv[name]?.trim());
-  if (missing.length) throw new Error(`Missing required deployment bindings: ${missing.join(', ')}`);
-
-  for (const name of RUNTIME_NAMES) {
-    if (combinedEnv[name] && /[\r\n\0]/.test(combinedEnv[name])) {
-      throw new Error(`${name} must be a single-line value.`);
-    }
-  }
-  if (combinedEnv.VIDNEST_API_SECRET.length < 32) {
-    throw new Error('VIDNEST_API_SECRET must contain at least 32 characters.');
-  }
-  validateHttpsUrl(combinedEnv, 'NEXT_PUBLIC_APP_URL', { originOnly: true });
-  const supabaseValues = ['NEXT_PUBLIC_SUPABASE_URL', 'NEXT_PUBLIC_SUPABASE_ANON_KEY', 'SUPABASE_SERVICE_ROLE_KEY'];
-  const configuredSupabaseValues = supabaseValues.filter((name) => Boolean(combinedEnv[name]));
-  if (configuredSupabaseValues.length !== 0 && configuredSupabaseValues.length !== supabaseValues.length) {
-    throw new Error('All Supabase bindings must be configured together or all left empty.');
-  }
-  if (configuredSupabaseValues.length) validateHttpsUrl(combinedEnv, 'NEXT_PUBLIC_SUPABASE_URL', { originOnly: true });
-  validateHttpsUrl(combinedEnv, 'TMDB_API_BASE_URL');
-  const hasWatchPartySecret = Boolean(combinedEnv.WATCH_PARTY_SECRET);
-  const hasWatchPartyUrl = Boolean(combinedEnv.WATCH_PARTY_WORKER_URL);
-  if (hasWatchPartySecret !== hasWatchPartyUrl) throw new Error('WATCH_PARTY_SECRET and WATCH_PARTY_WORKER_URL must be configured together.');
-  if (hasWatchPartySecret) {
-    if (combinedEnv.WATCH_PARTY_SECRET.length < 32) throw new Error('WATCH_PARTY_SECRET must contain at least 32 characters.');
-    validateHttpsUrl(combinedEnv, 'WATCH_PARTY_WORKER_URL', { originOnly: true });
-  }
-
-  const bindings = Object.fromEntries(RUNTIME_NAMES.map((name) => [
-    name,
-    name === 'NEXTJS_ENV' ? combinedEnv[name] || 'production' : combinedEnv[name] ?? '',
-  ]));
+  const bindings = validateRuntimeBindings(combinedEnv);
   const buildEnvironment = createBuildEnvironment(inherited, bindings, localNames, RUNTIME_NAMES);
   const authEnvironment = createCommandEnvironment(inherited, { auth: true });
   return { authEnvironment, bindings, buildEnvironment };
@@ -143,12 +124,13 @@ export async function deployCloudflare(args = process.argv.slice(2), {
   const safeEnvFile = join(root, '.dev.vars.example');
   const wranglerBuildEnvironment = { ...buildEnvironment, OPEN_NEXT_DEPLOY: 'true' };
   const wranglerAuthEnvironment = { ...authEnvironment, OPEN_NEXT_DEPLOY: 'true' };
+  buildCloudflare({ root, buildEnvironment, skipBuild: args.includes('--skip-build'), runCommand });
+  if (bindings) validateBuiltEnvironment(root, bindings);
   runCommand('Checking Cloudflare authentication', wranglerCli, [
     'whoami',
     '--env-file',
     safeEnvFile,
   ], authEnvironment, root);
-  buildCloudflare({ root, buildEnvironment, skipBuild: args.includes('--skip-build'), runCommand });
   runCommand('Validating the Worker upload', wranglerCli, [
     'deploy',
     '--dry-run',
@@ -160,6 +142,7 @@ export async function deployCloudflare(args = process.argv.slice(2), {
   const staged = bindings ? stageBindings(bindings) : null;
   try {
     sanitizeGeneratedEnvironment(root);
+    if (bindings) validateBuiltEnvironment(root, bindings);
     runCommand('Deploying the Lumora Worker', wranglerCli, [
       'deploy',
       '--keep-vars',

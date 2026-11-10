@@ -257,7 +257,8 @@ describe('VidNest stream catalog', () => {
 
   it('switches through issued stream URLs without resolving again or consuming the resolver rate limit', async () => {
     vi.useFakeTimers();
-    const address = { 'cf-connecting-ip': '203.0.113.10' };
+    vi.stubEnv('SITE_ID', '00000000-0000-4000-8000-000000000001');
+    const address = { 'x-nf-client-connection-ip': '203.0.113.10' };
     const fetchMock = vi.fn(async (url: unknown) => isResolver(url) ? resolved([
       { url: 'https://cdn.example/first.m3u8' }, { url: 'https://cdn.example/second.m3u8' },
     ]) : playbackResponse(url));

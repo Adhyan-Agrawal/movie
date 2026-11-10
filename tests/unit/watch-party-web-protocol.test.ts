@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import mediaVectors from '../../workers/watch-party/tests/fixtures/media-identities.json';
 import {
   planWatchPartyDrift,
   type WatchPartyRoomSnapshotMessage,
@@ -52,6 +53,15 @@ function snapshot(): WatchPartyRoomSnapshotMessage {
 }
 
 describe('Watch Party web protocol vectors', () => {
+  it('decodes public TMDB room identities without relaxing snapshot or participant validation', () => {
+    for (const media of mediaVectors.valid) {
+      expect(decodeWatchPartyServerMessage({ ...snapshot(), playback: { ...snapshot().playback, media } })).toMatchObject({ ok: true });
+    }
+    for (const media of mediaVectors.invalid) {
+      expect(decodeWatchPartyServerMessage({ ...snapshot(), playback: { ...snapshot().playback, media } })).toEqual({ ok: false });
+    }
+    expect(decodeWatchPartyServerMessage({ ...snapshot(), self: { ...snapshot().self, participantId: 'tmdb:movie:27205' } })).toEqual({ ok: false });
+  });
   it('strictly decodes the frozen mode/freeze and episode-coordinate shapes', () => {
     expect(decodeWatchPartyServerMessage(snapshot())).toMatchObject({ ok: true });
     const frozen = {
@@ -131,6 +141,17 @@ describe('Watch Party web protocol vectors', () => {
     expect(reduceWatchPartyServerMessage(synchronized, replay, 1_600).chat).toHaveLength(1);
   });
 
+  it('does not rewind state for a delayed snapshot or already superseded replay', () => {
+    const current = reduceWatchPartyServerMessage(INITIAL_WATCH_PARTY_STATE, snapshot(), 1_100);
+    const old = { ...snapshot(), room: { ...snapshot().room, revision: 1 } };
+    expect(reduceWatchPartyServerMessage(current, old, 1_200)).toBe(current);
+    expect(reduceWatchPartyServerMessage(current, { v: 1, type: 'room.replay', fromRevision: 0,
+      revision: 1, serverTimeMs: 1_200, events: [] }, 1_200)).toBe(current);
+    const duplicateHost = snapshot();
+    duplicateHost.participants[1]!.role = 'host'; duplicateHost.self.role = 'host';
+    expect(decodeWatchPartyServerMessage(duplicateHost)).toEqual({ ok: false });
+  });
+
   it('records RTT samples and preserves drift-correction hysteresis', () => {
     const connected = reduceWatchPartyServerMessage(INITIAL_WATCH_PARTY_STATE, snapshot(), 1_100);
     const sampled = reduceWatchPartyServerMessage(connected, {
@@ -141,7 +162,7 @@ describe('Watch Party web protocol vectors', () => {
       serverTimeMs: 2_070,
     }, 2_040);
     expect(sampled.clockSamples).toEqual([{ roundTripMs: 40, offsetMs: 50, receivedAtMs: 2_040 }]);
-    const playback = { ...snapshot().playback, mode: 'playing' as const,
+    const playback = { ...snapshot().playback, mode: 'playing' as const, freezeReason: undefined,
       positionSeconds: 10, anchorServerTimeMs: 1_000 };
     const entering = planWatchPartyDrift({ playback, localMedia: playback.media,
       localPositionSeconds: 10.6, localMode: 'playing', localNowMs: 2_000, clockSamples: [] });

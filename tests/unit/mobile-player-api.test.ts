@@ -2,10 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlaybackResponse } from '../../mobile/src/lib/types';
 
 const mock = vi.hoisted(() => ({
-  getSession: vi.fn(), getUser: vi.fn(), from: vi.fn(), publicFrom: vi.fn(), fetch: vi.fn(), publicOptions: null as any,
+  getSession: vi.fn(), getUser: vi.fn(), signOut: vi.fn(), from: vi.fn(), publicFrom: vi.fn(), fetch: vi.fn(), publicOptions: null as any,
 }));
 vi.mock('../../mobile/src/lib/supabase', () => ({ supabaseConfigured: true, supabase: {
-  auth: { getSession: mock.getSession, getUser: mock.getUser }, from: mock.from,
+  auth: { getSession: mock.getSession, getUser: mock.getUser, signOut: mock.signOut }, from: mock.from,
 } }));
 // The installed SDK's import condition resolves to ESM, not its directory's CJS main.
 vi.mock('../../mobile/node_modules/@supabase/supabase-js/dist/index.mjs', () => ({ createClient: (_url: string, _key: string, options: unknown) => {
@@ -14,7 +14,7 @@ vi.mock('../../mobile/node_modules/@supabase/supabase-js/dist/index.mjs', () => 
 
 import { fetchEpisodeNavigation, fetchHome, fetchStreamCatalog, fetchSubtitleCatalog, getPlaybackContext, listTitles, PLAYBACK_AUTH_TIMEOUT_MS,
   PLAYBACK_CATALOG_TIMEOUT_MS, PLAYBACK_CONTEXT_TIMEOUT_MS, PLAYBACK_REQUEST_TIMEOUT_MS, reportProgress, resolvePlayback,
-  resolvePlaybackDetails, sameOriginPlaybackUrl } from '../../mobile/src/lib/api';
+  resolvePlaybackDetails, sameOriginPlaybackUrl, signOut, PLAYBACK_STREAM_CATALOG_TIMEOUT_MS } from '../../mobile/src/lib/api';
 import { parseEpisodeNavigation } from '../../mobile/src/player/episode-navigation';
 const origin = new URL(process.env.EXPO_PUBLIC_WEB_URL ?? 'https://hulkofyt.eu.org').origin;
 
@@ -22,6 +22,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.stubGlobal('fetch', mock.fetch);
   mock.getSession.mockResolvedValue({ data: { session: null }, error: null });
+  mock.signOut.mockResolvedValue({ error: null });
 });
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -88,7 +89,7 @@ describe('Android catalog schema, deadlines and verified episode contract', () =
     mock.fetch.mockReturnValue(failure === 'network' ? new Promise(() => {}) : Promise.resolve({ ok: true, json: () => new Promise(() => {}) }));
     const catalog = fetchStreamCatalog(url);
     const error = expect(catalog).rejects.toThrow(/timed out/);
-    await vi.advanceTimersByTimeAsync(PLAYBACK_CATALOG_TIMEOUT_MS + 1); await error;
+    await vi.advanceTimersByTimeAsync(PLAYBACK_STREAM_CATALOG_TIMEOUT_MS + 1); await error;
     expect(mock.fetch.mock.calls[0]?.[1].signal.aborted).toBe(true);
     expect(mock.getSession).not.toHaveBeenCalled(); expect(vi.getTimerCount()).toBe(0);
   });
@@ -198,6 +199,62 @@ describe('Android optional playback bridge', () => {
   it('failed playback network returns an empty safe source result', async () => {
     mock.fetch.mockRejectedValue(new Error('offline'));
     expect(await resolvePlaybackDetails({ type: 'movie', tmdbId: '123' })).toEqual({ sources: [] });
+  });
+});
+
+describe('Android capability metadata and local sign-out', () => {
+  const url = `${origin}/api/vidnest?metadata=1`;
+  it('allows the existing resolver plus catalogue budget without a second request or auth lookup', async () => {
+    vi.useFakeTimers();
+    let resolve!: (response: Response) => void;
+    mock.fetch.mockReturnValue(new Promise<Response>((done) => { resolve = done; }));
+    const pending = fetchStreamCatalog(url);
+    const handled = pending.then((value) => value, () => null);
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(mock.fetch.mock.calls[0]![1].signal.aborted).toBe(false);
+    resolve(new Response(JSON.stringify({ streams: [{ id: '0', url: '/api/vidnest?token=fixture' }] })));
+    expect((await handled)?.streams[0]?.id).toBe('0');
+    expect(mock.fetch).toHaveBeenCalledOnce(); expect(mock.getSession).not.toHaveBeenCalled();
+    expect(mock.fetch.mock.calls[0]![1]).toMatchObject({ credentials: 'omit', redirect: 'error' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+  it('retains the existing epoch-ms expiries and uses the earliest capability deadline', async () => {
+    vi.useFakeTimers(); const now = Date.now();
+    mock.fetch.mockResolvedValue(new Response(JSON.stringify({ expiresAt: now + 120_000,
+      recommendedStreamId: '0', streams: [{ id: '0', url: '/api/vidnest?token=fixture', expiresAt: now + 60_000 }] })));
+    expect(await fetchStreamCatalog(url)).toMatchObject({ expiresAt: now + 60_000, recommendedStreamId: '0',
+      streams: [{ id: '0', expiresAt: now + 60_000 }] });
+  });
+  it('rejects expired, unsigned and metadata playback entries before they consume an ID', async () => {
+    const now = Date.now();
+    mock.fetch.mockResolvedValue(new Response(JSON.stringify({ streams: [
+      { id: 'unsigned', url: '/api/vidnest?stream=auto' },
+      { id: 'metadata', url: '/api/vidnest?token=fixture&metadata=1' },
+      { id: 'same', url: '/api/vidnest?token=expired', expiresAt: now - 1 },
+      { id: 'same', url: '/api/vidnest?token=current', expiresAt: now + 60_000 },
+    ] })));
+    expect((await fetchStreamCatalog(url)).streams.map((stream) => stream.id)).toEqual(['same']);
+  });
+  it.each([0, -1, null, 'tomorrow'])('fails closed on an invalid or expired catalogue deadline %s', async (expiresAt) => {
+    mock.fetch.mockResolvedValue(new Response(JSON.stringify({ expiresAt, streams: [{ id: '0', url: '/api/vidnest?token=fixture' }] })));
+    await expect(fetchStreamCatalog(url)).rejects.toThrow(/expired/);
+  });
+  it('bounds supplied future deadlines to the existing four-hour capability maximum', async () => {
+    vi.useFakeTimers(); const now = Date.now();
+    mock.fetch.mockResolvedValue(new Response(JSON.stringify({ expiresAt: now + 86_400_000,
+      streams: [{ id: '0', url: '/api/vidnest?token=fixture', expiresAt: now + 86_400_000 }] })));
+    const result = await fetchStreamCatalog(url);
+    expect(result.expiresAt).toBe(now + 14_400_000); expect(result.streams[0]?.expiresAt).toBe(result.expiresAt);
+  });
+  it('ordinary mobile sign-out targets only the current session, not every device', async () => {
+    await signOut();
+    expect(mock.signOut).toHaveBeenCalledExactlyOnceWith({ scope: 'local' });
+    expect(mock.from).not.toHaveBeenCalled(); expect(mock.getSession).not.toHaveBeenCalled();
+  });
+  it('does not escape the native action when local sign-out throws', async () => {
+    mock.signOut.mockRejectedValueOnce(new Error('offline'));
+    await expect(signOut()).resolves.toBeUndefined();
+    expect(mock.signOut).toHaveBeenCalledExactlyOnceWith({ scope: 'local' });
   });
 });
 

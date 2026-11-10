@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from 'react';
 import { loadTrailer } from '@/features/trailers/client';
 import { trailerLookupPath, type TrailerInfo, type TrailerLookup } from '@/features/trailers/types';
 import styles from './TrailerPreview.module.css';
+import { useViewingPreferences } from '@/features/account/ViewingPreferencesProvider';
 
 let activeStop: (() => void) | null = null;
 
@@ -17,17 +18,20 @@ function resetMedia(media: HTMLVideoElement | null) {
 }
 
 export function TrailerPreview(props: TrailerLookup) {
+  const preferences = useViewingPreferences();
+  const latestPreferences = useRef(preferences);
+  latestPreferences.current = preferences;
   const element = useRef<HTMLDivElement>(null);
   const video = useRef<HTMLVideoElement>(null);
   const sequence = useRef(0);
   const [preview, setPreview] = useState<Preview | null>(null);
   const [ready, setReady] = useState(false);
   const path = trailerLookupPath(props);
-  const current = preview?.path === path ? preview : null;
+  const current = preferences.autoplayPreviews && !preferences.reducedMotion && preview?.path === path ? preview : null;
 
   useEffect(() => {
     const card = element.current?.closest('a');
-    if (!card || !path) return;
+    if (!card || !path || !preferences.autoplayPreviews || preferences.reducedMotion) return;
     let disposed = false;
     let hovering = false;
     let inView = true;
@@ -38,7 +42,8 @@ export function TrailerPreview(props: TrailerLookup) {
     const motion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const connection = (navigator as Navigator & { connection?: EventTarget & { saveData?: boolean; effectiveType?: string } }).connection;
     const eligible = () => !disposed && inView && document.visibilityState !== 'hidden' && !connection?.saveData
-      && !/^(slow-)?2g$/.test(connection?.effectiveType ?? '') && pointer.matches && !motion.matches;
+      && !/^(slow-)?2g$/.test(connection?.effectiveType ?? '') && pointer.matches && !motion.matches
+      && latestPreferences.current.autoplayPreviews && !latestPreferences.current.reducedMotion;
     const stop = () => {
       hovering = false;
       clearTimeout(delay); clearTimeout(stopAt);
@@ -72,7 +77,7 @@ export function TrailerPreview(props: TrailerLookup) {
       }, 650);
     };
     const visibility = () => { if (document.visibilityState === 'hidden') stop(); };
-    const preferences = () => { if (!eligible()) stop(); };
+    const environmentChanged = () => { if (!eligible()) stop(); };
     const observer = typeof IntersectionObserver !== 'undefined' ? new IntersectionObserver((entries) => {
       const entry = entries.find((value) => value.target === card);
       if (!entry) return;
@@ -83,20 +88,20 @@ export function TrailerPreview(props: TrailerLookup) {
     card.addEventListener('pointerenter', begin);
     card.addEventListener('pointerleave', stop);
     document.addEventListener('visibilitychange', visibility);
-    pointer.addEventListener('change', preferences);
-    motion.addEventListener('change', preferences);
-    connection?.addEventListener?.('change', preferences);
+    pointer.addEventListener('change', environmentChanged);
+    motion.addEventListener('change', environmentChanged);
+    connection?.addEventListener?.('change', environmentChanged);
     return () => {
       stop(); disposed = true;
       observer?.disconnect();
       card.removeEventListener('pointerenter', begin);
       card.removeEventListener('pointerleave', stop);
       document.removeEventListener('visibilitychange', visibility);
-      pointer.removeEventListener('change', preferences);
-      motion.removeEventListener('change', preferences);
-      connection?.removeEventListener?.('change', preferences);
+      pointer.removeEventListener('change', environmentChanged);
+      motion.removeEventListener('change', environmentChanged);
+      connection?.removeEventListener?.('change', environmentChanged);
     };
-  }, [path]);
+  }, [path, preferences.autoplayPreviews, preferences.reducedMotion]);
 
   useEffect(() => {
     const media = video.current;

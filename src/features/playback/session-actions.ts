@@ -29,6 +29,7 @@ export async function reportPlaybackStartAction(
   if (!user.user) return { ok: false };
 
   const profileId = await getDefaultProfileId();
+  if (!profileId) return { ok: false };
   const { data, error } = await db
     .from('playback_sessions')
     .insert({

@@ -1,6 +1,7 @@
 import 'server-only';
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { getSupabasePublicClient } from '@/lib/supabase/public';
 import type { CastMember, MaturityRating, Season, Title, TitleType } from './types';
 import type { TitleFilters } from './queries';
 import type { Person, PersonCredit, PersonSearchResult } from '@/features/people/types';
@@ -9,9 +10,9 @@ import type { Person, PersonCredit, PersonSearchResult } from '@/features/people
  * Supabase-backed catalog repository (Spec Section 6: services -> repositories).
  *
  * This is the ONLY place that reads catalog rows from Postgres and maps them to
- * the client-safe `Title` DTO. RLS applies (anon key), so anonymous callers see
- * only published/public/released titles via `title_is_public()`; editors with
- * `catalog.read` additionally see drafts. Callers in `queries.ts`/`data.ts`
+ * the client-safe `Title` DTO. Public catalog reads always use a fresh anonymous
+ * client, even for editor requests, so shared responses cannot contain drafts.
+ * Only the explicit admin listing retains the caller's RLS context. Callers in `queries.ts`/`data.ts`
  * return honest empty states if these fail; no mock catalog is substituted.
  *
  * `server-only` guards against this repository (and the server Supabase client)
@@ -48,6 +49,14 @@ const TITLE_SELECT =
   'id, type, slug, name, original_name, original_language, synopsis, release_year, runtime_minutes, ' +
   'maturity, poster_url, backdrop_url, trailer_url, editorial_score, featured, ' +
   'tmdb_id, imdb_id, title_genres ( genres ( name ) )';
+
+function publicTitles(select = TITLE_SELECT, count?: 'exact') {
+  // Keep RLS, and explicitly preserve the publication boundary before pagination/counts.
+  return getSupabasePublicClient().from('titles').select(select, { count })
+    .eq('status', 'published')
+    .eq('visibility', 'public')
+    .or(`published_at.is.null,published_at.lte.${new Date().toISOString()}`);
+}
 
 /** Coerce a free-text DB maturity string to the DTO union, defaulting to NR-ish. */
 function toMaturity(value: string): MaturityRating {
@@ -87,10 +96,7 @@ function toTitle(row: TitleRow): Title {
 }
 
 export async function repoGetTitleBySlug(type: TitleType, slug: string): Promise<Title | null> {
-  const db = await getSupabaseServerClient();
-  const { data, error } = await db
-    .from('titles')
-    .select(TITLE_SELECT)
+  const { data, error } = await publicTitles()
     .eq('type', type)
     .eq('slug', slug)
     .maybeSingle();
@@ -105,14 +111,13 @@ export async function repoGetTitleById(id: string): Promise<Title | null> {
   // Mock catalog ids (e.g. 't-aurora') are not UUIDs; treat them as not-in-DB so
   // callers fall back to the mock catalog instead of throwing a syntax error.
   if (!UUID_RE.test(id)) return null;
-  const db = await getSupabaseServerClient();
-  const { data, error } = await db.from('titles').select(TITLE_SELECT).eq('id', id).maybeSingle();
+  const { data, error } = await publicTitles().eq('id', id).maybeSingle();
   if (error) throw new Error(`repoGetTitleById: ${error.message}`);
   return data ? toTitle(data as unknown as TitleRow) : null;
 }
 
 export async function repoListGenres(): Promise<string[]> {
-  const db = await getSupabaseServerClient();
+  const db = getSupabasePublicClient();
   const { data, error } = await db.from('genres').select('name').order('name');
   if (error) throw new Error(`repoListGenres: ${error.message}`);
   return (data ?? []).map((g) => g.name);
@@ -121,11 +126,10 @@ export async function repoListGenres(): Promise<string[]> {
 export async function repoListTitles(filters: TitleFilters = {}): Promise<Title[]> {
   // The existing schema has no origin-country column. Never guess it from language.
   if (filters.country) return [];
-  const db = await getSupabaseServerClient();
   const select = filters.genre
     ? TITLE_SELECT.replace('title_genres ( genres ( name ) )', 'title_genres!inner ( genres!inner ( name ) )')
     : TITLE_SELECT;
-  let query = db.from('titles').select(select);
+  let query = publicTitles(select);
 
   if (filters.type) query = query.eq('type', filters.type);
   if (filters.originalLanguage) query = query.in('original_language', filters.originalLanguage.split('|'));
@@ -217,11 +221,10 @@ export async function repoListTitlesPage(
   pageSize: number,
 ): Promise<PagedTitles> {
   if (filters.country) return { rows: [], total: 0 };
-  const db = await getSupabaseServerClient();
   const select = filters.genre
     ? TITLE_SELECT.replace('title_genres ( genres ( name ) )', 'title_genres!inner ( genres!inner ( name ) )')
     : TITLE_SELECT;
-  let query = db.from('titles').select(select, { count: 'exact' });
+  let query = publicTitles(select, 'exact');
 
   if (filters.type) query = query.eq('type', filters.type);
   if (filters.originalLanguage) query = query.in('original_language', filters.originalLanguage.split('|'));
@@ -261,17 +264,14 @@ export async function repoListTitlesPage(
 }
 
 export async function repoListTitleRoutes(): Promise<Array<Pick<Title, 'slug' | 'type'>>> {
-  const db = await getSupabaseServerClient();
   const routes: Array<Pick<Title, 'slug' | 'type'>> = [];
   const pageSize = 1000;
   for (let offset = 0; ; offset += pageSize) {
-    const { data, error } = await db
-      .from('titles')
-      .select('slug, type')
+    const { data, error } = await publicTitles('slug, type')
       .order('id', { ascending: true })
       .range(offset, offset + pageSize - 1);
     if (error) throw new Error(`repoListTitleRoutes: ${error.message}`);
-    const rows = data ?? [];
+    const rows = (data ?? []) as unknown as Array<Pick<Title, 'slug' | 'type'>>;
     routes.push(...rows.map((row) => ({ slug: row.slug, type: row.type as TitleType })));
     if (rows.length < pageSize) break;
   }
@@ -390,7 +390,7 @@ const PERSON_CREDIT_SELECT =
  * stays empty, so the UI never fabricates per-episode detail.
  */
 export async function repoListSeasonsForTitle(titleId: string): Promise<Season[]> {
-  const db = await getSupabaseServerClient();
+  const db = getSupabasePublicClient();
   const { data: seasons, error: seasonErr } = await db
     .from('seasons')
     .select(SEASON_SELECT)
@@ -446,7 +446,7 @@ export async function repoListSeasonsForTitle(titleId: string): Promise<Season[]
 
 /** Cast credits (person joined) for one title, ordered by billing. */
 export async function repoListCastForTitle(titleId: string): Promise<CastMember[]> {
-  const db = await getSupabaseServerClient();
+  const db = getSupabasePublicClient();
   const { data, error } = await db
     .from('title_people')
     .select(CAST_SELECT)

@@ -42,6 +42,7 @@ function connectionLabel(session: WatchPartySessionController): string {
   if (phase === 'connecting') return 'Connecting';
   if (phase === 'reconnecting') return `Reconnecting (attempt ${reconnectAttempt})`;
   if (phase === 'connected') return 'Connected';
+  if (phase === 'leaving') return 'Leaving room';
   if (phase === 'closed') return 'Room closed';
   if (phase === 'error') return 'Connection stopped';
   return 'Not connected';
@@ -72,6 +73,7 @@ export function WatchPartyPanel({ open, onClose, session, initialRoomCode }: Wat
   const { state } = session;
   const hasRoom = Boolean(state.room && state.self);
   const connected = session.available && state.phase === 'connected';
+  const connecting = ['ticketing', 'connecting', 'reconnecting'].includes(state.phase);
   const connectedCount = state.participants.filter((participant) => participant.connected).length;
   const rateLimited = state.rateLimitedUntilMs !== null && state.rateLimitedUntilMs > Date.now();
 
@@ -182,8 +184,7 @@ export function WatchPartyPanel({ open, onClose, session, initialRoomCode }: Wat
                 <Button
                   variant="primary"
                   className="w-full"
-                  disabled={state.phase === 'ticketing' || state.phase === 'connecting'
-                    || session.syncStatus === 'unsupported-media'}
+                  disabled={connecting || session.syncStatus === 'unsupported-media'}
                   onClick={createRoom}
                 >
                   Create party for this title
@@ -213,16 +214,17 @@ export function WatchPartyPanel({ open, onClose, session, initialRoomCode }: Wat
                   />
                 </label>
                 <Button variant="secondary" className="w-full" type="submit"
-                  disabled={state.phase === 'ticketing' || state.phase === 'connecting'}>
+                  disabled={connecting}>
                   Join room
                 </Button>
               </form>
 
               {session.savedResume ? (
-                <Button variant="ghost" className="w-full" onClick={() => session.resume()}>
+                <Button variant="ghost" className="w-full" disabled={connecting} onClick={() => session.resume()}>
                   Resume {session.savedResume.roomCode}
                 </Button>
               ) : null}
+              {connecting ? <Button variant="ghost" className="w-full" onClick={session.leave}>Cancel connection</Button> : null}
               {formError ? <p role="alert" className="text-xs text-danger">{formError}</p> : null}
             </div>
           ) : (
@@ -235,14 +237,18 @@ export function WatchPartyPanel({ open, onClose, session, initialRoomCode }: Wat
                   </div>
                   <Button size="sm" variant="secondary" onClick={() => void copyInvite()}>Copy invite</Button>
                 </div>
-                <p className="mt-2 text-xs text-content-muted">{syncCopy(session.syncStatus)}</p>
+                <p role="status" className="mt-2 text-xs text-content-muted">{connected ? syncCopy(session.syncStatus)
+                  : 'Playback sync and chat are paused until the room reconnects.'}</p>
+                {state.phase === 'error' && !state.error ? (
+                  <Button size="sm" variant="secondary" className="mt-2" onClick={session.retry}>Retry connection</Button>
+                ) : null}
                 <p role="status" aria-live="polite" className="mt-1 min-h-4 text-xs text-success">{copyStatus}</p>
               </section>
 
               <section aria-labelledby="party-presence-heading">
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <h3 id="party-presence-heading" className="text-sm font-semibold">People</h3>
-                  <span className="text-xs text-content-muted">{connectedCount} connected</span>
+                  <span className="text-xs text-content-muted">{connected ? '' : 'Last known: '}{connectedCount} connected</span>
                 </div>
                 <ul className="space-y-2">
                   {state.participants.map((participant) => (
@@ -257,8 +263,9 @@ export function WatchPartyPanel({ open, onClose, session, initialRoomCode }: Wat
                           {participant.role === 'host' ? 'Host' : participant.connected ? 'Connected' : 'Offline'}
                         </p>
                       </div>
-                      {state.self!.role === 'host' && participant.role !== 'host' && participant.connected ? (
-                        <Button size="sm" variant="ghost" onClick={() => session.transferHost(participant.participantId)}>
+                        {state.self!.role === 'host' && participant.role !== 'host' && participant.connected ? (
+                          <Button size="sm" variant="ghost" disabled={!connected || rateLimited}
+                            onClick={() => session.transferHost(participant.participantId)}>
                           Make host
                         </Button>
                       ) : null}
@@ -304,7 +311,8 @@ export function WatchPartyPanel({ open, onClose, session, initialRoomCode }: Wat
                 </form>
               </section>
 
-              <Button variant="ghost" className="w-full text-danger" onClick={session.leave}>Leave party</Button>
+              <Button variant="ghost" className="w-full text-danger" disabled={state.phase === 'leaving'}
+                onClick={session.leave}>Leave party</Button>
             </div>
           )}
           </>}

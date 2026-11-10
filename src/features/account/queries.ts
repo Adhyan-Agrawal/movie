@@ -1,7 +1,7 @@
 import 'server-only';
 
 import { features } from '@/lib/env';
-import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { getVerifiedAccount } from '@/features/auth/verified-account';
 import { toMaturityLevel, type AccountProfile } from './types';
 
 /**
@@ -24,22 +24,14 @@ interface ProfileRow {
 
 /** Resolve the signed-in user's email, or null when there is no session. */
 export async function getSignedInEmail(): Promise<string | null> {
-  if (!features.supabaseConfigured) return null;
-
-  const supabase = await getSupabaseServerClient();
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user) return null;
-  return data.user.email ?? null;
+  const account = await getVerifiedAccount();
+  return account.status === 'authenticated' ? account.user.email ?? null : null;
 }
 
 /** Resolve the signed-in user's id, or null when there is no session. */
 export async function getSignedInAccountId(): Promise<string | null> {
-  if (!features.supabaseConfigured) return null;
-
-  const supabase = await getSupabaseServerClient();
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user) return null;
-  return data.user.id;
+  const account = await getVerifiedAccount();
+  return account.status === 'authenticated' ? account.user.id : null;
 }
 
 /** List the REAL profiles belonging to the signed-in account (RLS-scoped). */
@@ -47,10 +39,12 @@ export async function listAccountProfiles(): Promise<AccountProfile[]> {
   if (!features.supabaseConfigured) return [];
 
   try {
-    const supabase = await getSupabaseServerClient();
-    const { data, error } = await supabase
+    const account = await getVerifiedAccount();
+    if (account.status !== 'authenticated') return [];
+    const { data, error } = await account.client
       .from('profiles')
       .select('id, name, avatar, maturity_ceiling, is_kids, created_at')
+      .eq('account_id', account.user.id)
       .order('created_at', { ascending: true });
 
     if (error) throw new Error(`listAccountProfiles: ${error.message}`);

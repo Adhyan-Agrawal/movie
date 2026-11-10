@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { cn } from '@/lib/cn';
 import { Icon } from '@/components/ui/Icon';
+import { useViewingPreferences } from '@/features/account/ViewingPreferencesProvider';
 
 /**
  * Auto-advancing hero carousel (Spec Section 4).
@@ -22,9 +23,13 @@ const ADVANCE_MS = 6000;
 export function HeroCarousel({ children }: { children: ReactNode[] }) {
   const count = children.length;
   const [index, setIndex] = useState(0);
-  const [paused, setPaused] = useState(false);
+  const [hovered, setHovered] = useState(false);
+  const [focused, setFocused] = useState(false);
   const [autoplay, setAutoplay] = useState(false);
-  const [reducedMotion, setReducedMotion] = useState(true);
+  const [systemReducedMotion, setReducedMotion] = useState(true);
+  const preferences = useViewingPreferences();
+  const reducedMotion = systemReducedMotion || preferences.reducedMotion;
+  const paused = hovered || focused;
 
   useEffect(() => {
     const preference = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -53,10 +58,10 @@ export function HeroCarousel({ children }: { children: ReactNode[] }) {
       aria-roledescription="carousel"
       aria-label="Trending titles"
       className="hero-carousel relative"
-      onMouseEnter={() => setPaused(true)}
-      onMouseLeave={() => setPaused(false)}
-      onFocus={() => setPaused(true)}
-      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setPaused(false); }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      onFocus={() => setFocused(true)}
+      onBlur={(event) => { if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}
       onTouchStart={() => setAutoplay(false)}
     >
       {/* A shared grid cell keeps the tallest slide's geometry stable. */}

@@ -166,7 +166,7 @@ function loadSdk(target: CastWindow): Promise<CastSdk> {
 export async function requestCasting(
   video: HTMLVideoElement,
   media: CastingMedia,
-  onProgress: (progress: CastingProgress) => void,
+  onProgress: (progress: CastingProgress, forceCheckpoint?: boolean) => void,
   onDisconnect: () => void,
 ): Promise<CastingHandle | null> {
   if (typeof window === 'undefined' || typeof document === 'undefined') {
@@ -248,7 +248,7 @@ export async function requestCasting(
       cleanup();
       try { onDisconnect(); } catch { /* UI callbacks must not leak Cast listeners. */ }
     };
-    const publish = () => {
+    const publish = (forceCheckpoint = false) => {
       if (disposed) return;
       try {
         if (context.getCurrentSession() !== connectedSession || connectedSession.getMediaSession() !== receiver) {
@@ -256,11 +256,13 @@ export async function requestCasting(
         }
         const position = receiver.getEstimatedTime();
         const duration = receiver.media.duration;
-        onProgress({
+        const progress: CastingProgress = {
           positionSeconds: Number.isFinite(position) ? Math.max(0, position) : 0,
           ...(duration !== undefined && Number.isFinite(duration) && duration > 0 ? { durationSeconds: duration } : {}),
           paused: receiver.playerState === 'PAUSED' || receiver.playerState === 'IDLE',
-        });
+        };
+        if (forceCheckpoint) onProgress(progress, true);
+        else onProgress(progress);
       } catch { disconnect(); }
     };
     const update: MediaListener = (alive) => { if (alive) publish(); else disconnect(); };
@@ -270,7 +272,7 @@ export async function requestCasting(
     };
     receiver.addUpdateListener(update);
     context.addEventListener(eventType, sessionChanged);
-    timer = setInterval(publish, 1000);
+    timer = setInterval(() => publish(), 1000);
     const command = (operation: (success: CastSuccess, failure: CastFailure) => void): Promise<void> => {
       if (disposed) return Promise.reject(castingError('This Cast connection has ended. Select Cast again.'));
       return new Promise<void>((resolve, reject) => {
@@ -278,7 +280,7 @@ export async function requestCasting(
           disconnect();
           reject(castingError('The TV could not complete this playback command. Select Cast again.'));
         };
-        try { operation(() => { publish(); resolve(); }, failure); }
+        try { operation(() => { publish(true); resolve(); }, failure); }
         catch { failure(); }
       });
     };
@@ -301,7 +303,7 @@ export async function requestCasting(
       stop: () => {
         if (stopped || disconnected) return;
         stopped = true;
-        publish();
+        publish(true);
         disconnect();
         cleanup();
         try { connectedSession.endSession(true); } catch { /* Local cleanup must succeed even when the device is gone. */ }

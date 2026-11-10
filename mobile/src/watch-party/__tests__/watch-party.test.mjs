@@ -13,11 +13,13 @@ const ts = require('typescript');
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..', '..');
 const fixture = JSON.parse(readFileSync(join(here, 'contract-vectors.json'), 'utf8'));
+const mediaVectors = JSON.parse(readFileSync(fixture.mediaVectors, 'utf8'));
 const build = mkdtempSync(join(tmpdir(), 'lumora-watch-party-'));
 const sourceFiles = [
   'src/lib/runtime-config.ts',
   'src/watch-party/config.ts',
   'src/watch-party/protocol.ts',
+  'src/watch-party/identity.ts',
   'src/watch-party/errors.ts',
   'src/watch-party/codec.ts',
   'src/watch-party/reducer.ts',
@@ -41,6 +43,20 @@ for (const relative of sourceFiles) {
 const previousWebUrl = process.env.EXPO_PUBLIC_WEB_URL;
 process.env.EXPO_PUBLIC_WEB_URL = 'https://lumora.adhyanagrawal777.workers.dev';
 const protocol = require(join(build, 'src/watch-party/protocol.js'));
+const backendOutput = ts.transpileModule(readFileSync(fixture.source, 'utf8'), { compilerOptions: {
+  module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022,
+}, fileName: fixture.source, reportDiagnostics: true });
+assert.equal((backendOutput.diagnostics ?? []).filter((item) => item.category === ts.DiagnosticCategory.Error).length, 0);
+writeFileSync(join(build, 'backend-protocol.js'), backendOutput.outputText);
+const backendProtocol = require(join(build, 'backend-protocol.js'));
+const backendCodecOutput = ts.transpileModule(readFileSync(join(dirname(fixture.source), 'web', 'codec.ts'), 'utf8'), {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }, reportDiagnostics: true,
+});
+assert.equal((backendCodecOutput.diagnostics ?? []).filter((item) => item.category === ts.DiagnosticCategory.Error).length, 0);
+writeFileSync(join(build, 'backend-codec.js'), backendCodecOutput.outputText.replace(
+  /require\(["']\.\.\/protocol["']\)/g, 'require("./backend-protocol.js")'));
+const backendCodec = require(join(build, 'backend-codec.js'));
+const identity = require(join(build, 'src/watch-party/identity.js'));
 const codec = require(join(build, 'src/watch-party/codec.js'));
 const reducer = require(join(build, 'src/watch-party/reducer.js'));
 const transportModule = require(join(build, 'src/watch-party/transport.js'));
@@ -58,6 +74,78 @@ function near(actual, expected, epsilon = 1e-9) {
 test('shared backend protocol checksum is pinned', () => {
   const canonical = readFileSync(fixture.source);
   assert.equal(createHash('sha256').update(canonical).digest('hex'), fixture.sha256);
+});
+
+test('reviewed backend and mobile contracts agree on constants, identity and drift behavior', () => {
+  assert.equal(protocol.WATCH_PARTY_PROTOCOL_VERSION, backendProtocol.WATCH_PARTY_PROTOCOL_VERSION);
+  assert.equal(protocol.WATCH_PARTY_SUBPROTOCOL, backendProtocol.WATCH_PARTY_SUBPROTOCOL);
+  assert.deepEqual(protocol.WATCH_PARTY_ERROR_CODES, backendProtocol.WATCH_PARTY_ERROR_CODES);
+  assert.deepEqual(protocol.WATCH_PARTY_DRIFT_POLICY, backendProtocol.WATCH_PARTY_DRIFT_POLICY);
+  for (const [key, value] of Object.entries(protocol.WATCH_PARTY_LIMITS)) assert.deepEqual(value, backendProtocol.WATCH_PARTY_LIMITS[key]);
+  for (const media of [{ kind: 'movie', mediaId: fixture.ids.movie },
+    { kind: 'episode', mediaId: fixture.ids.movie, episodeId: fixture.ids.episode },
+    { kind: 'episode', mediaId: fixture.ids.movie, seasonNumber: 0, episodeNumber: 2 },
+    { kind: 'episode', mediaId: fixture.ids.movie, seasonNumber: 1 },
+    { kind: 'movie', mediaId: 'tmdb:movie:123' }]) {
+    assert.deepEqual(protocol.parseWatchPartyMediaIdentity(media), backendProtocol.parseWatchPartyMediaIdentity(media));
+  }
+  for (const value of [fixture.normalization.displayNameInput, '\u0000', '<Guest>', 'x'.repeat(41), null]) {
+    assert.equal(protocol.normalizeWatchPartyDisplayName(value), backendProtocol.normalizeWatchPartyDisplayName(value));
+  }
+  for (const vector of fixture.drift) {
+    const input = { playback: { media: { kind: 'movie', mediaId: fixture.ids.movie }, mode: 'playing', positionSeconds: 10,
+      playbackRate: 1, anchorServerTimeMs: 1000, revision: 4 }, localMedia: { kind: 'movie', mediaId: fixture.ids.movie },
+      localPositionSeconds: vector.localPositionSeconds, localMode: 'playing', localNowMs: 1000,
+      clockSamples: [], correctionState: vector.correctionState };
+    assert.deepEqual(protocol.planWatchPartyDrift(input), backendProtocol.planWatchPartyDrift(input));
+  }
+});
+
+test('compiled backend and mobile accept the reviewed media namespaces and reject ambiguous identities', () => {
+  const roomFor = (media) => ({ v: 1, type: 'room.snapshot', serverTimeMs: 1000,
+    room: { roomCode: 'ABCDEFGH23', revision: 0, createdAtMs: 900, expiresAtMs: 100000, hostParticipantId: fixture.ids.participant },
+    self: { participantId: fixture.ids.participant, role: 'host', resumeToken: 'wp1.payload.signature' },
+    playback: { media, mode: 'paused', positionSeconds: 0, playbackRate: 1, anchorServerTimeMs: 1000, revision: 0 },
+    participants: [{ participantId: fixture.ids.participant, displayName: 'Host', role: 'host', connected: true, joinedAtMs: 900 }], chat: [] });
+  for (const media of mediaVectors.valid) {
+    assert.deepEqual(protocol.parseWatchPartyMediaIdentity(media), media);
+    assert.deepEqual(backendProtocol.parseWatchPartyMediaIdentity(media), media);
+    assert.equal(backendProtocol.parseWatchPartyClientMessage({ v: 1, type: 'playback.command', requestId: 'media-vector',
+      baseRevision: 0, command: { kind: 'media', media } }).ok, true);
+    const room = roomFor(media);
+    assert.equal(backendCodec.decodeWatchPartyServerMessage(room).ok, true);
+    assert.deepEqual(codec.decodeWatchPartyServerMessage(room), backendCodec.decodeWatchPartyServerMessage(room));
+    const state = { v: 1, type: 'playback.state', revision: 1, serverTimeMs: 1100, playback: { ...room.playback, revision: 1 } };
+    assert.equal(codec.decodeWatchPartyServerMessage(state).ok, true);
+    assert.deepEqual(codec.decodeWatchPartyServerMessage(state), backendCodec.decodeWatchPartyServerMessage(state));
+  }
+  for (const media of mediaVectors.invalid) {
+    assert.equal(protocol.parseWatchPartyMediaIdentity(media), null);
+    assert.equal(backendProtocol.parseWatchPartyMediaIdentity(media), null);
+    assert.deepEqual(codec.decodeWatchPartyServerMessage(roomFor(media)), { ok: false });
+    assert.deepEqual(backendCodec.decodeWatchPartyServerMessage(roomFor(media)), { ok: false });
+  }
+  assert.equal(protocol.isWatchPartyParticipantId('tmdb:movie:27205'), false);
+  assert.equal(protocol.sameWatchPartyMediaIdentity(
+    { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 2 },
+    { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 3 }), false);
+});
+
+test('compiled PlayerScreen identity producer uses TMDB coordinates without changing database UUID behavior', () => {
+  assert.deepEqual(identity.buildWatchPartyMediaIdentity({ type: 'movie', titleId: 'tmdb:movie:27205' }),
+    { kind: 'movie', mediaId: 'tmdb:movie:27205' });
+  for (const episodeId of [undefined, fixture.ids.episode, 'tmdb:episode:1396:1:2']) {
+    assert.deepEqual(identity.buildWatchPartyMediaIdentity({ type: 'tv', titleId: 'tmdb:tv:1396', episodeId, season: 1, episode: 2 }),
+      { kind: 'episode', mediaId: 'tmdb:tv:1396', seasonNumber: 1, episodeNumber: 2 });
+  }
+  assert.equal(identity.buildWatchPartyMediaIdentity({ type: 'tv', titleId: 'tmdb:tv:1396', episodeId: fixture.ids.episode }), null);
+  assert.equal(identity.buildWatchPartyMediaIdentity({ type: 'tv', titleId: 'tmdb:movie:27205', season: 1, episode: 2 }), null);
+  assert.equal(identity.buildWatchPartyMediaIdentity({ type: 'movie', titleId: '27205' }), null);
+  assert.equal(identity.buildWatchPartyMediaIdentity({ type: 'tv', titleId: null, season: 1, episode: 2 }), null);
+  assert.deepEqual(identity.buildWatchPartyMediaIdentity({ type: 'tv', titleId: fixture.ids.movie, episodeId: fixture.ids.episode }),
+    { kind: 'episode', mediaId: fixture.ids.movie, episodeId: fixture.ids.episode });
+  assert.deepEqual(identity.buildWatchPartyMediaIdentity({ type: 'tv', titleId: fixture.ids.movie, episodeId: fixture.ids.episode, season: 1, episode: 2 }),
+    { kind: 'episode', mediaId: fixture.ids.movie, episodeId: fixture.ids.episode, seasonNumber: 1, episodeNumber: 2 });
 });
 
 test('mobile constants and normalization match backend vectors', () => {

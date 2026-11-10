@@ -90,4 +90,12 @@ describe('Watch Party tickets', () => {
     expect(await verifyWatchPartyToken(token, SECRET, { expectedKind: 'connect' }))
       .toEqual({ ok: false, reason: 'invalid' });
   });
+
+  it('rejects noncanonical signature encodings with identical decoded bytes', async () => {
+    const token = await signWatchPartyToken(createClaims(), SECRET);
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    const last = alphabet.indexOf(token.at(-1)!);
+    const alternate = `${token.slice(0, -1)}${alphabet[last + 1]}`;
+    expect(await verifyWatchPartyToken(alternate, SECRET)).toEqual({ ok: false, reason: 'invalid' });
+  });
 });

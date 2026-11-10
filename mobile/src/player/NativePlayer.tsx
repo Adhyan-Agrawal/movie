@@ -6,7 +6,7 @@ import * as ScreenOrientation from 'expo-screen-orientation';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { fetchStreamCatalog, fetchSubtitleCatalog, fetchVastCreative, sameOriginPlaybackUrl, withPlaybackDeadline } from '../lib/api';
-import type { DirectStream, IntroMarker, NativeAdPolicy, NativeVastCreative, PlaybackSource, Subtitle } from '../lib/types';
+import type { DirectStream, IntroMarker, NativeAdPolicy, NativeVastCreative, PlaybackSource, StreamCatalog, Subtitle } from '../lib/types';
 import { colors } from '../theme';
 import { audioStreamOptions, chooseStream, compatiblePreferences, DEFAULT_PREFERENCES, qualityHeight, qualityKey, streamPlaybackUrl, trackKey,
   type AudioStreamOption, type Preferences } from './options';
@@ -79,6 +79,28 @@ function timeLabel(seconds: number): string {
   return `${Math.floor(value / 60)}:${String(value % 60).padStart(2, '0')}`;
 }
 
+function requiresStreamCatalog(source: PlaybackSource): boolean {
+  try { return !!source.streamCatalogUrl && new URL(source.streamCatalogUrl).pathname === '/api/vidnest'; }
+  catch { return false; }
+}
+
+function sourceIdentity(source: PlaybackSource): string {
+  if (requiresStreamCatalog(source)) {
+    const lookup = new URL(source.streamCatalogUrl!);
+    return JSON.stringify([source.id, lookup.origin, lookup.pathname,
+      ...['type', 'tmdbId', 'season', 'episode'].map((key) => lookup.searchParams.get(key))]);
+  }
+  return JSON.stringify([source.id, source.url]);
+}
+
+function hasDirectCapability(source: PlaybackSource): boolean {
+  try {
+    const url = new URL(source.url);
+    return url.pathname === '/api/vidnest' && !!url.searchParams.get('token')
+      && !url.searchParams.has('metadata') && !url.searchParams.has('stream');
+  } catch { return false; }
+}
+
 export default function NativePlayer({ source, initial, subtitleCatalogUrl, intro, adPolicy, episodes,
   partyMedia, partyConnected = false, partyRole = null, partyPlayback, registerPartyPlayerPort,
   onCheckpoint, onError, header, footer }: {
@@ -98,6 +120,9 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
   header: ReactNode;
   footer: ReactNode;
 }) {
+  // Provider IDs are reusable; capabilities and pins belong to one catalogue identity.
+  const sourceId = sourceIdentity(source);
+  const catalogRequired = requiresStreamCatalog(source);
   const player = useVideoPlayer(null, (p) => { p.timeUpdateEventInterval = 0.25; p.staysActiveInBackground = false; p.loop = false; });
   const videoView = useRef<VideoView | null>(null);
   const insets = useSafeAreaInsets();
@@ -113,7 +138,8 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
   const [playing, setPlaying] = useState(initial.playing);
   const [loading, setLoading] = useState(true);
   const [rate, setRate] = useState(1);
-  const [catalog, setCatalog] = useState<{ sourceId: string; streams: DirectStream[] } | null>(null);
+  const [catalog, setCatalog] = useState<(StreamCatalog & { sourceId: string; status: 'loading' | 'ready' | 'error'; blocking: boolean }) | null>(null);
+  const [catalogAttempt, setCatalogAttempt] = useState(0);
   const [selection, setSelection] = useState<{ sourceId: string; stream: DirectStream } | null>(null);
   const [audioSelection, setAudioSelection] = useState<{ sourceId: string; option: AudioStreamOption } | null>(null);
   const [preferences, setPreferences] = useState<Preferences>(DEFAULT_PREFERENCES);
@@ -146,10 +172,14 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
   const callbacks = useRef({ onCheckpoint, onError });
   callbacks.current = { onCheckpoint, onError };
   const sourceRef = useRef(source); sourceRef.current = source;
+  const sourceIdRef = useRef(sourceId); sourceIdRef.current = sourceId;
+  const catalogRef = useRef(catalog); catalogRef.current = catalog;
+  const catalogRequest = useRef<AbortController | null>(null);
+  const catalogQueued = useRef(false);
   const audioSelectionRef = useRef(audioSelection); audioSelectionRef.current = audioSelection;
-  const pinnedAudio = audioSelection?.sourceId === source.id ? audioSelection.option : null;
-  const selectedStream = pinnedAudio?.stream ?? (selection?.sourceId === source.id ? selection.stream : null);
-  const streams = catalog?.sourceId === source.id ? catalog.streams : [];
+  const pinnedAudio = audioSelection?.sourceId === sourceId ? audioSelection.option : null;
+  const selectedStream = pinnedAudio?.stream ?? (selection?.sourceId === sourceId ? selection.stream : null);
+  const streams = catalog?.sourceId === sourceId ? catalog.streams : [];
   const desired = useRef(preferences);
   desired.current = preferences;
   const selectedRef = useRef(selectedStream);
@@ -240,6 +270,7 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
   }
 
   function watchSourceDeadline() {
+    if (!pending.current && replacing.current) return;
     if (sourceDeadline.current !== null || playbackFailure.current) return;
     const id = generation.current;
     // A deadline reports failure only. It never declares readiness or retries a source.
@@ -564,7 +595,7 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
   function playbackError(message = 'This stream could not be played. Retry or select another source in Settings.') {
     if (!alive.current || playbackFailure.current || adActive.current) return;
     const pin = audioSelectionRef.current;
-    const option = pin?.sourceId === sourceRef.current.id ? pin.option : null;
+    const option = pin?.sourceId === sourceIdRef.current ? pin.option : null;
     snapshot.current = pending.current?.snapshot ?? snapshot.current;
     replacing.current = true;
     playbackFailure.current = true;
@@ -588,7 +619,24 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
     setNotice('');
     setLoading(true);
     setPlaybackFailed(false);
+    if (requiresStreamCatalog(sourceRef.current)) { refreshCatalog(); return; }
     setReplacementAttempt((n) => n + 1);
+  }
+
+  function catalogNeedsRefresh(): boolean {
+    const current = catalogRef.current;
+    return !current || current.sourceId !== sourceIdRef.current || current.status === 'error'
+      || (current.expiresAt !== undefined && current.expiresAt <= Date.now())
+      || (selectedRef.current?.expiresAt !== undefined && selectedRef.current.expiresAt <= Date.now());
+  }
+
+  function refreshCatalog() {
+    if (!alive.current || !sourceRef.current.streamCatalogUrl || catalogRequest.current || catalogQueued.current) return;
+    catalogQueued.current = true;
+    const current = catalogRef.current?.sourceId === sourceIdRef.current ? catalogRef.current : null;
+    const waiting = { ...current, sourceId: sourceIdRef.current, streams: current?.streams ?? [], status: 'loading' as const, blocking: true };
+    catalogRef.current = waiting; setCatalog(waiting);
+    setCatalogAttempt((attempt) => attempt + 1);
   }
 
   function changeEpisode(direction: 'previous' | 'next') {
@@ -774,22 +822,56 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
 
   useEffect(() => {
     const controller = new AbortController();
-    setCatalog((current) => current?.sourceId === source.id ? current : { sourceId: source.id, streams: [] });
+    const forced = catalogQueued.current;
+    catalogRequest.current = controller; catalogQueued.current = false;
+    const current = catalogRef.current?.sourceId === sourceId ? catalogRef.current : null;
+    const active = selectedRef.current;
+    const hasActive = !!active && (active.expiresAt === undefined || active.expiresAt > Date.now());
+    const blocking = catalogRequired && (forced || (!hasActive && !hasDirectCapability(source)));
+    const waiting = { ...current, sourceId, streams: current?.streams ?? [], status: 'loading' as const, blocking };
+    catalogRef.current = waiting; setCatalog(waiting);
     setCatalogNotice(source.streamCatalogUrl ? 'Discovering stream options...' : '');
-    if (source.streamCatalogUrl) void fetchStreamCatalog(source.streamCatalogUrl, controller.signal).then((catalog) => {
-      if (controller.signal.aborted) return;
-      setCatalog({ sourceId: source.id, streams: catalog.streams });
+    if (source.streamCatalogUrl) void fetchStreamCatalog(source.streamCatalogUrl, controller.signal).then((result) => {
+      if (controller.signal.aborted || !alive.current || sourceIdRef.current !== sourceId) return;
+      if (catalogRequest.current === controller) catalogRequest.current = null;
+      if (blocking && (!result.streams.length || (result.expiresAt !== undefined && result.expiresAt <= Date.now()))) {
+        throw new Error('No current stream capabilities.');
+      }
+      const fresh = { ...result, sourceId, status: 'ready' as const, blocking };
+      catalogRef.current = fresh; setCatalog(fresh);
       const pin = audioSelectionRef.current;
-      if (pin?.sourceId === source.id) {
-        const present = catalog.streams.some((s) => s.id === pin.option.stream.id && s.url === pin.option.stream.url);
+      if (blocking) {
+        const pinned = pin?.sourceId === sourceId ? pin : null;
+        const usable = result.streams.filter((stream) => stream.expiresAt === undefined || stream.expiresAt > Date.now());
+        const renewed = pinned ? usable.find((stream) => stream.id === pinned.option.stream.id) : undefined;
+        const chosen = pinned && !renewed ? undefined : chooseStream(usable, desired.current, 'quality', selectedRef.current?.id, renewed);
+        selectedRef.current = chosen ?? null;
+        setSelection(chosen ? { sourceId, stream: chosen } : null);
+        if (pinned && chosen) {
+          const option = audioStreamOptions(result.streams).find((entry) => entry.stream.id === chosen.id)!;
+          const updated = { sourceId, option: { ...option, number: pinned.option.number } };
+          audioSelectionRef.current = updated; setAudioSelection(updated);
+        }
+        setCatalogNotice(chosen ? '' : 'The selected stream is unavailable. Select another audio number or Audio Auto.');
+        return;
+      }
+      if (pin?.sourceId === sourceId) {
+        const present = result.streams.some((s) => s.id === pin.option.stream.id && s.url === pin.option.stream.url);
         setCatalogNotice(present ? '' : `Audio stream ${pin.option.number} is not in the refreshed catalog. It remains pinned until you select another number or Audio Auto.`);
         return;
       }
       // Metadata may populate Settings, but never interrupts the attached source or rewrites user pins.
-      setCatalogNotice(catalog.streams.length ? '' : 'Stream metadata is unavailable. Auto playback remains available.');
-    }).catch(() => { if (!controller.signal.aborted) setCatalogNotice('Stream options could not be loaded. Playback continues.'); });
-    return () => controller.abort();
-  }, [source.id, source.streamCatalogUrl]);
+      setCatalogNotice(result.streams.length ? '' : 'Stream metadata is unavailable. Auto playback remains available.');
+    }).catch(() => {
+      if (controller.signal.aborted || !alive.current || sourceIdRef.current !== sourceId) return;
+      if (catalogRequest.current === controller) catalogRequest.current = null;
+      const failed = { ...waiting, status: 'error' as const };
+      catalogRef.current = failed; setCatalog(failed);
+      setCatalogNotice(blocking ? 'Stream options could not be loaded. Retry to renew the stream.' : 'Stream options could not be loaded. Playback continues.');
+    }).finally(() => { if (catalogRequest.current === controller) catalogRequest.current = null; });
+    else catalogRequest.current = null;
+    return () => { controller.abort(); if (catalogRequest.current === controller) catalogRequest.current = null; };
+  }, [sourceId, source.streamCatalogUrl, catalogAttempt]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -798,10 +880,14 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
       .then((tracks) => { if (!controller.signal.aborted) setSidecars(tracks); })
       .catch(() => { if (!controller.signal.aborted) setNotice('External subtitle options are unavailable.'); });
     return () => controller.abort();
-  }, [subtitleCatalogUrl]);
+  }, [subtitleCatalogUrl, catalogAttempt]);
 
   const stream = selectedStream;
-  const url = streamPlaybackUrl(stream, preferences, source.url);
+  const catalogBlocking = catalogRequired && (catalog?.sourceId !== sourceId ? !hasDirectCapability(source) : catalog.blocking);
+  const catalogPending = catalogBlocking && (catalog?.sourceId !== sourceId || catalog.status === 'loading');
+  const catalogSelectionValid = !!stream && streams.some((candidate) => candidate.id === stream.id && candidate.url === stream.url);
+  const url = catalogBlocking && (catalogPending || catalog?.status === 'error' || !catalogSelectionValid)
+    ? null : streamPlaybackUrl(stream, preferences, source.url);
   const qualityConflict = !url && preferences.quality !== 'auto';
   useEffect(() => {
     resetIntroSeek();
@@ -823,20 +909,21 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
     playbackFailure.current = false;
     setPlaybackFailed(false);
     if (!url) {
-      setLoading(false);
+      setLoading(catalogPending);
       try { player.pause(); } catch { /* A released player cannot load a conflicting selection. */ }
+      if (catalogBlocking && !catalogPending) playbackError('Stream options are unavailable. Retry or select another audio stream.');
       return;
     }
     setLoading(true);
     pending.current = { generation: id, url, snapshot: saved, metadataLoaded: false, ready: false, duration: 0 };
     watchSourceDeadline();
-    // Start now, independently of catalogs and earlier stalled replacements. Native events gate readiness.
+    // VidNest starts from its catalogue capability, never a parallel unsigned resolver request.
     try {
       void player.replaceAsync({ uri: url, contentType: source.kind === 'hls' ? 'hls' : source.kind === 'dash' ? 'dash' : 'progressive' })
         .catch(() => { if (alive.current && id === generation.current) playbackError(); });
     } catch { if (alive.current && id === generation.current) playbackError(); }
     return clearSourceDeadline;
-  }, [player, url, source.kind, replacementAttempt]);
+  }, [player, url, source.kind, sourceId, replacementAttempt, catalogPending, catalogBlocking ? catalog?.status : null]);
 
   function startPictureInPicture() {
     let ready = false;
@@ -980,29 +1067,36 @@ export default function NativePlayer({ source, initial, subtitleCatalogUrl, intr
       return;
     }
     const pin = audioSelectionRef.current;
-    const pinned = pin?.sourceId === source.id ? pin.option.stream : null;
-    const chosen = chooseStream(streams, next, field, selectedRef.current?.id, pinned);
+    if (requiresStreamCatalog(sourceRef.current) && catalogNeedsRefresh()) {
+      desired.current = next; setPreferences(next); refreshCatalog(); return;
+    }
+    const pinned = pin?.sourceId === sourceIdRef.current ? pin.option.stream : null;
+    const currentStreams = catalogRef.current?.sourceId === sourceIdRef.current ? catalogRef.current.streams : [];
+    const chosen = chooseStream(currentStreams, next, field, selectedRef.current?.id, pinned);
     desired.current = pinned ? next : chosen ? compatiblePreferences(chosen, next) : next;
     setPreferences(desired.current);
     if (chosen) {
       selectedRef.current = chosen;
-      setSelection({ sourceId: source.id, stream: chosen });
+      setSelection({ sourceId: sourceIdRef.current, stream: chosen });
     }
   }
 
   function changeAudioStream(option: AudioStreamOption | null) {
     if (!alive.current || adActive.current || pictureInPicturePending.current || pictureInPictureActive.current) return;
-    const pin = option ? { sourceId: source.id, option } : null;
+    const currentStreams = catalogRef.current?.sourceId === sourceIdRef.current ? catalogRef.current.streams : [];
+    if (option && !currentStreams.some((stream) => stream.id === option.stream.id && stream.url === option.stream.url)) return;
+    const pin = option ? { sourceId: sourceIdRef.current, option } : null;
     audioSelectionRef.current = pin;
     setAudioSelection(pin);
-    const chosen = option?.stream ?? chooseStream(streams, desired.current, 'quality', selectedRef.current?.id) ?? null;
+    const chosen = option?.stream ?? chooseStream(currentStreams, desired.current, 'quality', selectedRef.current?.id) ?? null;
     if (chosen) {
       desired.current = compatiblePreferences(chosen, desired.current);
       setPreferences(desired.current);
     }
     selectedRef.current = chosen;
-    setSelection(chosen ? { sourceId: source.id, stream: chosen } : null);
+    setSelection(chosen ? { sourceId: sourceIdRef.current, stream: chosen } : null);
     setNotice('');
+    if (requiresStreamCatalog(sourceRef.current) && catalogNeedsRefresh()) { refreshCatalog(); return; }
     if (playbackFailure.current) setReplacementAttempt((n) => n + 1);
   }
 

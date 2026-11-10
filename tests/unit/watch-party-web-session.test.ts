@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WATCH_PARTY_SUBPROTOCOL, type WatchPartyRoomSnapshotMessage } from '@/features/watch-party/protocol';
-import type { PartyPlayerPort } from '@/features/watch-party/web/player-port';
+import type { PartyPlayerIntent, PartyPlayerPort } from '@/features/watch-party/web/player-port';
 
 const harness = vi.hoisted(() => ({
   slots: [] as any[], cursor: 0, effects: [] as Array<() => void>, dirty: false,
@@ -57,10 +57,14 @@ class FakeSocket {
   addEventListener(type: string, listener: (event: { data?: unknown }) => void) {
     this.listeners.set(type, [...(this.listeners.get(type) ?? []), listener]);
   }
+  removeEventListener(type: string, listener: (event: { data?: unknown }) => void) {
+    this.listeners.set(type, (this.listeners.get(type) ?? []).filter((value) => value !== listener));
+  }
   send(value: string) { this.sent.push(value); }
   close() { this.readyState = 3; }
   open() { this.readyState = 1; for (const listener of this.listeners.get('open') ?? []) listener({}); }
   message(value: unknown) { for (const listener of this.listeners.get('message') ?? []) listener({ data: JSON.stringify(value) }); }
+  networkClose() { this.readyState = 3; for (const listener of this.listeners.get('close') ?? []) listener({}); }
 }
 
 function snapshot(): WatchPartyRoomSnapshotMessage {
@@ -72,6 +76,7 @@ function snapshot(): WatchPartyRoomSnapshotMessage {
     participants: [{ participantId: HOST_ID, displayName: 'Host', role: 'host', connected: true, joinedAtMs: Date.now() - 1_000 },
       { participantId: MEMBER_ID, displayName: 'Viewer', role: 'member', connected: true, joinedAtMs: Date.now() - 500 }], chat: [] };
 }
+// eslint-disable-next-line react-hooks/rules-of-hooks -- React hooks are replaced by the deterministic harness above.
 function render() { harness.cursor = 0; harness.dirty = false; session = useWatchPartySession(options); }
 async function pump() {
   for (let index = 0; index < 25; index += 1) {
@@ -116,7 +121,9 @@ describe('Watch Party release availability and storage failures', () => {
     expect(session.available).toBe(false); expect(session.create('Viewer')).toBe(false); expect(harness.fetch).not.toHaveBeenCalled();
   });
 
-  it('keeps configured ticket flow lazy and labels sync unavailable until a port actually registers', async () => {
+  it.each([TITLE_ID, 'tmdb:movie:123'])('keeps configured ticket flow lazy and labels native sync unavailable until a port actually registers for %s', async (mediaId) => {
+    const media = { kind: 'movie' as const, mediaId };
+    options = { configured: true, media, surface: 'native' };
     await mount(); expect(session.available).toBe(true); expect(session.syncStatus).toBe('awaiting-player-port');
     expect(harness.fetch).not.toHaveBeenCalled();
     const port: PartyPlayerPort = { read: () => ({ media, mode: 'paused', positionSeconds: 12, playbackRate: 1 }),
@@ -128,8 +135,19 @@ describe('Watch Party release availability and storage failures', () => {
     session.registerPlayerPort(null); await pump(); expect(session.syncStatus).toBe('awaiting-player-port');
   });
 
-  it('rejects virtual TMDB create identities without making service availability depend on catalog/native support', async () => {
-    options = { configured: true, media: { kind: 'movie', mediaId: 'tmdb:movie:123' }, surface: 'embed' }; await mount();
+  it('creates canonical TMDB rooms on embeds without claiming native synchronization', async () => {
+    const media = { kind: 'movie' as const, mediaId: 'tmdb:movie:123' };
+    options = { configured: true, media, surface: 'embed' }; await mount();
+    expect(session.available).toBe(true); expect(session.syncStatus).toBe('chat-only-embed');
+    expect(harness.fetch).not.toHaveBeenCalled();
+    expect(session.create('Viewer')).toBe(true); await pump();
+    expect(harness.fetch).toHaveBeenCalledOnce(); expect(harness.fetch.mock.calls[0]?.[0]).toBe('/api/watch-party');
+    expect(JSON.parse(String(harness.fetch.mock.calls[0]?.[1]?.body))).toEqual({ v: 1, action: 'create', platform: 'web', displayName: 'Viewer', media });
+    expect(FakeSocket.instances).toHaveLength(1); expect(session.syncStatus).toBe('chat-only-embed');
+  });
+
+  it('rejects noncanonical TMDB create identities without making service availability depend on catalog/native support', async () => {
+    options = { configured: true, media: { kind: 'movie', mediaId: 'tmdb:movie:0123' }, surface: 'embed' }; await mount();
     expect(session.available).toBe(true); expect(session.syncStatus).toBe('unsupported-media');
     expect(session.create('Viewer')).toBe(false); await pump(); expect(harness.fetch).not.toHaveBeenCalled();
     expect(session.join('Viewer', 'ABCDE23456')).toBe(true); await pump(); expect(harness.fetch).toHaveBeenCalledOnce();
@@ -180,5 +198,114 @@ describe('Watch Party release availability and storage failures', () => {
     expect(session.join('Viewer', 'ABCDE23456')).toBe(false);
     pending.resolve(Response.json({ v: 1, error: { code: 'INTERNAL_ERROR' } }, { status: 503 }));
     await pump(); expect(harness.dirty).toBe(false); expect(FakeSocket.instances).toHaveLength(0);
+  });
+
+  it.each(['room', 'participant'])('rejects a valid-looking snapshot belonging to a different %s', async (field) => {
+    await mount(); session.join('Viewer', 'ABCDE23456'); await pump();
+    const socket = FakeSocket.instances[0]!; socket.open();
+    const wrong = snapshot();
+    if (field === 'room') wrong.room.roomCode = 'ZZZZZ23456';
+    else wrong.self = { ...wrong.self, participantId: HOST_ID, role: 'host' };
+    socket.message(wrong); await pump();
+    expect(session.state.phase).toBe('error'); expect(session.state.error?.code).toBe('PROTOCOL');
+    expect(session.state.room).toBeNull(); expect(session.savedResume).toBeNull(); expect(socket.readyState).toBe(3);
+  });
+
+  it('deduplicates leave immediately and cancels its timeout before joining again', async () => {
+    await mount(); session.join('Viewer', 'ABCDE23456'); await pump();
+    const socket = FakeSocket.instances[0]!; socket.open(); socket.message(snapshot()); await pump();
+    session.leave(); session.leave();
+    const leaves = socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === 'room.leave');
+    expect(leaves).toHaveLength(1); expect(session.join('Other', 'ZZZZZ23456')).toBe(false);
+    await pump(); expect(session.state.phase).toBe('leaving'); expect(session.sendChat('late')).toBe(false);
+    socket.message({ v: 1, type: 'server.ack', requestId: leaves[0].requestId, revision: 0, serverTimeMs: Date.now() });
+    await pump(); expect(session.state.phase).toBe('closed');
+    session.retry(); expect(harness.fetch).toHaveBeenCalledOnce();
+    expect(session.join('Viewer', 'ABCDE23456')).toBe(true); await pump();
+    FakeSocket.instances[1]!.open(); FakeSocket.instances[1]!.message(snapshot()); await pump();
+    await vi.advanceTimersByTimeAsync(2_001); await pump();
+    expect(session.state.phase).toBe('connected'); expect(FakeSocket.instances[1]!.readyState).toBe(1);
+  });
+});
+
+describe('Watch Party native port synchronization', () => {
+  async function connectPort(role: 'host' | 'member' = 'host') {
+    let emit!: (intent: PartyPlayerIntent) => void;
+    const unsubscribe = vi.fn();
+    const apply = vi.fn();
+    const local = { media, mode: 'playing' as const, positionSeconds: 25, playbackRate: 1 };
+    const port: PartyPlayerPort = { read: () => local, apply,
+      subscribe(listener) { emit = listener; return unsubscribe; } };
+    await mount(); session.registerPlayerPort(port); await pump();
+    session.join('Viewer', 'ABCDE23456'); await pump();
+    const socket = FakeSocket.instances[0]!; socket.open();
+    const room = snapshot();
+    if (role === 'host') {
+      room.self.role = 'host'; room.room.hostParticipantId = MEMBER_ID;
+      room.participants = room.participants.map((participant) => ({ ...participant,
+        role: participant.participantId === MEMBER_ID ? 'host' : 'member' }));
+    }
+    socket.message(room); await pump();
+    return { socket, room, emit, local, apply, unsubscribe };
+  }
+
+  it('serializes host controls, uses acknowledged revisions and coalesces rapid seeks without HTTP per frame', async () => {
+    const { socket, room, emit, local } = await connectPort();
+    const commands = () => socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === 'playback.command');
+    emit({ kind: 'seek', snapshot: { ...local, positionSeconds: 42 } });
+    emit({ kind: 'seek', snapshot: { ...local, positionSeconds: 60 } });
+    emit({ kind: 'seek', snapshot: { ...local, positionSeconds: 84 } });
+    emit({ kind: 'play', snapshot: { ...local, positionSeconds: 84 } });
+    expect(commands()).toHaveLength(1);
+    expect(commands()[0]).toMatchObject({ baseRevision: 0, command: { kind: 'seek', positionSeconds: 42 } });
+    socket.message({ v: 1, type: 'playback.state', revision: 1, serverTimeMs: Date.now(),
+      playback: { ...room.playback, revision: 1, positionSeconds: 42 } });
+    socket.message({ v: 1, type: 'server.ack', requestId: commands()[0].requestId, revision: 1, serverTimeMs: Date.now() });
+    expect(commands()).toHaveLength(2);
+    expect(commands()[1]).toMatchObject({ baseRevision: 1, command: { kind: 'seek', positionSeconds: 84 } });
+    socket.message({ v: 1, type: 'playback.state', revision: 2, serverTimeMs: Date.now(),
+      playback: { ...room.playback, revision: 2, positionSeconds: 84 } });
+    socket.message({ v: 1, type: 'server.ack', requestId: commands()[1].requestId, revision: 2, serverTimeMs: Date.now() });
+    expect(commands()).toHaveLength(3);
+    expect(commands()[2]).toMatchObject({ baseRevision: 2, command: { kind: 'play' } });
+    socket.message({ v: 1, type: 'playback.state', revision: 3, serverTimeMs: Date.now(),
+      playback: { ...room.playback, revision: 3, positionSeconds: 84, mode: 'playing' } });
+    socket.message({ v: 1, type: 'server.ack', requestId: commands()[2].requestId, revision: 3, serverTimeMs: Date.now() });
+    await pump(); await vi.advanceTimersByTimeAsync(5_000); await pump();
+    expect(harness.fetch).toHaveBeenCalledOnce(); expect(commands()).toHaveLength(3);
+  });
+
+  it.each(['host', 'member'] as const)('applies authoritative snapshots to a %s without broadcasting local playback', async (role) => {
+    const { socket, apply, emit, local } = await connectPort(role);
+    expect(apply).toHaveBeenCalledWith(expect.objectContaining({ mode: 'paused', positionSeconds: 12, seek: true }));
+    expect(socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === 'playback.command')).toHaveLength(0);
+    if (role === 'member') {
+      emit({ kind: 'play', snapshot: local });
+      expect(socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === 'playback.command')).toHaveLength(0);
+    }
+  });
+
+  it('discards queued host controls on transfer and on disconnect instead of replaying stale intentions', async () => {
+    const { socket, emit, local } = await connectPort();
+    emit({ kind: 'seek', snapshot: local }); emit({ kind: 'play', snapshot: local });
+    const command = socket.sent.map((raw) => JSON.parse(raw)).find((message) => message.type === 'playback.command');
+    socket.message({ v: 1, type: 'host.changed', revision: 1, serverTimeMs: Date.now(),
+      previousHostParticipantId: MEMBER_ID, hostParticipantId: HOST_ID });
+    socket.message({ v: 1, type: 'server.ack', requestId: command.requestId, revision: 0, serverTimeMs: Date.now() });
+    await pump(); emit({ kind: 'play', snapshot: local });
+    expect(socket.sent.map((raw) => JSON.parse(raw)).filter((message) => message.type === 'playback.command')).toHaveLength(1);
+    socket.networkClose(); await pump();
+    expect(session.state.phase).toBe('reconnecting'); expect(session.sendChat('offline')).toBe(false);
+    expect(session.transferHost(HOST_ID)).toBe(false);
+  });
+
+  it('does not let queued host controls or subscriptions survive unmount', async () => {
+    const { emit, local, apply, unsubscribe } = await connectPort();
+    emit({ kind: 'seek', snapshot: local }); emit({ kind: 'play', snapshot: local });
+    unmount(); harness.dirty = false;
+    await vi.advanceTimersByTimeAsync(20_000); await pump();
+    expect(unsubscribe).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
+    expect(harness.fetch).toHaveBeenCalledOnce(); expect(harness.dirty).toBe(false);
+    expect(apply).toHaveBeenCalled();
   });
 });

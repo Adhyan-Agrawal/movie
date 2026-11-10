@@ -7,7 +7,8 @@ type Fixture = {
   props: TrailerLookup; tree: any; node: any; card: EventTarget; element: { closest: () => EventTarget };
   media: any; mediaHistory: any[]; play: ReturnType<typeof vi.fn>;
 };
-const hooks = vi.hoisted(() => ({ current: null as Fixture | null, load: vi.fn() }));
+const hooks = vi.hoisted(() => ({ current: null as Fixture | null, load: vi.fn(), preferences: { autoplayPreviews: true, reducedMotion: false } }));
+vi.mock('@/features/account/ViewingPreferencesProvider', () => ({ useViewingPreferences: () => hooks.preferences }));
 vi.mock('react', async (original) => ({ ...await original<typeof import('react')>(),
   useRef(initial: unknown) {
     const fixture = hooks.current!; const index = fixture.cursor++;
@@ -107,6 +108,7 @@ function expectReleased(media: any) {
 
 beforeEach(() => {
   vi.useFakeTimers(); hooks.load.mockReset(); hooks.load.mockResolvedValue(info); fixtures = []; observers = [];
+  hooks.preferences = { autoplayPreviews: true, reducedMotion: false };
   page = Object.assign(new EventTarget(), { visibilityState: 'visible' });
   pointer = Object.assign(new EventTarget(), { matches: true }); motion = Object.assign(new EventTarget(), { matches: false });
   connection = Object.assign(new EventTarget(), { saveData: false, effectiveType: '4g' });
@@ -123,6 +125,32 @@ afterEach(() => {
 });
 
 describe('decorative trailer hover lifecycle', () => {
+  it.each(['autoplayPreviews', 'reducedMotion'] as const)('does not request trailers when account %s prevents previews', async (setting) => {
+    hooks.preferences[setting] = setting === 'reducedMotion';
+    const fixture = await mount(); enter(fixture); await advance(1000);
+    expect(hooks.load).not.toHaveBeenCalled();
+    expect(fixture.node).toBeUndefined();
+  });
+
+  it('revokes an active account preview immediately and releases its media', async () => {
+    const fixture = await mount(); enter(fixture); await advance(650);
+    const media = fixture.media;
+    hooks.preferences = { autoplayPreviews: false, reducedMotion: false };
+    render(fixture); await flush();
+    expect(fixture.node).toBeUndefined(); expectReleased(media);
+    enter(fixture); await advance(1000);
+    expect(hooks.load).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects pending metadata that arrives after account previews are disabled', async () => {
+    const pending = deferred<TrailerInfo>(); hooks.load.mockReturnValue(pending.promise);
+    const fixture = await mount(); enter(fixture); await advance(650);
+    hooks.preferences = { autoplayPreviews: false, reducedMotion: false };
+    render(fixture); await flush(); pending.resolve(info); await flush();
+    expect(hooks.load.mock.calls[0]![1].aborted).toBe(true);
+    expect(fixture.node).toBeUndefined(); expect(fixture.play).not.toHaveBeenCalled();
+  });
+
   it('keeps the first render deterministic without browser globals, media, or requests', () => {
     vi.stubGlobal('window', undefined); vi.stubGlobal('document', undefined); vi.stubGlobal('navigator', undefined);
     const fixture = createFixture(); expect(() => render(fixture)).not.toThrow();

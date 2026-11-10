@@ -13,5 +13,8 @@ export interface AuthActionState {
 }
 
 export const AUTH_SERVICE_UNAVAILABLE = 'Account services are temporarily unavailable. Your session may still be active. Please try again shortly.';
+export const AUTH_CONFIGURATION_UNAVAILABLE = 'Account setup is incomplete. Public browsing and guest playback remain available.';
+export const AUTH_EMAIL_UNVERIFIED = 'Confirm your email before signing in.';
+export const AUTH_CALLBACK_INVALID = 'This confirmation link is invalid or expired. Open the latest confirmation email in the browser where you signed up, or sign in if your email is already confirmed.';
 
 export const AUTH_INITIAL_STATE: AuthActionState = { error: null };

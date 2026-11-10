@@ -88,6 +88,32 @@ describe('dbProviderRowToConfig', () => {
     expect(config!.preferredId).toBeUndefined();
   });
 
+  it('does not restore built-in preferences after an explicit clear', () => {
+    const config = dbProviderRowToConfig(
+      baseRow({ config: { preferred_id: '', start_param: '' } }),
+      VIDUP_PROVIDER_CONFIG,
+    );
+    expect(config!.preferredId).toBeUndefined();
+    expect(config!.startParam).toBeUndefined();
+  });
+
+  it('distinguishes clearing one option from omitting the other', () => {
+    const clearedResume = dbProviderRowToConfig(baseRow({ config: { start_param: '  ' } }), VIDUP_PROVIDER_CONFIG);
+    expect(clearedResume!.preferredId).toBe(VIDUP_PROVIDER_CONFIG.preferredId);
+    expect(clearedResume!.startParam).toBeUndefined();
+    const clearedId = dbProviderRowToConfig(baseRow({ config: { preferred_id: '' } }), VIDUP_PROVIDER_CONFIG);
+    expect(clearedId!.preferredId).toBeUndefined();
+    expect(clearedId!.startParam).toBe(VIDUP_PROVIDER_CONFIG.startParam);
+  });
+
+  it.each([undefined, null, [], {}, { preferred_id: null, start_param: null }, { preferred_id: 'invalid', start_param: 12 }])(
+    'retains built-in fallbacks for absent or invalid options, not clear markers: %j', (value) => {
+      const config = dbProviderRowToConfig(baseRow({ config: value }), VIDUP_PROVIDER_CONFIG);
+      expect(config!.preferredId).toBe(VIDUP_PROVIDER_CONFIG.preferredId);
+      expect(config!.startParam).toBe(VIDUP_PROVIDER_CONFIG.startParam);
+    },
+  );
+
   it('defaults empty TV route templates to the movie route so URLs stay valid', () => {
     const config = dbProviderRowToConfig(
       baseRow({ series_path_template: null, episode_path_template: '', shorthand_episode_template: null }),
@@ -131,6 +157,18 @@ describe('mergeProviderConfigs', () => {
     expect(merged.filter((c) => c.id === VIDUP_PROVIDER_CONFIG.id)).toHaveLength(1);
     // Higher priority pushes it to the front of the merged list.
     expect(merged[0]!.id).toBe(VIDUP_PROVIDER_CONFIG.id);
+  });
+
+  it('preserves explicit clears through the final registry merge', () => {
+    const merged = mergeProviderConfigs(PROVIDER_CONFIGS, [
+      baseRow({ key: VIDUP_PROVIDER_CONFIG.id, config: { preferred_id: '', start_param: '' } }),
+    ]);
+    const overridden = merged.find((config) => config.id === VIDUP_PROVIDER_CONFIG.id)!;
+    expect(overridden.preferredId).toBeUndefined();
+    expect(overridden.startParam).toBeUndefined();
+    for (const builtin of PROVIDER_CONFIGS.filter((config) => config.id !== VIDUP_PROVIDER_CONFIG.id)) {
+      expect(merged.find((config) => config.id === builtin.id)).toBe(builtin);
+    }
   });
 
   it('skips rows that cannot map to a functional provider', () => {

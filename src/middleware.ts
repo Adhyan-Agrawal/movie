@@ -1,5 +1,7 @@
 import { createServerClient } from '@supabase/ssr';
+import type { SupabaseClient } from '@supabase/supabase-js';
 import { NextResponse, type NextRequest } from 'next/server';
+import type { Database } from '@/lib/supabase/types';
 
 /**
  * Session-refresh + admin-gate middleware (Spec Sections 6, 8).
@@ -32,21 +34,44 @@ const ADMIN_PERMISSION_KEYS = [
   'billing.read',
 ] as const;
 
+// These endpoints authenticate their own capabilities/origins or serve public metadata.
+// Refreshing account sessions here would add Supabase traffic and contaminate cacheable responses.
+const SESSION_INDEPENDENT_READS = new Set([
+  '/api/catalog', '/api/trailer', '/api/subtitles', '/api/episode-navigation', '/api/watch-party',
+  '/logo.png', '/icons/icon-192.png', '/icons/icon-512.png', '/icons/icon-maskable-512.png',
+]);
+
+function sessionIndependent(request: NextRequest): boolean {
+  const { pathname } = request.nextUrl;
+  return ((request.method === 'GET' || request.method === 'HEAD') && SESSION_INDEPENDENT_READS.has(pathname))
+    || (request.method === 'POST' && pathname === '/api/watch-party');
+}
+
+function protectSessionResponse(response: NextResponse): void {
+  response.headers.set('Cache-Control', 'private, no-store, max-age=0');
+  response.headers.set('Pragma', 'no-cache');
+  response.headers.set('Expires', '0');
+}
+
 function signIn(request: NextRequest, previous?: NextResponse): NextResponse {
   const destination = new URL('/signin', request.url);
   destination.searchParams.set('next', request.nextUrl.pathname);
   const response = NextResponse.redirect(destination, request.method === 'GET' || request.method === 'HEAD' ? 307 : 303);
   for (const cookie of previous?.cookies.getAll() ?? []) response.cookies.set(cookie);
+  protectSessionResponse(response);
   return response;
 }
 
 function denyAdmin(request: NextRequest, previous?: NextResponse): NextResponse {
   const response = NextResponse.rewrite(new URL('/access-denied', request.url), { status: 403 });
   for (const cookie of previous?.cookies.getAll() ?? []) response.cookies.set(cookie);
+  protectSessionResponse(response);
   return response;
 }
 
 export async function middleware(request: NextRequest) {
+  if (sessionIndependent(request)) return NextResponse.next({ request });
+
   const url = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const anonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
   const adminRequest = request.nextUrl.pathname === '/admin' || request.nextUrl.pathname.startsWith('/admin/');
@@ -59,38 +84,36 @@ export async function middleware(request: NextRequest) {
 
   let response = NextResponse.next({ request });
 
-  const supabase = createServerClient(url, anonKey, {
-    cookies: {
-      getAll() {
-        return request.cookies.getAll();
-      },
-      setAll(cookiesToSet) {
-        // Write to the request (for this pass) and re-create the response so the
-        // refreshed cookies are sent to the browser.
-        for (const { name, value } of cookiesToSet) {
-          request.cookies.set(name, value);
-        }
-        response = NextResponse.next({ request });
-        for (const { name, value, options } of cookiesToSet) {
-          response.cookies.set(name, value, options);
-        }
-      },
-    },
-  });
-
-  // Touching getUser() triggers the token refresh + setAll() above when needed.
-  // Never throw out of middleware — a transient auth error must not 500 the app.
+  let supabase: SupabaseClient<Database> | null = null;
   let userId: string | null = null;
   try {
-    const { data } = await supabase.auth.getUser();
-    userId = data.user?.id ?? null;
+    supabase = createServerClient<Database>(url, anonKey, {
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          // Preserve earlier writes if the SDK rotates cookies more than once.
+          const previousCookies = response.cookies.getAll();
+          for (const { name, value } of cookiesToSet) request.cookies.set(name, value);
+          response = NextResponse.next({ request });
+          for (const cookie of previousCookies) response.cookies.set(cookie);
+          for (const { name, value, options } of cookiesToSet) response.cookies.set(name, value, options);
+          protectSessionResponse(response);
+        },
+      },
+    });
+    // getUser refreshes expiring cookies and verifies identity with the provider.
+    const { data, error } = await supabase.auth.getUser();
+    if (!error && data.user?.email && data.user.email_confirmed_at) userId = data.user.id;
   } catch {
-    // Ignore; the request proceeds unauthenticated and downstream RLS/guards apply.
+    // Invalid configuration or an outage must not crash public browsing.
+    // Admin remains denied, and account pages report their own truthful status.
   }
 
   // Admin gate runs before rendering; query parameters never authorize entry.
   if (adminRequest) {
-    if (!userId) return signIn(request, response);
+    if (!userId || !supabase) return signIn(request, response);
     let authorized = false;
     if (userId) {
       try {

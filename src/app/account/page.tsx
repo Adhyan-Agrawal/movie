@@ -16,6 +16,7 @@ function StatCard({ label, value, href, cta }: { label: string; value: number; h
   return (
     <Link
       href={href}
+      prefetch={false}
       className={cn(
         'flex flex-col gap-1 rounded-lg border border-border bg-surface/40 p-5',
         'transition-colors hover:border-border-strong',
@@ -65,7 +66,7 @@ export default async function AccountOverviewPage() {
           <h3 id="recent-heading" className="text-lg font-semibold">
             Recent activity
           </h3>
-          <Link href="/account/history" className="text-sm text-primary hover:underline">
+          <Link href="/account/history" prefetch={false} className="text-sm text-primary hover:underline">
             View all
           </Link>
         </div>

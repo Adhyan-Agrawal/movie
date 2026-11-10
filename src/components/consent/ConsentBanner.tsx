@@ -1,58 +1,32 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useState, useSyncExternalStore } from 'react';
 import { cn } from '@/lib/cn';
 import { buttonClasses } from '@/components/ui/Button';
+import { readConsent, subscribeConsent, writeConsent, type ConsentChoice } from '@/lib/consent';
+
+export { readConsent, type ConsentChoice } from '@/lib/consent';
 
 /**
  * Cookie/consent banner (Section 15). Stores a granular choice locally.
  * Analytics/ads must not personalize before the relevant consent is granted;
- * the stored value is the source of truth other modules read.
+ * subscribers observe saved choices and revocations without remounting.
  */
-
-const STORAGE_KEY = 'lumora.consent.v1';
-
-export interface ConsentChoice {
-  necessary: true; // always on
-  analytics: boolean;
-  ads: boolean;
-  decidedAt: string;
-}
-
-export function readConsent(): ConsentChoice | null {
-  if (typeof window === 'undefined') return null;
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    return raw ? (JSON.parse(raw) as ConsentChoice) : null;
-  } catch {
-    return null;
-  }
-}
-
-function store(choice: ConsentChoice) {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(choice));
-  } catch {
-    /* storage unavailable — treat as session-only */
-  }
-}
+const hasChoice = () => readConsent() !== null;
+const hideUntilHydrated = () => true;
 
 export function ConsentBanner() {
-  const [decided, setDecided] = useState(true); // assume decided until we check (avoids flash)
+  const decided = useSyncExternalStore(subscribeConsent, hasChoice, hideUntilHydrated);
   const [analytics, setAnalytics] = useState(true);
   const [ads, setAds] = useState(false);
   const [customize, setCustomize] = useState(false);
-
-  useEffect(() => {
-    setDecided(Boolean(readConsent()));
-  }, []);
+  const [saveFailed, setSaveFailed] = useState(false);
 
   if (decided) return null;
 
   function commit(choice: Omit<ConsentChoice, 'necessary' | 'decidedAt'>) {
     const full: ConsentChoice = { necessary: true, decidedAt: new Date().toISOString(), ...choice };
-    store(full);
-    setDecided(true);
+    setSaveFailed(!writeConsent(full));
   }
 
   return (
@@ -72,6 +46,12 @@ export function ConsentBanner() {
             We use necessary cookies to run Lumora. With your consent we also use analytics to improve the
             product and, where enabled, advertising. You can change this any time.
           </p>
+          {saveFailed ? (
+            <p role="status" className="text-xs leading-relaxed text-content-muted">
+              Your choice could not be saved. Non-essential features are off in this tab. Allow browser storage
+              and try again to save your preference for future visits.
+            </p>
+          ) : null}
         </div>
 
         {customize ? (

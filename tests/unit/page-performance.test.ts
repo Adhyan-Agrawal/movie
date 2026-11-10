@@ -17,7 +17,7 @@ const mocks = await vi.hoisted(async () => {
     features: { supabaseConfigured: true, tmdbConfigured: false },
     title: vi.fn(), seasons: vi.fn(), cast: vi.fn(),
     tmdbTitle: vi.fn(), tmdbSeasons: vi.fn(), tmdbCast: vi.fn(), tmdbList: vi.fn(),
-    readConfig: vi.fn(),
+    readConfig: vi.fn(), selectConfig: vi.fn(),
     resolve: vi.fn(),
   };
 });
@@ -40,7 +40,13 @@ vi.mock('@/features/catalog/tmdb-catalog', () => ({
 }));
 vi.mock('@/lib/supabase/service', () => ({
   getSupabaseServiceClient: () => ({
-    from: () => ({ select: () => ({ abortSignal: mocks.readConfig }) }),
+    from: () => ({ select: (columns: string, options: unknown) => {
+      mocks.selectConfig(columns, options);
+      const query = {
+        order: () => query, limit: () => query, retry: () => query, abortSignal: mocks.readConfig,
+      };
+      return query;
+    } }),
   }),
 }));
 vi.mock('@/lib/providers/vidnest', () => ({
@@ -76,13 +82,14 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   vi.setSystemTime(0);
+  vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', 'synthetic-operator-key');
   newRequest();
   mocks.features.supabaseConfigured = true;
   mocks.features.tmdbConfigured = false;
   mocks.title.mockResolvedValue(title);
   mocks.seasons.mockResolvedValue([{ id: 'season-1', episodeCount: 12, episodes: [] }]);
   mocks.cast.mockResolvedValue([]);
-  mocks.readConfig.mockResolvedValue({ data: [], error: null });
+  mocks.readConfig.mockResolvedValue({ data: [], count: 0, error: null });
   mocks.resolve.mockImplementation((id: string) => Promise.resolve([{ id, providerId: id, url: `/fixture/${id}` }]));
   vi.spyOn(console, 'warn').mockImplementation(() => {});
   vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -92,6 +99,7 @@ afterEach(() => {
   mocks.react.__SERVER_INTERNALS_DO_NOT_USE_OR_WARN_USERS_THEY_CANNOT_UPGRADE.A = null;
   vi.restoreAllMocks();
   vi.useRealTimers();
+  vi.unstubAllEnvs();
 });
 
 describe('request-scoped catalog reads', () => {
@@ -161,9 +169,10 @@ describe('request-scoped catalog reads', () => {
     await import('@/features/catalog/tmdb-catalog');
     const { listTitles } = await import('@/features/catalog/queries');
     const result = listTitles({ limit: 60 });
+    const failed = expect(result).rejects.toThrow('Catalog read deadline exceeded');
     await vi.dynamicImportSettled();
     await vi.advanceTimersByTimeAsync(8000);
-    await expect(result).resolves.toEqual([]);
+    await failed;
     expect(mocks.tmdbList).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
   });
@@ -172,15 +181,16 @@ describe('request-scoped catalog reads', () => {
 describe('public provider config cache', () => {
   beforeEach(() => vi.resetModules());
 
-  it('deduplicates concurrent refreshes and respects the 60-second TTL', async () => {
+  it('keeps cold request I/O independent and reuses only completed config for the 60-second TTL', async () => {
     const { refreshProviderRegistry } = await import('@/lib/providers/registry');
     await Promise.all(Array.from({ length: 6 }, () => refreshProviderRegistry(false)));
     await vi.advanceTimersByTimeAsync(59_999);
     await refreshProviderRegistry(false);
-    expect(mocks.readConfig).toHaveBeenCalledTimes(1);
+    expect(mocks.readConfig).toHaveBeenCalledTimes(6);
+    expect(mocks.selectConfig.mock.calls.every(([columns]) => columns !== '*' && columns.includes('preferred_id:config->preferred_id'))).toBe(true);
     await vi.advanceTimersByTimeAsync(1);
     await refreshProviderRegistry(false);
-    expect(mocks.readConfig).toHaveBeenCalledTimes(2);
+    expect(mocks.readConfig).toHaveBeenCalledTimes(7);
   });
 
   it('explicit admin refreshes bypass the TTL', async () => {
@@ -191,7 +201,11 @@ describe('public provider config cache', () => {
   });
 
   it('retains disabled-provider overrides during failure and retries after 5 seconds', async () => {
-    mocks.readConfig.mockResolvedValue({ data: [{ key: 'vidnest', name: 'Direct', enabled: false }], error: null });
+    mocks.readConfig.mockResolvedValue({ data: [{ key: 'vidnest', name: 'Direct', enabled: false,
+      base_url: null, allowed_domains: [], movie_path_template: null, series_path_template: null,
+      episode_path_template: null, shorthand_episode_template: null, priority: 1, timeout_ms: 2000,
+      enabled_regions: [], consent_required: true, test_title_id: null, preferred_id: null, start_param: null,
+    }], count: 1, error: null });
     const { refreshProviderRegistry, getActiveProviderConfigs } = await import('@/lib/providers/registry');
     await refreshProviderRegistry(false);
     mocks.readConfig.mockResolvedValue({ data: null, error: { message: 'fixture offline' } });
@@ -206,11 +220,6 @@ describe('public provider config cache', () => {
   });
 
   it('aborts a stalled configuration request at 1.5 seconds', async () => {
-    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms) => {
-      const controller = new AbortController();
-      setTimeout(() => controller.abort(), ms);
-      return controller.signal;
-    });
     mocks.readConfig.mockImplementation((signal: AbortSignal) => new Promise((_, reject) => {
       signal.addEventListener('abort', () => reject(new Error('fixture aborted')), { once: true });
     }));
@@ -218,8 +227,8 @@ describe('public provider config cache', () => {
     const result = refreshProviderRegistry(false);
     await vi.advanceTimersByTimeAsync(1500);
     await result;
-    expect(AbortSignal.timeout).toHaveBeenCalledWith(1500);
     expect(mocks.readConfig.mock.calls[0]?.[0].aborted).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('starts providers concurrently but preserves priority and fresh per-request URLs', async () => {

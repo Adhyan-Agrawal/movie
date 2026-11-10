@@ -1,8 +1,21 @@
 import { z } from 'zod';
+import { isPrivateOrLoopbackHost } from './validation/source';
 
 const emptyToUndefined = (value: unknown) => value === '' ? undefined : value;
 const optionalString = z.preprocess(emptyToUndefined, z.string().min(1).optional());
 const optionalUrl = z.preprocess(emptyToUndefined, z.string().url().optional());
+const appUrl = z.string().max(2048).refine((value) => {
+  if (/[\s\\?#\u0000-\u001f\u007f]/.test(value) || !/^https?:\/\/[^/]+\/?$/i.test(value)) return false;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.pathname !== '/') return false;
+    const hostname = url.hostname.replace(/\.$/, '');
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(hostname);
+    return (url.protocol === 'https:' && !isPrivateOrLoopbackHost(hostname))
+      || (process.env.NODE_ENV !== 'production' && local && ['http:', 'https:'].includes(url.protocol));
+  } catch { return false; }
+}, 'Must be an explicit public HTTPS origin (local HTTP is development-only).')
+  .transform((value) => new URL(value).origin);
 
 /**
  * Typed, validated environment (Section 6).
@@ -14,7 +27,7 @@ const optionalUrl = z.preprocess(emptyToUndefined, z.string().url().optional());
 
 const publicSchema = z.object({
   NEXT_PUBLIC_APP_NAME: z.string().min(1).default('Lumora'),
-  NEXT_PUBLIC_APP_URL: z.string().url().default('http://localhost:3000'),
+  NEXT_PUBLIC_APP_URL: appUrl,
   NEXT_PUBLIC_SUPABASE_URL: optionalUrl,
   NEXT_PUBLIC_SUPABASE_ANON_KEY: optionalString,
 });
@@ -39,7 +52,8 @@ function format(error: z.ZodError): string {
 // Public env is referenced by literal keys so Next.js can inline them.
 const publicParsed = publicSchema.safeParse({
   NEXT_PUBLIC_APP_NAME: process.env.NEXT_PUBLIC_APP_NAME,
-  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
+  // Never infer the canonical origin from Host or Netlify's build/deploy URL variables.
+  NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL ?? (process.env.NODE_ENV === 'production' ? undefined : 'http://localhost:3000'),
   NEXT_PUBLIC_SUPABASE_URL: process.env.NEXT_PUBLIC_SUPABASE_URL,
   NEXT_PUBLIC_SUPABASE_ANON_KEY: process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY,
 });

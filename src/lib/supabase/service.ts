@@ -34,6 +34,11 @@ function makeServiceClient(url: string, serviceRoleKey: string) {
       autoRefreshToken: false,
       detectSessionInUrl: false,
     },
+    global: {
+      // Storage's FetchParameters cannot set redirect policy. Reject redirects
+      // here so privileged Authorization/apikey headers stay on the configured origin.
+      fetch: (input, init) => globalThis.fetch(input, { ...init, redirect: 'error' }),
+    },
   });
 }
 

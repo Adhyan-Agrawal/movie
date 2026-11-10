@@ -87,7 +87,7 @@ function isImmutableAsset(url) {
 
 self.addEventListener('fetch', (event) => {
   const request = event.request;
-  if (request.method !== 'GET') return;
+  if (request.method !== 'GET' || request.cache === 'no-store') return;
 
   const url = new URL(request.url);
   // Same-origin only. Everything cross-origin (providers, TMDB, Supabase, ads)

@@ -1,6 +1,8 @@
 {
   "source": "D:/movie platform/src/features/watch-party/protocol.ts",
-  "sha256": "f16ec0a555f734fb5eb3c469fcd4c1271436c914630702421430b318b8cee1fb",
+  "sha256": "538b19f845c35cf775cefe1e1fc350d172b38c662090171f587ccea805317bdc",
+  "mediaVectors": "D:/movie platform/workers/watch-party/tests/fixtures/media-identities.json",
+  "mediaCompatibility": "Explicit TMDB identities require these updated validators; older UUID-only clients do not support TMDB rooms. The message envelope stays v1.",
   "protocolVersion": 1,
   "subprotocol": "lumora.watch-party.v1",
   "ticketPrefix": "lumora.ticket.",

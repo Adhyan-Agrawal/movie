@@ -69,9 +69,9 @@ afterEach(() => {
 });
 
 describe('episode navigation with real guarded public TMDB reads', () => {
-  it('reuses the title cache and emits the verified canonical slug, never the request alias or private metadata', async () => {
+  it('reuses the canonical title cache and retains verified navigation links, never request aliases or private metadata', async () => {
     const title = await getTmdbTitle('tv', 'old-alias-1399');
-    expect(title?.slug).toBe('verified-series-1399');
+    expect(title?.slug).toBe('tmdb-1399');
     const result = await (await GET(request())).json();
     expect(result).toEqual({ previous: null, next: target(1, 3) });
     expect(parseEpisodeNavigation(result, origin)).toEqual(result);

@@ -8,14 +8,15 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import type { Json } from '@/lib/supabase/types';
 import type { AdminFeatureFlagRow, AdminSiteSettingRow } from './types';
 import { updateFeatureFlagAction, updateSiteSettingAction } from './settings-actions';
+import { GENERIC_SITE_SETTING_KEYS } from './setting-keys';
 
 /**
  * Generic settings + feature-flag editor (Spec Section 10).
  *
  * Site settings are key/value rows whose `value` is a jsonb — the input type
  * is guessed from the stored value (boolean -> checkbox, number -> number
- * input, everything else -> text), so any setting can be edited without
- * key-specific code. Feature flags are simple on/off toggles. Both write
+ * input, everything else -> text). Only server-allowlisted public settings
+ * belong here. Feature flags are simple on/off toggles. Both write
  * through permission-gated server actions (settings.manage) as the signed-in
  * admin; `router.refresh()` re-reads the live rows on success.
  */
@@ -41,10 +42,12 @@ const inputClasses =
   'h-11 w-full min-w-48 rounded-md border border-border bg-surface-raised px-3 text-sm text-content placeholder:text-content-subtle transition-colors hover:border-border-strong focus:border-primary focus-visible:outline-none';
 
 function SettingInput({
+  label,
   kind,
   value,
   onChange,
 }: {
+  label: string;
   kind: SettingKind;
   value: string | boolean | number;
   onChange: (next: string | boolean | number) => void;
@@ -53,7 +56,7 @@ function SettingInput({
     return (
       <input
         type="checkbox"
-        aria-label="Boolean value"
+        aria-label={label}
         checked={Boolean(value)}
         onChange={(e) => onChange(e.target.checked)}
         className="h-5 w-5 accent-primary"
@@ -64,6 +67,7 @@ function SettingInput({
     return (
       <input
         type="number"
+        aria-label={label}
         value={typeof value === 'number' ? value : ''}
         onChange={(e) => onChange(e.target.value === '' ? 0 : Number(e.target.value))}
         className={inputClasses}
@@ -73,6 +77,7 @@ function SettingInput({
   return (
     <input
       type="text"
+      aria-label={label}
       value={typeof value === 'string' ? value : ''}
       onChange={(e) => onChange(e.target.value)}
       className={inputClasses}
@@ -115,7 +120,7 @@ function SettingRow({ setting }: { setting: AdminSiteSettingRow }) {
         ) : null}
       </th>
       <td className="px-3 py-2.5">
-        <SettingInput kind={kind} value={value} onChange={setValue} />
+        <SettingInput label={setting.key} kind={kind} value={value} onChange={setValue} />
       </td>
       <td className="px-3 py-2.5">
         <div className="flex flex-col items-start gap-1">
@@ -182,12 +187,17 @@ export function SettingsEditor({
   settings: AdminSiteSettingRow[];
   flags: AdminFeatureFlagRow[];
 }) {
+  // Presentation defense only; the server read/save boundaries enforce this too.
+  const genericSettings = settings.filter((setting) => setting.is_public && GENERIC_SITE_SETTING_KEYS.includes(setting.key));
   return (
     <div className="flex flex-col gap-8">
       <section aria-label="Site settings">
         <h2 className="mb-3 font-display text-lg font-semibold">Site settings</h2>
-        {settings.length === 0 ? (
-          <EmptyState title="No site settings stored" description="site_settings rows will appear here." />
+        {genericSettings.length === 0 ? (
+          <EmptyState
+            title="No generic site settings available"
+            description="Only explicitly supported public settings appear here. Private settings and email or commerce configuration stay in their dedicated panels."
+          />
         ) : (
           <div className="overflow-x-auto rounded-lg border border-border">
             <table className="w-full border-collapse text-sm">
@@ -206,7 +216,7 @@ export function SettingsEditor({
                 </tr>
               </thead>
               <tbody>
-                {settings.map((setting) => (
+                {genericSettings.map((setting) => (
                   <SettingRow key={setting.key} setting={setting} />
                 ))}
               </tbody>

@@ -165,7 +165,7 @@ beforeEach(() => {
   mock.player.pause.mockImplementation(() => { mock.player.playing = false; });
   mock.player.replaceAsync.mockResolvedValue(undefined);
   mock.getItem.mockResolvedValue(null); mock.setItem.mockResolvedValue(undefined); mock.orientation.mockReturnValue(vi.fn());
-  mock.streams.mockResolvedValue({ streams: [] }); mock.subtitles.mockResolvedValue([]); mock.intro.mockResolvedValue(null);
+  mock.streams.mockReset().mockResolvedValue({ streams: [] }); mock.subtitles.mockReset().mockResolvedValue([]); mock.intro.mockResolvedValue(null);
   mock.vast.mockResolvedValue(null); mock.bridge.mockResolvedValue({ sources: [source], introCatalogUrl: introUrl });
   mock.context.mockResolvedValue({ viewerKey: 'guest', resume: null }); mock.episodes.mockResolvedValue({ previous: null, next: null });
   mock.partyServiceAvailable = false;
@@ -496,5 +496,132 @@ describe('Android lazy intro lookup episode/URL lifecycle', () => {
     expect(nodes().filter((node) => node.type === 'WatchPartySheet')).toHaveLength(1);
     expect(action('Retry')).toBeUndefined();
     expect(nativeSurface()).toBeDefined();
+  });
+});
+
+describe('Android direct catalogue capability lifecycle', () => {
+  const metadataUrl = 'https://hulkofyt.eu.org/api/vidnest?type=movie&tmdbId=123&metadata=1';
+  const managed = { ...source, url: 'https://hulkofyt.eu.org/api/vidnest?type=movie&tmdbId=123&stream=auto', streamCatalogUrl: metadataUrl };
+  const cap = (id: string, token: string, expiresAt = Date.now() + 120_000) => ({ id,
+    url: `https://hulkofyt.eu.org/api/vidnest?token=${token}`, expiresAt, startupLatencyMs: Number(id),
+    qualities: [{ id: 'auto', label: 'Auto', auto: true }, { id: '720', label: '720p', height: 720 }, { id: '1080', label: '1080p', height: 1080 }],
+    audioTracks: [], subtitles: [] });
+  function readyCurrent() {
+    const uri = mock.player.replaceAsync.mock.calls.at(-1)?.[0]?.uri;
+    expect(uri).toBeDefined();
+    mock.player.status = 'readyToPlay';
+    emit('sourceLoad', { videoSource: { uri }, duration: mock.player.duration, availableAudioTracks: [], availableSubtitleTracks: [] });
+    emit('statusChange', { status: 'readyToPlay' }); render();
+  }
+  function selectNumber(number: number) {
+    openGroup('Audio');
+    const choice = nodes().find((node) => node.props.accessibilityLabel === `Audio stream ${number}`);
+    expect(choice).toBeDefined(); choice.props.onPress(); render();
+  }
+  function openGroup(group: string) {
+    if (!nodes().some((node) => node.props.label === 'Quality' && typeof node.props.expanded === 'boolean')) {
+      action('Settings').props.onPress(); render();
+    }
+    const heading = nodes().find((node) => node.props.label === group && typeof node.props.expanded === 'boolean');
+    expect(heading).toBeDefined();
+    if (!heading.props.expanded) { heading.props.onPress(); render(); }
+  }
+  function setRate() { openGroup('Speed'); action('1.25x').props.onPress(); render(); }
+  function hasNumericPin() {
+    return nodes().some((node) => node.props.label === 'Audio' && node.props.summary === 'Stream 2');
+  }
+  it('waits for one catalogue and never starts the parallel unsigned resolver URL', async () => {
+    const pending = deferred<any>(); mock.streams.mockReturnValue(pending.promise);
+    await mountNative({ source: managed });
+    expect(mock.streams).toHaveBeenCalledExactlyOnceWith(metadataUrl, expect.any(AbortSignal));
+    expect(mock.player.replaceAsync).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(30_000); render();
+    expect(props.onError).not.toHaveBeenCalled(); expect(mock.player.replaceAsync).not.toHaveBeenCalled();
+    pending.resolve({ streams: [cap('0', 'first')] }); await settle(); readyCurrent();
+    expect(mock.player.replaceAsync).toHaveBeenCalledExactlyOnceWith({ uri: cap('0', 'first').url, contentType: 'hls' });
+  });
+  it('uses cached capabilities for quality and audio choices while preserving native position and rate', async () => {
+    const one = cap('0', 'one'), two = cap('1', 'two');
+    mock.streams.mockResolvedValue({ streams: [one, two] });
+    await mountNative({ source: managed, initial: { positionSeconds: 42.25, playing: true } }); readyCurrent();
+    setRate(); openGroup('Quality'); action('720p').props.onPress(); render(); await settle(); readyCurrent();
+    expect(mock.player.replaceAsync).toHaveBeenLastCalledWith({ uri: `${one.url}&rendition=720`, contentType: 'hls' });
+    setRate(); selectNumber(2); await settle(); readyCurrent();
+    expect(mock.player.replaceAsync).toHaveBeenLastCalledWith({ uri: `${two.url}&rendition=720`, contentType: 'hls' });
+    expect(mock.streams).toHaveBeenCalledOnce(); expect(mock.player.currentTime).toBe(42.25);
+    expect(mock.player.playbackRate).toBe(1.25); expect(mock.player.playing).toBe(true);
+    expect(nodes().filter((node) => node.type === 'VideoView')).toHaveLength(1);
+  });
+  it('renews once on an expired selection and preserves a numeric pin across reordered metadata', async () => {
+    const deadline = Date.now() + 1000;
+    mock.streams.mockResolvedValueOnce({ expiresAt: deadline, streams: [cap('0', 'one', deadline), cap('1', 'two', deadline)] });
+    const renewal = deferred<any>(); mock.streams.mockReturnValueOnce(renewal.promise);
+    await mountNative({ source: managed, initial: { positionSeconds: 47.5, playing: false } }); readyCurrent();
+    setRate(); selectNumber(2); await settle(); readyCurrent();
+    const replacements = mock.player.replaceAsync.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1001); render();
+    expect(mock.streams).toHaveBeenCalledOnce();
+    openGroup('Quality');
+    action('1080p').props.onPress(); action('1080p').props.onPress(); render(); await settle();
+    expect(mock.streams).toHaveBeenCalledTimes(2); expect(mock.player.replaceAsync).toHaveBeenCalledTimes(replacements);
+    renewal.resolve({ streams: [cap('1', 'renewed-two'), cap('0', 'renewed-one')] }); await settle(); readyCurrent();
+    expect(mock.player.replaceAsync).toHaveBeenLastCalledWith({ uri: `${cap('1', 'renewed-two').url}&rendition=1080`, contentType: 'hls' });
+    expect(mock.player.currentTime).toBe(47.5); expect(mock.player.playing).toBe(false); expect(mock.player.playbackRate).toBe(1.25);
+    expect(hasNumericPin()).toBe(true);
+  });
+  it('Retry renews metadata once instead of replaying the old failed capability', async () => {
+    mock.streams.mockResolvedValueOnce({ streams: [cap('0', 'old')] });
+    const renewed = deferred<any>(); mock.streams.mockReturnValueOnce(renewed.promise);
+    await mountNative({ source: managed }); readyCurrent();
+    emit('statusChange', { status: 'error' }); render();
+    const retry = rawAction('Retry'); expect(retry).toBeDefined();
+    retry.props.onPress(); retry.props.onPress(); render(); await settle();
+    expect(mock.streams).toHaveBeenCalledTimes(2); expect(mock.player.replaceAsync).toHaveBeenCalledOnce();
+    renewed.resolve({ streams: [cap('0', 'new')] }); await settle(); readyCurrent();
+    expect(mock.player.replaceAsync).toHaveBeenLastCalledWith({ uri: cap('0', 'new').url, contentType: 'hls' });
+    expect(mock.player.replaceAsync).toHaveBeenCalledTimes(2);
+  });
+  it('does not silently fall back to Auto when a renewed numeric pin disappears', async () => {
+    mock.streams.mockResolvedValueOnce({ streams: [cap('0', 'one'), cap('1', 'two')] });
+    mock.streams.mockResolvedValueOnce({ streams: [cap('0', 'new-one')] });
+    await mountNative({ source: managed }); readyCurrent(); selectNumber(2); await settle(); readyCurrent();
+    emit('statusChange', { status: 'error' }); render();
+    rawAction('Retry').props.onPress(); render(); await settle();
+    expect(mock.streams).toHaveBeenCalledTimes(2); expect(mock.player.replaceAsync).toHaveBeenCalledTimes(2);
+    expect(rawAction('Retry')).toBeDefined();
+    expect(hasNumericPin()).toBe(true);
+    openGroup('Audio');
+    nodes().find((node) => node.props.accessibilityLabel === 'Audio Auto').props.onPress(); render(); await settle(); readyCurrent();
+    expect(mock.streams).toHaveBeenCalledTimes(2);
+    expect(mock.player.replaceAsync).toHaveBeenLastCalledWith({ uri: cap('0', 'new-one').url, contentType: 'hls' });
+    expect(hasNumericPin()).toBe(false);
+  });
+  it('reattaches a still-valid capability when a Retry metadata response is served from server cache', async () => {
+    const stream = cap('0', 'same'); mock.streams.mockResolvedValue({ streams: [stream] });
+    await mountNative({ source: managed }); readyCurrent();
+    emit('statusChange', { status: 'error' }); render(); rawAction('Retry').props.onPress(); render(); await settle(); readyCurrent();
+    expect(mock.streams).toHaveBeenCalledTimes(2);
+    expect(mock.player.replaceAsync).toHaveBeenNthCalledWith(1, { uri: stream.url, contentType: 'hls' });
+    expect(mock.player.replaceAsync).toHaveBeenNthCalledWith(2, { uri: stream.url, contentType: 'hls' });
+  });
+  it('aborts and ignores a late result when the catalogue identity changes under the same source ID', async () => {
+    const old = deferred<any>(); mock.streams.mockReturnValueOnce(old.promise).mockResolvedValueOnce({ streams: [cap('0', 'new-media')] });
+    await mountNative({ source: managed }); const oldSignal = mock.streams.mock.calls[0]![1];
+    props = { ...props, source: { ...managed, streamCatalogUrl: `${metadataUrl}&episode=2` } }; render(); await settle(); readyCurrent();
+    expect(oldSignal.aborted).toBe(true); expect(mock.streams).toHaveBeenCalledTimes(2);
+    old.resolve({ streams: [cap('0', 'old-media')] }); await settle();
+    expect(mock.player.replaceAsync).toHaveBeenCalledExactlyOnceWith({ uri: cap('0', 'new-media').url, contentType: 'hls' });
+  });
+  it('fails closed on empty metadata without starting the unsigned source', async () => {
+    mock.streams.mockResolvedValue({ streams: [] }); await mountNative({ source: managed });
+    expect(mock.player.replaceAsync).not.toHaveBeenCalled(); expect(props.onError).toHaveBeenCalledOnce();
+    expect(rawAction('Retry')).toBeDefined();
+  });
+  it('cancels a pending catalogue on unmount and never starts its late capability', async () => {
+    const pending = deferred<any>(); mock.streams.mockReturnValue(pending.promise);
+    await mountNative({ source: managed }); const signal = mock.streams.mock.calls[0]![1];
+    mock.effects.forEach((effect) => effect.cleanup?.());
+    pending.resolve({ streams: [cap('0', 'late')] }); await settle();
+    expect(signal.aborted).toBe(true); expect(mock.player.replaceAsync).not.toHaveBeenCalled();
   });
 });

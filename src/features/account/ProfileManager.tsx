@@ -10,6 +10,7 @@ import {
   createProfileAction,
   deleteProfileAction,
   renameProfileAction,
+  selectProfileAction,
 } from './profile-actions';
 
 /**
@@ -21,7 +22,7 @@ import {
 
 const FALLBACK_GRADIENT = 'linear-gradient(150deg, hsl(230 62% 46%), hsl(265 55% 30%))';
 
-function ProfileTile({ profile }: { profile: AccountProfile }) {
+function ProfileTile({ profile, active }: { profile: AccountProfile; active: boolean }) {
   const router = useRouter();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(profile.name);
@@ -31,6 +32,15 @@ function ProfileTile({ profile }: { profile: AccountProfile }) {
 
   const initial = profile.name.trim().charAt(0).toUpperCase() || '?';
   const avatar = profile.avatar?.trim() ? profile.avatar : FALLBACK_GRADIENT;
+
+  function select() {
+    setError(null);
+    startTransition(async () => {
+      const result = await selectProfileAction(profile.id);
+      if (!result.ok) setError(result.error ?? 'Could not switch profiles.');
+      else router.refresh();
+    });
+  }
 
   function saveRename() {
     setError(null);
@@ -94,6 +104,9 @@ function ProfileTile({ profile }: { profile: AccountProfile }) {
         <div className="flex flex-col items-center gap-1.5">
           <span className="text-sm font-medium text-content">{profile.name}</span>
           {profile.isKids ? <Badge tone="info">Kids</Badge> : <Badge tone="neutral">{maturityLabel(profile.maturityCeiling)}</Badge>}
+          <Button size="sm" variant={active ? 'secondary' : 'primary'} disabled={pending || active} aria-pressed={active} onClick={select}>
+            {active ? 'Current profile' : `Use ${profile.name}`}
+          </Button>
           <div className="flex gap-1">
             <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
               Rename
@@ -125,7 +138,7 @@ function ProfileTile({ profile }: { profile: AccountProfile }) {
   );
 }
 
-export function ProfileManager({ profiles }: { profiles: AccountProfile[] }) {
+export function ProfileManager({ profiles, activeProfileId }: { profiles: AccountProfile[]; activeProfileId: string | null }) {
   const router = useRouter();
   const [name, setName] = useState('');
   const [isKids, setIsKids] = useState(false);
@@ -161,7 +174,7 @@ export function ProfileManager({ profiles }: { profiles: AccountProfile[] }) {
 
       <ul className="grid grid-cols-2 gap-x-6 gap-y-8 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5">
         {profiles.map((profile) => (
-          <ProfileTile key={profile.id} profile={profile} />
+          <ProfileTile key={profile.id} profile={profile} active={profile.id === activeProfileId} />
         ))}
       </ul>
 

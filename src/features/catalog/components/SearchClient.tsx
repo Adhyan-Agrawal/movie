@@ -61,10 +61,13 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
   const [people, setPeople] = useState<PersonSearchResult[]>([]);
   const [activeQuery, setActiveQuery] = useState('');
   const [recents, setRecents] = useState<string[]>([]);
-  const [isPending, startTransition] = useTransition();
+  const [failed, setFailed] = useState(false);
+  const [, startTransition] = useTransition();
 
   const reqId = useRef(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const urlQuery = useRef<string | null>(null);
 
   // Recents live in localStorage; hydrate after mount to avoid SSR mismatch.
   useEffect(() => {
@@ -75,24 +78,33 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
     (raw: string) => {
       const q = raw.trim();
       const id = ++reqId.current;
+      setFailed(false);
+      setActiveQuery('');
       if (!q) {
         setResults([]);
         setPeople([]);
-        setActiveQuery('');
         return;
       }
       startTransition(async () => {
         // Titles + people resolve in one pass so both groups stay in sync and
         // share the same activeQuery/settled flags below.
-        const [found, peopleFound] = await Promise.all([
-          searchTitlesAction(q),
-          searchPeopleAction(q),
-        ]);
-        // Ignore stale responses that resolved after a newer query started.
-        if (id === reqId.current) {
-          setResults(found);
-          setPeople(peopleFound);
-          setActiveQuery(q);
+        try {
+          const [found, peopleFound] = await Promise.all([
+            searchTitlesAction(q),
+            searchPeopleAction(q),
+          ]);
+          if (id === reqId.current) {
+            setResults(found);
+            setPeople(peopleFound);
+            setActiveQuery(q);
+          }
+        } catch {
+          if (id === reqId.current) {
+            setResults([]);
+            setPeople([]);
+            setFailed(true);
+            setActiveQuery(q);
+          }
         }
       });
     },
@@ -102,6 +114,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
   const syncUrl = useCallback(
     (raw: string) => {
       const q = raw.trim();
+      urlQuery.current = q;
       const params = new URLSearchParams();
       if (q) params.set('q', q);
       const qs = params.toString();
@@ -120,17 +133,25 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
     });
   }, []);
 
-  // Run a deep-linked query once on mount; clean up the debounce on unmount.
+  // Follow external query navigation without repeating our own URL updates.
   useEffect(() => {
-    if (initialQuery.trim()) runSearch(initialQuery);
-    return () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (urlQuery.current === initialQuery.trim()) return;
+    urlQuery.current = initialQuery.trim();
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    setQuery(initialQuery);
+    runSearch(initialQuery);
+  }, [initialQuery, runSearch]);
+
+  useEffect(() => () => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    reqId.current += 1;
+    urlQuery.current = null;
   }, []);
 
   const onInput = (value: string) => {
+    reqId.current += 1;
     setQuery(value);
+    setFailed(false);
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       runSearch(value);
@@ -157,7 +178,9 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
     setResults([]);
     setPeople([]);
     setActiveQuery('');
+    setFailed(false);
     syncUrl('');
+    inputRef.current?.focus();
   };
 
   const clearRecents = () => {
@@ -168,9 +191,9 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
   const trimmed = query.trim();
   const hasQuery = trimmed.length > 0;
   const settled = activeQuery === trimmed;
-  const loading = hasQuery && (isPending || !settled);
-  const showEmpty = hasQuery && settled && !isPending && results.length === 0;
-  const showPeopleEmpty = hasQuery && settled && !isPending && people.length === 0;
+  const loading = hasQuery && !settled;
+  const showEmpty = hasQuery && settled && !failed && results.length === 0;
+  const showPeopleEmpty = hasQuery && settled && !failed && people.length === 0;
 
   return (
     <div className="search-surface">
@@ -189,6 +212,7 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
             <Icon name="search" width="25" height="25" />
           </span>
           <input
+            ref={inputRef}
             id="site-search"
             type="search"
             value={query}
@@ -270,6 +294,14 @@ export function SearchClient({ initialQuery, genres = [] }: { initialQuery: stri
               </ul>
             </section>
           ) : null}
+        </div>
+      ) : failed && settled ? (
+        <div className="flex flex-col items-start gap-3">
+          <p role="alert" className="text-sm text-danger">Search could not be completed. Please try again.</p>
+          <button type="button" className={buttonClasses({ variant: 'secondary', size: 'sm' })}
+            onClick={() => { submitNow(query); inputRef.current?.focus(); }}>
+            Try again
+          </button>
         </div>
       ) : (
         <div className="flex flex-col gap-10">

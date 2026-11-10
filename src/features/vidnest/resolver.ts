@@ -56,6 +56,8 @@ export type InspectVidnestInput = {
   season?: number | null;
   episode?: number | null;
   signal?: AbortSignal;
+  /** Synchronous admission before deduplication/capping, rechecked at final selection after onPrimary. */
+  acceptStream?: (stream: VidnestStream) => boolean;
   onPrimary?: (streams: VidnestStream[]) => void;
 };
 
@@ -272,10 +274,10 @@ function streamFrom(raw: unknown): VidnestStream | null {
   };
 }
 
-function limitedStreams(candidates: readonly unknown[]): VidnestStream[] {
+function streamCandidates(candidates: readonly unknown[]): VidnestStream[] {
   const streams: VidnestStream[] = [];
   const limit = Math.min(candidates.length, MAX_STREAM_CANDIDATES);
-  for (let index = 0; index < limit && streams.length < MAX_STREAMS; index += 1) {
+  for (let index = 0; index < limit; index += 1) {
     const stream = streamFrom(candidates[index]);
     if (stream) streams.push(stream);
   }
@@ -283,17 +285,31 @@ function limitedStreams(candidates: readonly unknown[]): VidnestStream[] {
 }
 
 function streamsFrom(payload: unknown): VidnestStream[] {
-  if (Array.isArray(payload)) return limitedStreams(payload);
+  if (Array.isArray(payload)) return streamCandidates(payload);
   if (!isRecord(payload)) return [];
   for (const key of ['streams', 'sources']) {
     const candidates = payload[key];
-    if (Array.isArray(candidates)) return limitedStreams(candidates);
+    if (Array.isArray(candidates)) return streamCandidates(candidates);
   }
   const data = isRecord(payload.data) ? payload.data : undefined;
   const nestedStream = data?.stream ? streamFrom(data.stream) : null;
   if (nestedStream) return [nestedStream];
   const stream = streamFrom(payload);
   return stream ? [stream] : [];
+}
+
+function selectStreams(candidates: readonly VidnestStream[], acceptStream?: InspectVidnestInput['acceptStream']): VidnestStream[] {
+  const streams: VidnestStream[] = [];
+  const seen = new Set<string>();
+  for (const stream of candidates) {
+    if (acceptStream && !acceptStream(stream)) continue;
+    const identity = `${stream.url}\n${stream.headers.origin ?? ''}\n${stream.headers.referer ?? ''}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    streams.push(stream);
+    if (streams.length === MAX_STREAMS) break;
+  }
+  return streams;
 }
 
 function normalizedTimeout(value: number, fallback: number): number {
@@ -469,26 +485,32 @@ export function createVidnestResolver({
     season = null,
     episode = null,
     signal,
+    acceptStream,
     onPrimary,
   }: InspectVidnestInput): Promise<VidnestResolution> {
     const startedAt = Date.now();
     if (!tmdbId) throw new Error('tmdbId is required for VidNest');
     const context: ResolverContext = { tmdbId, mediaType, season, episode };
-    // Cloudflare associates subrequest I/O with one request context. Only the
-    // discovered string is process-wide; in-flight discovery stays per inspect.
+    // Only the discovered string is process-wide. Retain even failed lookups
+    // per invocation so late providers cannot restart completed discovery rounds.
+    let requestKey = appKey;
     let keyLookup: Promise<string | null> | null = null;
+    let keyRefresh: Promise<string | null> | null = null;
 
-    async function appKeyFor(probe: KeyProbe): Promise<string | null> {
-      if (appKey) return appKey;
-      if (!keyLookup) {
-        keyLookup = discoverKey(probe, context, signal)
-          .then((found) => {
-            if (found && !signal?.aborted) appKey = found;
-            return found;
-          })
-          .finally(() => { keyLookup = null; });
+    async function appKeyFor(probe: KeyProbe, rejectedKey?: string): Promise<string | null> {
+      if (!rejectedKey) requestKey ??= appKey;
+      if (!rejectedKey && requestKey) return requestKey;
+      let lookup = rejectedKey ? keyRefresh : keyLookup;
+      if (!lookup) {
+        if (rejectedKey && appKey === rejectedKey) appKey = null;
+        lookup = discoverKey(probe, context, signal).then((found) => {
+          if (found && !signal?.aborted) requestKey = appKey = found;
+          return found;
+        });
+        if (rejectedKey) keyRefresh = lookup;
+        else keyLookup = lookup;
       }
-      return keyLookup;
+      return lookup;
     }
 
     async function askServer(path: string): Promise<VidnestStream[]> {
@@ -517,15 +539,16 @@ export function createVidnestResolver({
         const key = await waitWithoutCancelling(appKeyFor(probe), signal);
         if (!key) return [];
 
+        let plaintext: string;
         try {
-          return streamsFrom(JSON.parse(await unseal(probe.sealed, probe.nonce, key)) as unknown);
+          plaintext = await unseal(probe.sealed, probe.nonce, key);
         } catch {
-          // A well-formed reply that the cached key cannot open signals app-key rotation.
-          if (appKey === key) appKey = null;
-          const fresh = await waitWithoutCancelling(appKeyFor(probe), signal);
+          // Authentication failure can indicate rotation; malformed decrypted JSON cannot.
+          const fresh = await waitWithoutCancelling(appKeyFor(probe, key), signal);
           if (!fresh) return [];
-          return streamsFrom(JSON.parse(await unseal(probe.sealed, probe.nonce, fresh)) as unknown);
+          plaintext = await unseal(probe.sealed, probe.nonce, fresh);
         }
+        return streamsFrom(JSON.parse(plaintext) as unknown);
       } catch {
         return [];
       }
@@ -534,12 +557,12 @@ export function createVidnestResolver({
     // The fan-out remains parallel but is hard-capped to the built-in provider count.
     const answers = await Promise.all(activeServers.map(async (server, index) => {
       const streams = await askServer(server);
-      // Only the first provider is a stable prefix of the complete catalog.
-      // Publishing later providers early would change manual numeric indices.
-      if (index === 0 && !signal?.aborted) onPrimary?.(streams);
+      // Only the first provider can form a stable prefix of the complete catalog.
+      // Final selection rechecks time-sensitive admission; consumers must revalidate the prefix.
+      if (index === 0 && !signal?.aborted) onPrimary?.(selectStreams(streams, acceptStream));
       return streams;
     }));
-    const streams = answers.flatMap((answer) => answer).slice(0, MAX_STREAMS);
+    const streams = selectStreams(answers.flat(), acceptStream);
     if (streams.length === 0) {
       console.warn(JSON.stringify({
         event: 'vidnest_resolver_empty',

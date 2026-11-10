@@ -18,3 +18,10 @@ export interface TranscodeActionState {
 }
 
 export const TRANSCODE_INITIAL_STATE: TranscodeActionState = { status: 'idle', message: '' };
+
+export const TRANSCODE_OFFLINE_COMMAND = 'node scripts/transcode-hls.mjs "<input.mp4>" "<output-dir>"';
+
+export const TRANSCODE_UNAVAILABLE_MESSAGE =
+  'Web transcoding is unavailable on this deployment. ' +
+  `Run ${TRANSCODE_OFFLINE_COMMAND} offline on an operator-controlled Node.js machine with ffmpeg/ffprobe installed. ` +
+  'Working web transcoding requires a separately authorized executor; none is configured. No job was started.';

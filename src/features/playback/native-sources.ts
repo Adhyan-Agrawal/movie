@@ -1,9 +1,9 @@
 import 'server-only';
 
-import type { Capabilities, PlaybackSource } from '@/lib/providers/types';
+import type { Capabilities, PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
+import { getSupabasePublicClient } from '@/lib/supabase/public';
 import { getSupabaseServiceClient } from '@/lib/supabase/service';
 import type { MediaSourceKindEnum } from '@/lib/supabase/types';
-import { getSupabaseServerClient } from '@/lib/supabase/server';
 
 /**
  * Native media-source resolution (Spec Section 9).
@@ -13,13 +13,21 @@ import { getSupabaseServerClient } from '@/lib/supabase/server';
  * service client and returns only sanitized, client-safe PlaybackSource DTOs:
  * for storage-backed rows that means a time-limited SIGNED URL (the `media`
  * bucket is private — nothing is ever public), and for remote rows the
- * admin-configured URL itself. Failures degrade to an empty list so playback
- * falls back to provider embeds rather than erroring into the page.
+ * admin-configured URL itself. Public title/episode access is checked before
+ * creating the service client. Authorization denials/errors are distinct from
+ * source failures, which can still fall back to provider embeds.
  */
 
 /** Signed storage URL lifetime: long enough for a feature film, short enough
  *  to limit the blast radius of a leaked link. */
 const SIGNED_URL_TTL_SECONDS = 60 * 60 * 4;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+export class NativePlaybackAccessError extends Error {
+  constructor(readonly status: 404 | 503) {
+    super(status === 404 ? 'Native playback not found' : 'Native playback authorization unavailable');
+  }
+}
 
 /** media_source kinds the native HTML5 player can actually play. */
 type NativeKind = 'mp4' | 'hls' | 'dash';
@@ -58,7 +66,35 @@ const NATIVE_CAPABILITIES: Capabilities = {
 export async function resolveNativeSources(
   titleId: string,
   episodeId?: string,
+  type?: PlaybackRequest['type'],
 ): Promise<PlaybackSource[]> {
+  if (!UUID_RE.test(titleId) || (episodeId !== undefined && !UUID_RE.test(episodeId))) {
+    throw new NativePlaybackAccessError(404);
+  }
+
+  // This helper is also called outside the API route. Never use editor cookies
+  // or the service role to decide whether a public playback URL may be issued.
+  try {
+    const db = getSupabasePublicClient();
+    const { data: title, error: titleError } = await db.from('titles').select('id, type')
+      .eq('id', titleId).eq('status', 'published').eq('visibility', 'public')
+      .or(`published_at.is.null,published_at.lte.${new Date().toISOString()}`)
+      .maybeSingle();
+    if (titleError) throw new NativePlaybackAccessError(503);
+    if (!title || (type !== undefined && title.type !== type) || (episodeId !== undefined && title.type !== 'tv')) {
+      throw new NativePlaybackAccessError(404);
+    }
+    if (episodeId !== undefined) {
+      const { data: episode, error: episodeError } = await db.from('episodes').select('id')
+        .eq('id', episodeId).eq('title_id', title.id).maybeSingle();
+      if (episodeError) throw new NativePlaybackAccessError(503);
+      if (!episode) throw new NativePlaybackAccessError(404);
+    }
+  } catch (error) {
+    if (error instanceof NativePlaybackAccessError) throw error;
+    throw new NativePlaybackAccessError(503);
+  }
+
   const service = getSupabaseServiceClient();
 
   let query = service
@@ -72,9 +108,7 @@ export async function resolveNativeSources(
 
   const { data: rows, error } = await query.order('priority', { ascending: false });
   if (error) {
-    console.warn('playback.resolveNativeSources: media_sources read failed', {
-      message: error.message,
-    });
+    console.warn('playback.resolveNativeSources: media_sources read failed');
     return [];
   }
 
@@ -82,11 +116,11 @@ export async function resolveNativeSources(
   for (const row of rows ?? []) {
     if (!isNativeKind(row.kind)) continue;
 
-    // Storage-backed media never goes public. For HLS we must serve via the
+    // The storage bucket stays private. For HLS we must serve via the
     // /api/media proxy: a signed URL works for the master playlist but not for
     // the relative child playlists/segments hls.js resolves (the signature is
-    // dropped), so they'd 401. The proxy streams the whole tree from the
-    // private bucket server-side. Single-file mp4/dash keep a 4h signed URL.
+    // dropped), so they'd 401. The proxy reauthorizes registered public HLS
+    // output. Single-file mp4/dash keep a 4h signed URL.
     let url = row.url;
     if (!url && row.reference) {
       if (row.kind === 'hls') {
@@ -96,9 +130,7 @@ export async function resolveNativeSources(
           .from('media')
           .createSignedUrl(row.reference, SIGNED_URL_TTL_SECONDS);
         if (signError || !data?.signedUrl) {
-          console.warn('playback.resolveNativeSources: signed URL failed, skipping source', {
-            message: signError?.message ?? 'no signed URL returned',
-          });
+          console.warn('playback.resolveNativeSources: signed URL failed, skipping source');
           continue;
         }
         url = data.signedUrl;
@@ -124,7 +156,7 @@ export async function resolveNativeSources(
 /**
  * Look up an episode row id by (title, season number, episode number) via the
  * seasons -> episodes join. Episodes are publicly readable under RLS, so this
- * uses the request-scoped client — the service client is reserved for
+ * uses the cookie-free public client; the service client is reserved for
  * media_sources and storage. Returns null when the episode does not exist.
  */
 export async function findEpisodeId(
@@ -132,7 +164,8 @@ export async function findEpisodeId(
   season: number,
   episode: number,
 ): Promise<string | null> {
-  const db = await getSupabaseServerClient();
+  if (!UUID_RE.test(titleId)) return null;
+  const db = getSupabasePublicClient();
 
   const { data: seasonRow, error: seasonError } = await db
     .from('seasons')
@@ -141,7 +174,7 @@ export async function findEpisodeId(
     .eq('season_number', season)
     .maybeSingle();
   if (seasonError) {
-    console.warn('playback.findEpisodeId: seasons read failed', { message: seasonError.message });
+    console.warn('playback.findEpisodeId: seasons read failed');
     return null;
   }
   if (!seasonRow) return null;
@@ -149,11 +182,12 @@ export async function findEpisodeId(
   const { data: episodeRow, error: episodeError } = await db
     .from('episodes')
     .select('id')
+    .eq('title_id', titleId)
     .eq('season_id', seasonRow.id)
     .eq('episode_number', episode)
     .maybeSingle();
   if (episodeError) {
-    console.warn('playback.findEpisodeId: episodes read failed', { message: episodeError.message });
+    console.warn('playback.findEpisodeId: episodes read failed');
     return null;
   }
   return episodeRow?.id ?? null;

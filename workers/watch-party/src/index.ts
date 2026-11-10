@@ -46,6 +46,7 @@ export function parseAllowedOrigins(value: string): Set<string> | null {
 function originPermitted(request: Request, platform: 'web' | 'android', allowedOrigins: Set<string>): boolean {
   const origin = request.headers.get('Origin');
   if (platform === 'web') return origin !== null && allowedOrigins.has(origin);
+  // React Native sends an explicit app Origin; its signed ticket still binds the platform.
   return origin === null || allowedOrigins.has(origin);
 }
 
@@ -58,13 +59,17 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   if (request.headers.get('Upgrade')?.toLowerCase() !== 'websocket') {
     return jsonError('UPGRADE_REQUIRED', 'A WebSocket upgrade is required.', 426);
   }
-  if (typeof env.WATCH_PARTY_SECRET !== 'string' || env.WATCH_PARTY_SECRET.length < 32) {
+  if (typeof env.WATCH_PARTY_SECRET !== 'string' || env.WATCH_PARTY_SECRET.length < 32
+    || /[\r\n\0]/.test(env.WATCH_PARTY_SECRET)) {
     console.error(JSON.stringify({ event: 'watch_party_config_error', binding: 'WATCH_PARTY_SECRET' }));
     return jsonError('INTERNAL_ERROR', 'Watch Party is unavailable.', 503);
   }
   const allowedOrigins = typeof env.ALLOWED_ORIGINS === 'string' ? parseAllowedOrigins(env.ALLOWED_ORIGINS) : null;
   if (!allowedOrigins) {
     console.error(JSON.stringify({ event: 'watch_party_config_error', binding: 'ALLOWED_ORIGINS' }));
+    return jsonError('INTERNAL_ERROR', 'Watch Party is unavailable.', 503);
+  }
+  if (!env.WATCH_PARTY_ROOMS || typeof env.WATCH_PARTY_ROOMS.getByName !== 'function') {
     return jsonError('INTERNAL_ERROR', 'Watch Party is unavailable.', 503);
   }
   const ticket = ticketFromWatchPartySubprotocol(request.headers.get('Sec-WebSocket-Protocol'));
@@ -79,8 +84,13 @@ async function handleWebSocket(request: Request, env: Env): Promise<Response> {
   if (!originPermitted(request, claims.platform, allowedOrigins)) {
     return jsonError('ORIGIN_FORBIDDEN', 'This origin is not allowed.', 403);
   }
-  const room = env.WATCH_PARTY_ROOMS.getByName(claims.roomCode);
-  return room.fetch(request);
+  try {
+    const room = env.WATCH_PARTY_ROOMS.getByName(claims.roomCode);
+    return await room.fetch(request);
+  } catch {
+    console.error(JSON.stringify({ event: 'watch_party_room_unavailable' }));
+    return jsonError('INTERNAL_ERROR', 'Watch Party is unavailable.', 503);
+  }
 }
 
 export default {

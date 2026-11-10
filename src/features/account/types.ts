@@ -65,15 +65,13 @@ export interface AccountProfile {
 }
 
 // ---------------------------------------------------------------------------
-// Account settings (form + per-account browser store; see ./settings-store)
+// Non-security account preferences (verified auth metadata + local cache)
 // ---------------------------------------------------------------------------
 
 /**
- * Viewer preferences for the signed-in account. These are stored per-account
- * in this browser (no account-scoped jsonb column exists yet — see
- * ./settings-store for the rationale) and are hydrated into the settings form
- * after mount. `maturity` is the account-level default; current maturity
- * limits are set per profile on the Profiles page.
+ * Viewer-editable preferences, never authorization or maturity policy.
+ * Persisted through the verified user's auth metadata. Only autoplayNext is
+ * currently applied; the other fields remain explicitly labeled preferences.
  */
 export interface AccountSettings {
   language: string;
@@ -81,7 +79,6 @@ export interface AccountSettings {
   autoplayPreviews: boolean;
   captions: boolean;
   reducedMotion: boolean;
-  maturity: MaturityLevel;
 }
 
 /** Neutral defaults for the preferences form — not stored account data. */
@@ -91,7 +88,6 @@ export const DEFAULT_SETTINGS: AccountSettings = {
   autoplayPreviews: false,
   captions: true,
   reducedMotion: false,
-  maturity: 'adults',
 };
 
 // ---------------------------------------------------------------------------

@@ -4,36 +4,41 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 const mocks = vi.hoisted(() => ({
   configured: { supabaseConfigured: true },
+  publicEnv: { NEXT_PUBLIC_APP_URL: 'https://lumora.example.test' },
   serverClient: vi.fn(),
   serviceClient: vi.fn(),
   signIn: vi.fn(),
   signUp: vi.fn(),
   signOut: vi.fn(),
+  getUser: vi.fn(),
   from: vi.fn(),
   welcome: vi.fn(),
   redirect: vi.fn(),
+  revalidate: vi.fn(),
   formAction: vi.fn(),
   formState: { error: null } as { error: string | null; message?: string },
   searchParams: new URLSearchParams(),
 }));
 
-vi.mock('@/lib/env', () => ({ features: mocks.configured }));
+vi.mock('server-only', () => ({}));
+vi.mock('@/lib/env', () => ({ features: mocks.configured, publicEnv: mocks.publicEnv }));
 vi.mock('@/lib/supabase/server', () => ({ getSupabaseServerClient: mocks.serverClient }));
 vi.mock('@/lib/supabase/service', () => ({ getSupabaseServiceClient: mocks.serviceClient }));
 vi.mock('@/features/email/send', () => ({ sendWelcomeEmail: mocks.welcome }));
 vi.mock('next/navigation', () => ({ redirect: mocks.redirect, useSearchParams: () => mocks.searchParams }));
+vi.mock('next/cache', () => ({ revalidatePath: mocks.revalidate }));
 vi.mock('react', async (importOriginal) => ({
   ...await importOriginal<typeof import('react')>(),
   useActionState: () => [mocks.formState, mocks.formAction, false],
 }));
 
 import { signInAction, signOutAction, signUpAction } from '@/features/auth/actions';
-import { AUTH_INITIAL_STATE, AUTH_SERVICE_UNAVAILABLE } from '@/features/auth/state';
+import { AUTH_CALLBACK_INVALID, AUTH_CONFIGURATION_UNAVAILABLE, AUTH_EMAIL_UNVERIFIED, AUTH_INITIAL_STATE, AUTH_SERVICE_UNAVAILABLE } from '@/features/auth/state';
 import { SignInForm } from '@/features/auth/SignInForm';
 import { SignUpForm } from '@/features/auth/SignUpForm';
 
 const upstreamDetails = 'private upstream body: service_key=synthetic-secret https://private.example.test';
-const user = { id: 'synthetic-viewer' };
+const user = { id: 'synthetic-viewer', email: 'viewer@example.test', email_confirmed_at: '2026-01-01T00:00:00Z' };
 const session = { user };
 
 function form(values: Record<string, string> = {}): FormData {
@@ -50,16 +55,18 @@ function form(values: Record<string, string> = {}): FormData {
 beforeEach(() => {
   vi.resetAllMocks();
   mocks.configured.supabaseConfigured = true;
+  mocks.publicEnv.NEXT_PUBLIC_APP_URL = 'https://lumora.example.test';
   mocks.formState = { error: null };
   mocks.searchParams = new URLSearchParams();
   mocks.serverClient.mockResolvedValue({
-    auth: { signInWithPassword: mocks.signIn, signUp: mocks.signUp, signOut: mocks.signOut },
+    auth: { signInWithPassword: mocks.signIn, signUp: mocks.signUp, signOut: mocks.signOut, getUser: mocks.getUser },
     from: mocks.from,
   });
   mocks.serviceClient.mockImplementation(() => { throw new Error(upstreamDetails); });
   mocks.signIn.mockResolvedValue({ data: { user, session }, error: null });
   mocks.signUp.mockResolvedValue({ data: { user, session: null }, error: null });
   mocks.signOut.mockResolvedValue({ error: null });
+  mocks.getUser.mockResolvedValue({ data: { user }, error: null });
   mocks.welcome.mockResolvedValue(undefined);
   mocks.redirect.mockImplementation((path: string) => { throw new Error(`NEXT_REDIRECT:${path}`); });
 });
@@ -67,11 +74,11 @@ beforeEach(() => {
 describe('unavailable web authentication', () => {
   it('does no client, database, authentication, or email work when configuration is absent', async () => {
     mocks.configured.supabaseConfigured = false;
-    await expect(signInAction(AUTH_INITIAL_STATE, form())).resolves.toEqual({ error: AUTH_SERVICE_UNAVAILABLE });
-    await expect(signUpAction(AUTH_INITIAL_STATE, form())).resolves.toEqual({ error: AUTH_SERVICE_UNAVAILABLE });
+    await expect(signInAction(AUTH_INITIAL_STATE, form())).resolves.toEqual({ error: AUTH_CONFIGURATION_UNAVAILABLE });
+    await expect(signUpAction(AUTH_INITIAL_STATE, form())).resolves.toEqual({ error: AUTH_CONFIGURATION_UNAVAILABLE });
     await expect(signOutAction()).rejects.toThrow('NEXT_REDIRECT:/signin?auth=unavailable');
 
-    for (const mock of [mocks.serverClient, mocks.serviceClient, mocks.from, mocks.signIn, mocks.signUp, mocks.signOut, mocks.welcome]) {
+    for (const mock of [mocks.serverClient, mocks.serviceClient, mocks.from, mocks.signIn, mocks.signUp, mocks.signOut, mocks.getUser, mocks.welcome]) {
       expect(mock).not.toHaveBeenCalled();
     }
     expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith('/signin?auth=unavailable');
@@ -115,6 +122,7 @@ describe('unavailable web authentication', () => {
     if (failure === 'response') mocks.signOut.mockResolvedValue({ error: { status: 503, message: upstreamDetails } });
     await expect(signOutAction()).rejects.toThrow('NEXT_REDIRECT:/signin?auth=unavailable');
     expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith('/signin?auth=unavailable');
+    expect(mocks.revalidate).not.toHaveBeenCalled();
   });
 
   it('renders an application-owned logout failure message, never arbitrary query text', () => {
@@ -136,6 +144,8 @@ describe('configured web authentication', () => {
       .rejects.toThrow(`NEXT_REDIRECT:${destination}`);
     expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith(destination);
     expect(mocks.signIn).toHaveBeenCalledExactlyOnceWith({ email: 'viewer@example.test', password: 'synthetic-passphrase' });
+    expect(mocks.getUser).toHaveBeenCalledExactlyOnceWith();
+    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith('/', 'layout');
   });
 
   it('requires an actual session before redirecting after sign-in', async () => {
@@ -165,11 +175,14 @@ describe('configured web authentication', () => {
       error: null,
       message: 'Follow the email confirmation instructions before signing in. Account access is not active yet.',
     });
-    expect(mocks.signUp).toHaveBeenCalledExactlyOnceWith({ email: 'viewer@example.test', password: 'synthetic-passphrase' });
+    expect(mocks.signUp).toHaveBeenCalledExactlyOnceWith({ email: 'viewer@example.test', password: 'synthetic-passphrase', options: {
+      emailRedirectTo: 'https://lumora.example.test/auth/callback?next=%2Faccount',
+    } });
     expect(mocks.serviceClient).not.toHaveBeenCalled();
     expect(mocks.signIn).not.toHaveBeenCalled();
     expect(mocks.welcome).not.toHaveBeenCalled();
     expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(mocks.getUser).not.toHaveBeenCalled();
 
     mocks.formState = result;
     const html = renderToStaticMarkup(createElement(SignUpForm));
@@ -200,10 +213,11 @@ describe('configured web authentication', () => {
     expect(mocks.serviceClient).not.toHaveBeenCalled();
   });
 
-  it('preserves the successful logout redirect without swallowing it', async () => {
+  it('signs out only the local session and preserves the successful redirect', async () => {
     await expect(signOutAction()).rejects.toThrow('NEXT_REDIRECT:/');
-    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith();
+    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith({ scope: 'local' });
     expect(mocks.redirect).toHaveBeenCalledExactlyOnceWith('/');
+    expect(mocks.revalidate).toHaveBeenCalledExactlyOnceWith('/', 'layout');
   });
 
   it('validates inputs without backend work', async () => {
@@ -212,5 +226,68 @@ describe('configured web authentication', () => {
     expect(await signUpAction(AUTH_INITIAL_STATE, form({ password: 'short', confirm: 'short' }))).toEqual({ error: 'Password must be at least 6 characters.' });
     expect(mocks.serverClient).not.toHaveBeenCalled();
     expect(mocks.serviceClient).not.toHaveBeenCalled();
+  });
+
+  it.each([signInAction, signUpAction])('rejects a session with an unconfirmed provider email even when metadata claims verification', async (action) => {
+    mocks.signUp.mockResolvedValue({ data: { user, session }, error: null });
+    mocks.getUser.mockResolvedValue({ data: { user: { ...user, email_confirmed_at: undefined,
+      confirmed_at: user.email_confirmed_at, user_metadata: { email_verified: true } } }, error: null });
+    expect(await action(AUTH_INITIAL_STATE, form())).toEqual({ error: AUTH_EMAIL_UNVERIFIED });
+    expect(mocks.signOut).toHaveBeenCalledExactlyOnceWith({ scope: 'local' });
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(mocks.welcome).not.toHaveBeenCalled();
+    expect(mocks.serviceClient).not.toHaveBeenCalled();
+  });
+
+  it.each([signInAction, signUpAction])('does not claim a different or unverifiable identity is the new session', async (action) => {
+    mocks.signUp.mockResolvedValue({ data: { user, session }, error: null });
+    mocks.getUser.mockResolvedValue({ data: { user: { ...user, id: 'different-account' } }, error: null });
+    expect(await action(AUTH_INITIAL_STATE, form())).toEqual({ error: AUTH_SERVICE_UNAVAILABLE });
+    mocks.getUser.mockRejectedValue(new Error(upstreamDetails));
+    expect(await action(AUTH_INITIAL_STATE, form())).toEqual({ error: AUTH_SERVICE_UNAVAILABLE });
+    expect(mocks.redirect).not.toHaveBeenCalled();
+    expect(mocks.welcome).not.toHaveBeenCalled();
+  });
+
+  it('does not misreport a bad public key or disabled email provider as a bad password', async () => {
+    mocks.signIn.mockResolvedValue({ error: { status: 401, message: upstreamDetails } });
+    expect(await signInAction(AUTH_INITIAL_STATE, form())).toEqual({ error: AUTH_SERVICE_UNAVAILABLE });
+    mocks.signIn.mockResolvedValue({ error: { status: 403, code: 'email_provider_disabled', message: upstreamDetails } });
+    expect(await signInAction(AUTH_INITIAL_STATE, form())).toEqual({ error: 'Email sign-in is disabled by the account provider.' });
+    mocks.signUp.mockResolvedValue({ error: { status: 403, code: 'signup_disabled', message: upstreamDetails } });
+    expect(await signUpAction(AUTH_INITIAL_STATE, form())).toEqual({ error: 'Account creation is disabled by the account provider.' });
+  });
+
+  it('uses the canonical callback origin and preserves a safe destination through signup', async () => {
+    await signUpAction(AUTH_INITIAL_STATE, form({ next: '/watch/movie/fixture?episode=2' }));
+    const callback = new URL(mocks.signUp.mock.calls[0]![0].options.emailRedirectTo);
+    expect(callback.origin).toBe('https://lumora.example.test');
+    expect(callback.pathname).toBe('/auth/callback');
+    expect(callback.searchParams.get('next')).toBe('/watch/movie/fixture?episode=2');
+  });
+
+  it.each(['https://evil.example.test', '/a/..//evil.example.test', '/signin'])('sanitizes signup destinations: %s', async (next) => {
+    mocks.signUp.mockResolvedValue({ data: { user, session }, error: null });
+    await expect(signUpAction(AUTH_INITIAL_STATE, form({ next }))).rejects.toThrow('NEXT_REDIRECT:/account');
+    expect(new URL(mocks.signUp.mock.calls[0]![0].options.emailRedirectTo).searchParams.get('next')).toBe('/account');
+  });
+
+  it('does no signup work for an unsafe canonical callback origin', async () => {
+    mocks.publicEnv.NEXT_PUBLIC_APP_URL = 'https://user:password@example.test';
+    expect(await signUpAction(AUTH_INITIAL_STATE, form())).toEqual({ error: AUTH_CONFIGURATION_UNAVAILABLE });
+    expect(mocks.serverClient).not.toHaveBeenCalled();
+    expect(mocks.signUp).not.toHaveBeenCalled();
+  });
+
+  it('preserves return destinations in both forms and displays only known callback failures', () => {
+    for (const Form of [SignInForm, SignUpForm]) {
+      const html = renderToStaticMarkup(createElement(Form, { next: '/account/history?year=2026' }));
+      expect(html).toContain('name="next" value="/account/history?year=2026"');
+      expect(html).toContain('next=%2Faccount%2Fhistory%3Fyear%3D2026');
+    }
+    mocks.searchParams = new URLSearchParams({ auth: 'callback', error_description: upstreamDetails });
+    const html = renderToStaticMarkup(createElement(SignInForm));
+    expect(html).toContain(AUTH_CALLBACK_INVALID);
+    expect(html).not.toContain(upstreamDetails);
   });
 });

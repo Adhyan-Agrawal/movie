@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/cn';
 import { Badge } from '@/components/ui/Badge';
@@ -12,7 +12,7 @@ import { parseEpisodeNavigation, type EpisodeNavigation } from './episode-naviga
 import { NativePlayer } from './NativePlayer';
 import type { EpisodeNavTarget } from './EpisodeNavLinks';
 import { PreRollAd } from '@/features/ads/PreRollAd';
-import { readConsent } from '@/components/consent/ConsentBanner';
+import { readConsent, subscribeConsent } from '@/lib/consent';
 import {
   reportPlaybackEndAction,
   reportPlaybackHeartbeatAction,
@@ -25,13 +25,10 @@ import type { WatchPartyMediaIdentity } from '@/features/watch-party/protocol';
 import {
   WatchPartyPanel,
   useWatchPartySession,
-  type PartyPlayerPortRegistrationProps,
 } from '@/features/watch-party/web';
 import { playbackMediaKey } from '@/features/playback/playback-checkpoint';
-
-const PartyPortNativePlayer = NativePlayer as ComponentType<
-  React.ComponentProps<typeof NativePlayer> & PartyPlayerPortRegistrationProps
->;
+import { saveAccountPreferencesAction } from '@/features/account/preference-actions';
+import { preferencesForViewer, type AccountPreferencesSnapshot } from '@/features/account/preference-types';
 
 /**
  * Player surface (Spec Section 9). Responsive 16:9 external-provider iframe with
@@ -87,6 +84,8 @@ export interface PlayerShellProps {
   initialPosition?: number;
   resumeUpdatedAt?: number;
   viewerKey?: string;
+  /** Verified, account-bound preference DTO; never authorization or consent. */
+  initialAccountPreferences?: AccountPreferencesSnapshot | null;
   adPolicy?: PlaybackAdPolicy;
   /** Same-origin, episode-bound intro marker catalog. Native playback fetches it lazily. */
   introCatalogUrl?: string;
@@ -164,6 +163,7 @@ export function PlayerShell({
   initialPosition,
   resumeUpdatedAt,
   viewerKey = 'guest',
+  initialAccountPreferences = null,
   adPolicy,
   introCatalogUrl,
   reportingAvailable = false,
@@ -178,8 +178,17 @@ export function PlayerShell({
 
   const hasCoordinates = seasonNumber !== undefined && episodeNumber !== undefined;
   const mediaScope = `${viewerKey}:${playbackMediaKey(title.id, hasCoordinates ? undefined : episodeId, seasonNumber, episodeNumber)}`;
+  const accountPreferences = preferencesForViewer(viewerKey, initialAccountPreferences);
+  const preferenceScope = accountPreferences ? `account:${accountPreferences.accountId}` : viewerKey === 'guest' ? 'guest' : `unavailable:${viewerKey}`;
+  const initialAutoNext = accountPreferences?.settings.autoplayNext === true;
+  const preferenceScopeRef = useRef(preferenceScope);
+  preferenceScopeRef.current = preferenceScope;
+  const [autoNextChoice, setAutoNextChoice] = useState<{ scope: string; enabled: boolean } | null>(null);
+  const autoNext = autoNextChoice?.scope === preferenceScope ? autoNextChoice.enabled : initialAutoNext;
+  const [preferenceNotice, setPreferenceNotice] = useState<{ scope: string; error: boolean; message: string } | null>(null);
+  const preferenceWriteRef = useRef<{ scope: string; accountId: string; desired: boolean; revision: number } | null>(null);
+  if (preferenceWriteRef.current?.scope !== preferenceScope) preferenceWriteRef.current = null;
   const [episodeLookup, setEpisodeLookup] = useState<{ scope: string; url: string; navigation: EpisodeNavigation | null } | null>(null);
-  const [autoNext, setAutoNext] = useState(false);
   const [episodeTransition, setEpisodeTransition] = useState<string | null>(null);
   const episodeTransitionRef = useRef<string | null>(null);
   const prepareEpisodeTransitionRef = useRef<{ scope: string; prepare: () => Promise<boolean> } | null>(null);
@@ -242,16 +251,17 @@ export function PlayerShell({
   const [adsConsent, setAdsConsent] = useState(false);
 
   useEffect(() => {
-    let hasAdsConsent = false;
-    try {
-      hasAdsConsent = Boolean(readConsent()?.ads);
-    } catch {
-      // Private mode — best effort only.
-    }
-    setAdsConsent(hasAdsConsent);
-    // Resolve this only after mount so the server and hydration renders match.
-    // Without advertising consent there is no ad gate to wait for.
-    if (preroll && !hasAdsConsent) setAdDone(true);
+    let active = true;
+    const recheck = () => {
+      if (!active) return;
+      const hasAdsConsent = readConsent()?.ads === true;
+      setAdsConsent(hasAdsConsent);
+      // Only release the ad gate; this never grants provider/source consent.
+      if (preroll && !hasAdsConsent) setAdDone(true);
+    };
+    const unsubscribe = subscribeConsent(recheck);
+    recheck();
+    return () => { active = false; unsubscribe(); };
   }, [preroll]);
 
   useEffect(() => {
@@ -299,9 +309,13 @@ export function PlayerShell({
   }, []);
 
   useEffect(() => {
-    try { setAutoNext(window.localStorage.getItem(AUTO_NEXT_STORAGE_KEY) === 'true'); }
-    catch { /* Auto Next defaults off when storage is unavailable. */ }
-  }, []);
+    setPreferenceNotice(null);
+    if (preferenceScope !== 'guest') { setAutoNextChoice(null); return; }
+    let enabled = false;
+    try { enabled = window.localStorage.getItem(AUTO_NEXT_STORAGE_KEY) === 'true'; }
+    catch { /* Guest Auto Next defaults off when storage is unavailable. */ }
+    setAutoNextChoice({ scope: preferenceScope, enabled });
+  }, [preferenceScope]);
 
   useEffect(() => {
     if (title.type !== 'tv' || !hasCoordinates || !episodeNavigationUrl) return;
@@ -322,10 +336,10 @@ export function PlayerShell({
     return () => { active = false; clearTimeout(timer); controller.abort(); };
   }, [mediaScope, title.type, title.slug, hasCoordinates, seasonNumber, episodeNumber, episodeNavigationUrl]);
 
-  const navigateEpisode = useCallback((direction: 'previous' | 'next') => {
+  const navigateEpisode = useCallback((direction: 'previous' | 'next', automatic = false) => {
     const context = episodeContextRef.current;
     const target = context.navigation?.[direction];
-    if (!episodeMountedRef.current || context.mediaScope !== mediaScope || !target || context.disabled
+    if (!episodeMountedRef.current || context.mediaScope !== mediaScope || !target || context.disabled || (automatic && !context.autoNext)
       || episodeTransitionRef.current === context.mediaScope) return false;
     episodeTransitionRef.current = context.mediaScope;
     setEpisodeTransition(context.mediaScope);
@@ -335,7 +349,7 @@ export function PlayerShell({
         const transition = prepareEpisodeTransitionRef.current;
         if (transition?.scope === context.mediaScope && !await transition.prepare()) return;
         const latest = episodeContextRef.current;
-        if (!episodeMountedRef.current || latest.mediaScope !== context.mediaScope || latest.disabled
+        if (!episodeMountedRef.current || latest.mediaScope !== context.mediaScope || latest.disabled || (automatic && !latest.autoNext)
           || latest.navigation?.[direction]?.href !== target.href) return;
         router.push(target.href);
         navigated = true;
@@ -354,16 +368,52 @@ export function PlayerShell({
     else if (prepareEpisodeTransitionRef.current?.scope === mediaScope) prepareEpisodeTransitionRef.current = null;
   }, [mediaScope]);
   const handleContentEnded = useCallback(() => {
-    if (episodeContextRef.current.mediaScope === mediaScope && episodeContextRef.current.autoNext) navigateEpisode('next');
+    if (episodeContextRef.current.mediaScope === mediaScope && episodeContextRef.current.autoNext) navigateEpisode('next', true);
   }, [mediaScope, navigateEpisode]);
   const handleAutoNext = useCallback((enabled: boolean) => {
     const context = episodeContextRef.current;
-    if (!episodeMountedRef.current || context.mediaScope !== mediaScope || context.disabled) return;
+    if (!episodeMountedRef.current || context.mediaScope !== mediaScope || context.disabled
+      || preferenceScopeRef.current !== preferenceScope || typeof enabled !== 'boolean') return;
     episodeContextRef.current = { ...context, autoNext: enabled };
-    setAutoNext(enabled);
-    try { window.localStorage.setItem(AUTO_NEXT_STORAGE_KEY, String(enabled)); }
-    catch { /* The explicit choice still works for this session. */ }
-  }, [mediaScope]);
+    setAutoNextChoice({ scope: preferenceScope, enabled });
+    if (preferenceScope === 'guest') {
+      try { window.localStorage.setItem(AUTO_NEXT_STORAGE_KEY, String(enabled)); }
+      catch { setPreferenceNotice({ scope: preferenceScope, error: true, message: 'Auto Next changed for this player only. This browser could not save the preference.' }); }
+      return;
+    }
+    if (!accountPreferences) {
+      setPreferenceNotice({ scope: preferenceScope, error: true, message: 'Auto Next changed for this player only. Account preferences could not be loaded.' });
+      return;
+    }
+    setPreferenceNotice({ scope: preferenceScope, error: false, message: 'Saving Auto Next to your account...' });
+    const previous = preferenceWriteRef.current;
+    if (previous?.scope === preferenceScope) {
+      previous.desired = enabled;
+      previous.revision += 1;
+      return;
+    }
+    const request = { scope: preferenceScope, accountId: accountPreferences.accountId, desired: enabled, revision: 0 };
+    preferenceWriteRef.current = request;
+    // Serialize/coalesce explicit changes so an older response cannot win a
+    // rapid toggle. No background polling or metadata-wide overwrite.
+    void (async () => {
+      while (episodeMountedRef.current && preferenceScopeRef.current === request.scope && preferenceWriteRef.current === request) {
+        const revision = request.revision;
+        const desired = request.desired;
+        let saved = false;
+        try {
+          const result = await saveAccountPreferencesAction(request.accountId, { autoplayNext: desired });
+          saved = result.ok && result.snapshot.accountId === request.accountId && result.snapshot.settings.autoplayNext === desired;
+        } catch { /* The current choice still applies, but persistence is unconfirmed. */ }
+        if (!episodeMountedRef.current || preferenceScopeRef.current !== request.scope || preferenceWriteRef.current !== request) return;
+        if (request.revision !== revision) continue;
+        preferenceWriteRef.current = null;
+        setPreferenceNotice({ scope: request.scope, error: !saved,
+          message: saved ? 'Auto Next saved to your account.' : 'Auto Next changed for this player only. The account save was not confirmed; change it again to retry.' });
+        return;
+      }
+    })();
+  }, [mediaScope, preferenceScope, accountPreferences]);
   const playerFailed = showPlayer && state === 'provider-error';
   const normalizedTmdbId = title.tmdbId?.trim();
   const subtitleCatalogUrl = (() => {
@@ -573,7 +623,7 @@ export function PlayerShell({
             {nativeKind !== null ? (
               /* Lumora-hosted media: a real <video> element with native
                  controls, resume support, and honest position telemetry. */
-              <PartyPortNativePlayer
+              <NativePlayer
                 key={mediaScope}
                 retryKey={reloadKey}
                 source={{ url: activeSource!.url!, kind: nativeKind!, ...(activeSource?.streamCatalogUrl ? { streamCatalogUrl: activeSource.streamCatalogUrl } : {}) }}
@@ -583,7 +633,8 @@ export function PlayerShell({
                 titleId={title.id}
                 titleSlug={title.slug}
                 titleName={title.name}
-                viewerKey={viewerKey}
+              viewerKey={viewerKey}
+              accountPreferences={accountPreferences}
                 adPolicy={adPolicy}
                 introCatalogUrl={introCatalogUrl}
                 subtitleCatalogUrl={subtitleCatalogUrl}
@@ -608,6 +659,8 @@ export function PlayerShell({
                 onReady={handleNativeReady}
                 onError={handlePlaybackError}
                 registerPartyPlayerPort={party.registerPlayerPort}
+                watchPartyMedia={watchPartyMedia}
+                watchPartyActive={party.available && party.state.phase === 'connected'}
               />
             ) : (
               /*
@@ -689,6 +742,11 @@ export function PlayerShell({
         />
       </div>
 
+      {title.type === 'tv' && preferenceNotice?.scope === preferenceScope ? (
+        <p role={preferenceNotice.error ? 'alert' : 'status'} className={cn('text-xs', preferenceNotice.error ? 'text-danger' : 'text-content-muted')}>
+          {preferenceNotice.message}
+        </p>
+      ) : null}
       {nativeKind ? (
         /* Native playback (Spec Section 9): Lumora-hosted media streamed from
            signed URLs — real telemetry, no third-party cookies or terms. */

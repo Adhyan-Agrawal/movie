@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getPlaybackCommerceContext } from '@/features/commerce/queries';
 import { features } from '@/lib/env';
-import { listProviderConfigs } from '@/lib/providers/config';
-import { resolvePlayback } from '@/lib/providers/registry';
+import { getActiveProviderConfigs, resolvePlayback } from '@/lib/providers/registry';
 import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { introCatalogPath } from '@/features/player/intro-markers';
 import { episodeNavigationPath } from '@/features/player/episode-navigation';
@@ -23,14 +22,15 @@ import { episodeNavigationPath } from '@/features/player/episode-navigation';
  * sources are included and their relative /api/media URLs are absolutized so a
  * native video player can fetch them.
  *
- * No auth: this is the same public information the web watch page already
- * serves to any visitor. Nothing provider-specific or secret is returned.
+ * No sign-in required. Native sources require a published/public title and
+ * an owned episode; editor cookies never expand this public access boundary.
  */
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const NO_STORE = { 'Cache-Control': 'private, no-store' };
 
 function toIndex(value: string | null): number | undefined {
   if (value === null || value === '') return undefined;
@@ -42,7 +42,7 @@ export async function GET(request: NextRequest) {
   const sp = request.nextUrl.searchParams;
   const type = sp.get('type');
   if (type !== 'movie' && type !== 'tv') {
-    return NextResponse.json({ sources: [], error: 'invalid-request' }, { status: 400 });
+    return NextResponse.json({ sources: [], error: 'invalid-request' }, { status: 400, headers: NO_STORE });
   }
 
   const tmdbId = sp.get('tmdbId') ?? undefined;
@@ -51,8 +51,9 @@ export async function GET(request: NextRequest) {
   const episodeIdParam = sp.get('episodeId');
   const titleId = titleIdParam && UUID_RE.test(titleIdParam) ? titleIdParam : undefined;
   const episodeId = episodeIdParam && UUID_RE.test(episodeIdParam) ? episodeIdParam : undefined;
-  if ((!tmdbId && !imdbId && !titleId) || (titleIdParam !== null && !titleId) || (episodeIdParam !== null && !episodeId)) {
-    return NextResponse.json({ sources: [], error: 'invalid-request' }, { status: 400 });
+  if ((!tmdbId && !imdbId && !titleId) || (titleIdParam !== null && !titleId) || (episodeIdParam !== null && !episodeId)
+    || sp.getAll('titleId').length > 1 || sp.getAll('episodeId').length > 1 || (episodeId && (!titleId || type !== 'tv'))) {
+    return NextResponse.json({ sources: [], error: 'invalid-request' }, { status: 400, headers: NO_STORE });
   }
 
   const season = type === 'tv' ? toIndex(sp.get('season')) : undefined;
@@ -69,24 +70,34 @@ export async function GET(request: NextRequest) {
     ...(episode !== undefined ? { episode } : {}),
   };
 
-  const [resolved, nativeSources, commerceContext] = await Promise.all([
+  let nativeSources: PlaybackSource[] = [];
+  if (features.supabaseConfigured && titleId) {
+    const { resolveNativeSources, NativePlaybackAccessError } = await import('@/features/playback/native-sources');
+    try {
+      nativeSources = await resolveNativeSources(titleId, episodeId, type);
+    } catch (error) {
+      if (error instanceof NativePlaybackAccessError) {
+        return NextResponse.json({ sources: [], error: error.status === 404 ? 'not-found' : 'playback-unavailable' },
+          { status: error.status, headers: NO_STORE });
+      }
+      // A source outage may use provider fallback, but an access rejection may not.
+    }
+  }
+
+  const [resolved, commerceContext] = await Promise.all([
     resolvePlayback(playbackRequest),
-    features.supabaseConfigured && titleId
-      ? import('@/features/playback/native-sources').then(({ resolveNativeSources }) => resolveNativeSources(titleId, episodeId))
-        .catch(() => [] as PlaybackSource[])
-      : Promise.resolve([] as PlaybackSource[]),
     getPlaybackCommerceContext(request),
   ]);
 
   // Anything the provider documents a resume parameter for gets `start`
   // appended (the native app passes the viewer's saved position).
-  const startParams = new Map(listProviderConfigs().map((c) => [c.id, c.startParam] as const));
+  const startParams = new Map(getActiveProviderConfigs().map((c) => [c.id, c.startParam] as const));
   const withResume = (source: PlaybackSource): PlaybackSource => {
     if (!source.url || start === undefined || start <= 30 || !source.providerId) return source;
     const param = startParams.get(source.providerId);
     if (!param) return source;
     const joiner = source.url.includes('?') ? '&' : '?';
-    return { ...source, url: `${source.url}${joiner}${param}=${start}` };
+    return { ...source, url: `${source.url}${joiner}${new URLSearchParams([[param, String(start)]])}` };
   };
 
   const origin = request.nextUrl.origin;
@@ -121,5 +132,5 @@ export async function GET(request: NextRequest) {
   return NextResponse.json({ sources: publicSources, adPolicy: commerceContext.ads, entitlements: commerceContext.entitlements,
     ...(subtitleCatalogUrl ? { subtitleCatalogUrl } : {}),
     ...(episodeNavigationUrl ? { episodeNavigationUrl } : {}),
-    ...(introCatalogUrl ? { introCatalogUrl } : {}) }, { headers: { 'Cache-Control': 'no-store' } });
+    ...(introCatalogUrl ? { introCatalogUrl } : {}) }, { headers: NO_STORE });
 }

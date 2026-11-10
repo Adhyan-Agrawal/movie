@@ -9,6 +9,7 @@ import {
 } from 'react';
 import {
   WATCH_PARTY_PROTOCOL_VERSION,
+  WATCH_PARTY_LIMITS,
   normalizeWatchPartyChat,
   normalizeWatchPartyDisplayName,
   normalizeWatchPartyRoomCode,
@@ -19,11 +20,8 @@ import {
   type WatchPartyCorrectionState,
   type WatchPartyMediaIdentity,
   type WatchPartyPlaybackCommand,
-  type WatchPartyServerMessage,
 } from '../protocol';
-import { decodeWatchPartyServerMessage } from './codec';
 import {
-  watchPartyProtocolError,
   watchPartyUnavailableError,
 } from './errors';
 import type {
@@ -35,6 +33,7 @@ import {
   INITIAL_WATCH_PARTY_STATE,
   watchPartyStateReducer,
   type WatchPartySessionState,
+  type WatchPartyStateAction,
 } from './reducer';
 import {
   buildWatchPartyInviteUrl,
@@ -104,18 +103,56 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
   const playerUnsubscribeRef = useRef<(() => void) | null>(null);
   const leaveRequestRef = useRef<string | null>(null);
   const leaveTimerRef = useRef<number | null>(null);
+  const playbackQueueRef = useRef<WatchPartyPlaybackCommand[]>([]);
+  const playbackRequestRef = useRef<string | null>(null);
+  const playbackTimerRef = useRef<number | null>(null);
   const correctionStateRef = useRef<WatchPartyCorrectionState>('stable');
   const syncRequestRef = useRef<number | null>(null);
-  const requestCounterRef = useRef(0);
   stateRef.current = state;
   availableRef.current = available;
   mediaRef.current = media;
   surfaceRef.current = surface;
 
   const requestId = useCallback((prefix: string): string => {
-    requestCounterRef.current += 1;
-    return `${prefix}-${Date.now().toString(36)}-${requestCounterRef.current.toString(36)}`;
+    return `${prefix}-${crypto.randomUUID()}`;
   }, []);
+
+  const transition = useCallback((action: WatchPartyStateAction) => {
+    stateRef.current = watchPartyStateReducer(stateRef.current, action);
+    dispatch(action);
+  }, []);
+
+  const clearPlaybackQueue = useCallback(() => {
+    playbackQueueRef.current = [];
+    playbackRequestRef.current = null;
+    if (playbackTimerRef.current !== null) window.clearTimeout(playbackTimerRef.current);
+    playbackTimerRef.current = null;
+  }, []);
+
+  const flushPlaybackQueue = useCallback(() => {
+    const current = stateRef.current;
+    if (current.phase !== 'connected' || current.self?.role !== 'host' || !current.playback
+      || !availableRef.current || surfaceRef.current !== 'native' || !mediaRef.current
+      || !sameWatchPartyMediaIdentity(current.playback.media, mediaRef.current)) {
+      clearPlaybackQueue();
+      return;
+    }
+    if (playbackRequestRef.current || current.syncFromRevision !== null
+      || (current.rateLimitedUntilMs !== null && current.rateLimitedUntilMs > Date.now())) return;
+    const command = playbackQueueRef.current.shift();
+    if (!command) return;
+    const id = requestId('playback');
+    playbackRequestRef.current = id;
+    if (!transportRef.current?.send({ v: 1, type: 'playback.command', requestId: id,
+      baseRevision: current.playback.revision, command } satisfies WatchPartyClientMessage)) {
+      clearPlaybackQueue();
+      return;
+    }
+    playbackTimerRef.current = window.setTimeout(() => {
+      clearPlaybackQueue();
+      transportRef.current?.retry();
+    }, 10_000);
+  }, [clearPlaybackQueue, requestId]);
 
   const clearStoredResume = useCallback(() => {
     clearWatchPartyResume();
@@ -126,29 +163,20 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
     let active = true;
     const handleStatus = (status: WatchPartyTransportStatus) => {
       if (!active || !availableRef.current) return;
-      if (status.phase === 'ticketing') dispatch({ type: 'transport', phase: 'ticketing' });
-      else if (status.phase === 'reconnecting') dispatch({ type: 'transport', phase: 'reconnecting',
+      clearPlaybackQueue();
+      if (leaveRequestRef.current) return;
+      if (status.phase === 'ticketing') transition({ type: 'transport', phase: 'ticketing' });
+      else if (status.phase === 'reconnecting') transition({ type: 'transport', phase: 'reconnecting',
         attempt: status.attempt, retryInMs: status.retryInMs });
-      else dispatch({ type: 'transport', phase: 'connecting' });
+      else transition({ type: 'transport', phase: 'connecting' });
     };
     const transport = new WatchPartyTransport({
       onStatus: handleStatus,
-      onMessage: (raw, receivedAtMs) => {
+      onMessage: (message, receivedAtMs) => {
         if (!active || !availableRef.current) return;
-        let parsed: unknown;
-        try { parsed = JSON.parse(raw); } catch {
-          dispatch({ type: 'error', error: watchPartyProtocolError(), fatal: true });
-          transportRef.current?.disconnect();
-          return;
-        }
-        const decoded = decodeWatchPartyServerMessage(parsed);
-        if (!decoded.ok) {
-          dispatch({ type: 'error', error: watchPartyProtocolError(), fatal: true });
-          transportRef.current?.disconnect();
-          return;
-        }
-        const message: WatchPartyServerMessage = decoded.value;
         if (message.type === 'room.snapshot') {
+          if (leaveRequestRef.current) return;
+          if (stateRef.current.phase !== 'connected') clearPlaybackQueue();
           transportRef.current?.setResumeToken(message.self.resumeToken);
           setSavedResume(writeWatchPartyResume(undefined, message, receivedAtMs));
         }
@@ -158,14 +186,26 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
           leaveTimerRef.current = null;
           transportRef.current?.disconnect();
           clearStoredResume();
-          dispatch({ type: 'left' });
+          transition({ type: 'left' });
           return;
         }
         if (message.type === 'room.closed') {
+          clearPlaybackQueue();
+          leaveRequestRef.current = null;
+          if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current);
+          leaveTimerRef.current = null;
           clearStoredResume();
           transportRef.current?.disconnect();
         }
-        dispatch({ type: 'server', message, receivedAtMs });
+        if ((message.type === 'server.ack' || message.type === 'server.error')
+          && message.requestId === playbackRequestRef.current) {
+          playbackRequestRef.current = null;
+          if (playbackTimerRef.current !== null) window.clearTimeout(playbackTimerRef.current);
+          playbackTimerRef.current = null;
+          if (message.type === 'server.error') playbackQueueRef.current = [];
+        }
+        transition({ type: 'server', message, receivedAtMs });
+        flushPlaybackQueue();
       },
       onError: (error, fatal) => {
         if (!active || !availableRef.current) return;
@@ -174,7 +214,8 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
           || error.code === 'ROOM_CLOSED' || error.code === 'PARTICIPANT_NOT_FOUND') {
           clearStoredResume();
         }
-        dispatch({ type: 'error', error, fatal });
+        if (fatal) clearPlaybackQueue();
+        transition({ type: 'error', error, fatal });
       },
     });
     transportRef.current = transport;
@@ -182,19 +223,26 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
       active = false;
       transport.disconnect();
       transportRef.current = null;
+      clearPlaybackQueue();
+      leaveRequestRef.current = null;
       if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current);
+      leaveTimerRef.current = null;
       playerUnsubscribeRef.current?.();
       playerUnsubscribeRef.current = null;
     };
-  }, [clearStoredResume]);
+  }, [clearStoredResume, clearPlaybackQueue, flushPlaybackQueue, transition]);
 
   useEffect(() => {
     setSavedResume(available ? readWatchPartyResume() : null);
     if (!available) {
       transportRef.current?.disconnect();
-      dispatch({ type: 'reset' });
+      clearPlaybackQueue();
+      leaveRequestRef.current = null;
+      if (leaveTimerRef.current !== null) window.clearTimeout(leaveTimerRef.current);
+      leaveTimerRef.current = null;
+      transition({ type: 'reset' });
     }
-  }, [available]);
+  }, [available, clearPlaybackQueue, transition]);
 
   const activeRoomCode = state.room?.roomCode ?? null;
   useEffect(() => {
@@ -241,27 +289,29 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
     if (state.rateLimitedUntilMs === null) return;
     const remaining = state.rateLimitedUntilMs - Date.now();
     if (remaining <= 0) {
-      dispatch({ type: 'clear-rate-limit' });
+      transition({ type: 'clear-rate-limit' });
       return;
     }
-    const timer = window.setTimeout(() => dispatch({ type: 'clear-rate-limit' }), remaining);
+    const timer = window.setTimeout(() => transition({ type: 'clear-rate-limit' }), remaining);
     return () => window.clearTimeout(timer);
-  }, [state.rateLimitedUntilMs]);
+  }, [state.rateLimitedUntilMs, transition]);
 
   const sendPlaybackIntent = useCallback((intent: PartyPlayerIntent) => {
     const current = stateRef.current;
     const currentMedia = mediaRef.current;
     if (!availableRef.current || surfaceRef.current !== 'native' || current.phase !== 'connected' || current.self?.role !== 'host'
       || !current.playback || !currentMedia
-      || !sameWatchPartyMediaIdentity(intent.snapshot.media, currentMedia)) return;
-    transportRef.current?.send({
-      v: 1,
-      type: 'playback.command',
-      requestId: requestId('playback'),
-      baseRevision: current.playback.revision,
-      command: commandForIntent(intent),
-    } satisfies WatchPartyClientMessage);
-  }, [requestId]);
+      || !sameWatchPartyMediaIdentity(intent.snapshot.media, currentMedia)
+      || !sameWatchPartyMediaIdentity(current.playback.media, currentMedia)
+      || (current.rateLimitedUntilMs !== null && current.rateLimitedUntilMs > Date.now())) return;
+    // Serialize commands against acknowledgements; coalesce rapid scrubbing, not video frames.
+    const command = commandForIntent(intent);
+    const queue = playbackQueueRef.current;
+    if (queue.at(-1)?.kind === command.kind) queue[queue.length - 1] = command;
+    else queue.push(command);
+    if (queue.length > WATCH_PARTY_LIMITS.controlRate.limit) queue.shift();
+    flushPlaybackQueue();
+  }, [flushPlaybackQueue]);
 
   const registerPlayerPort = useCallback<RegisterPartyPlayerPort>((port) => {
     playerUnsubscribeRef.current?.();
@@ -274,15 +324,20 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
   }, [sendPlaybackIntent]);
 
   useEffect(() => {
-    if (!available || surface !== 'native' || state.phase !== 'connected' || state.self?.role !== 'member'
+    if (!available || surface !== 'native' || state.phase !== 'connected'
       || !state.playback || !media || !sameWatchPartyMediaIdentity(state.playback.media, media)
       || !playerPortAvailable) return;
     let applying = false;
+    let active = true;
     const reconcile = () => {
+      if (!active) return;
       const port = playerPortRef.current;
       const playback = stateRef.current.playback;
-      const snapshot = port?.read();
-      if (!port || !playback || !snapshot || applying) return;
+      let snapshot;
+      try { snapshot = port?.read(); } catch { setPlayerPortError(true); return; }
+      if (!port || !playback || !snapshot || applying || playbackRequestRef.current
+        || playbackQueueRef.current.length || stateRef.current.phase !== 'connected'
+        || !sameWatchPartyMediaIdentity(snapshot.media, playback.media)) return;
       const plan = planWatchPartyDrift({
         playback,
         localMedia: snapshot.media,
@@ -306,25 +361,28 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
             ...(playback.freezeReason ? { freezeReason: playback.freezeReason } : {}),
             playbackRate: playback.playbackRate, seek: false, reason: 'steady' as const };
       applying = true;
-      void Promise.resolve(port.apply(target)).catch(() => setPlayerPortError(true)).finally(() => { applying = false; });
+      void Promise.resolve().then(() => active ? port.apply(target) : undefined)
+        .catch(() => { if (active) setPlayerPortError(true); }).finally(() => { applying = false; });
     };
     reconcile();
     const interval = window.setInterval(reconcile, 1_000);
-    return () => window.clearInterval(interval);
+    return () => { active = false; window.clearInterval(interval); };
   }, [available, media, playerPortAvailable, state.phase, state.playback, state.self?.role, surface]);
 
   const create = useCallback((displayName: string): boolean => {
-    if (!availableRef.current || !transportRef.current) return false;
+    if (!availableRef.current || !transportRef.current || stateRef.current.room || leaveRequestRef.current
+      || ['ticketing', 'connecting', 'reconnecting'].includes(stateRef.current.phase)) return false;
     const normalized = normalizeWatchPartyDisplayName(displayName);
     const currentMedia = parseWatchPartyMediaIdentity(mediaRef.current);
     if (!normalized || !currentMedia) {
-      dispatch({ type: 'error', error: watchPartyUnavailableError(), fatal: false });
+      transition({ type: 'error', error: watchPartyUnavailableError(), fatal: false });
       return false;
     }
     const player = playerPortRef.current?.read();
     const positionSeconds = player && sameWatchPartyMediaIdentity(player.media, currentMedia)
       ? player.positionSeconds : undefined;
-    dispatch({ type: 'start' });
+    clearStoredResume();
+    transition({ type: 'start' });
     transportRef.current?.start({
       v: 1,
       action: 'create',
@@ -334,34 +392,37 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
       ...(positionSeconds === undefined ? {} : { positionSeconds }),
     });
     return true;
-  }, []);
+  }, [clearStoredResume, transition]);
 
   const join = useCallback((displayName: string, roomCode: string): boolean => {
-    if (!availableRef.current || !transportRef.current) return false;
+    if (!availableRef.current || !transportRef.current || stateRef.current.room || leaveRequestRef.current
+      || ['ticketing', 'connecting', 'reconnecting'].includes(stateRef.current.phase)) return false;
     const normalizedName = normalizeWatchPartyDisplayName(displayName);
     const normalizedCode = normalizeWatchPartyRoomCode(roomCode);
     if (!normalizedName || !normalizedCode) return false;
-    dispatch({ type: 'start' });
+    clearStoredResume();
+    transition({ type: 'start' });
     transportRef.current?.start({ v: 1, action: 'join', platform: 'web',
       displayName: normalizedName, roomCode: normalizedCode });
     return true;
-  }, []);
+  }, [clearStoredResume, transition]);
 
   const resume = useCallback((): boolean => {
-    if (!availableRef.current || !transportRef.current) return false;
+    if (!availableRef.current || !transportRef.current || stateRef.current.room || leaveRequestRef.current
+      || ['ticketing', 'connecting', 'reconnecting'].includes(stateRef.current.phase)) return false;
     const stored = readWatchPartyResume();
     if (!stored) {
       setSavedResume(null);
       return false;
     }
     setSavedResume(stored);
-    dispatch({ type: 'start' });
+    transition({ type: 'start' });
     transportRef.current?.start({ v: 1, action: 'resume', platform: 'web', resumeToken: stored.resumeToken });
     return true;
-  }, []);
+  }, [transition]);
 
   const retry = useCallback(() => {
-    if (availableRef.current) transportRef.current?.retry();
+    if (availableRef.current && stateRef.current.phase === 'error') transportRef.current?.retry();
   }, []);
 
   const sendChat = useCallback((text: string): boolean => {
@@ -375,21 +436,25 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
 
   const transferHost = useCallback((participantId: string): boolean => {
     const current = stateRef.current;
-    if (!availableRef.current || current.phase !== 'connected' || current.self?.role !== 'host' || !current.room) return false;
+    if (!availableRef.current || current.phase !== 'connected' || current.self?.role !== 'host' || !current.room
+      || (current.rateLimitedUntilMs !== null && current.rateLimitedUntilMs > Date.now())) return false;
     return transportRef.current?.send({ v: 1, type: 'host.transfer', requestId: requestId('transfer'),
       baseRevision: current.room.revision, participantId } satisfies WatchPartyClientMessage) ?? false;
   }, [requestId]);
 
   const leave = useCallback(() => {
+    if (leaveRequestRef.current) return;
+    clearPlaybackQueue();
     const current = stateRef.current;
     if (current.phase !== 'connected') {
       transportRef.current?.disconnect();
       clearStoredResume();
-      dispatch({ type: 'left' });
+      transition({ type: 'left' });
       return;
     }
     const id = requestId('leave');
     leaveRequestRef.current = id;
+    transition({ type: 'leaving' });
     const sent = transportRef.current?.send(({
       v: 1,
       type: 'room.leave',
@@ -397,17 +462,19 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
     }) satisfies WatchPartyClientMessage);
     if (!sent) {
       transportRef.current?.disconnect();
+      leaveRequestRef.current = null;
       clearStoredResume();
-      dispatch({ type: 'left' });
+      transition({ type: 'left' });
       return;
     }
     leaveTimerRef.current = window.setTimeout(() => {
       leaveRequestRef.current = null;
+      leaveTimerRef.current = null;
       transportRef.current?.disconnect();
       clearStoredResume();
-      dispatch({ type: 'left' });
+      transition({ type: 'left' });
     }, 2_000);
-  }, [clearStoredResume, requestId]);
+  }, [clearStoredResume, clearPlaybackQueue, requestId, transition]);
 
   let syncStatus: WatchPartySyncStatus = 'ready';
   if (!available) syncStatus = 'unavailable';
@@ -431,7 +498,7 @@ export function useWatchPartySession({ configured = false, media, surface }: Use
     sendChat,
     transferHost,
     leave,
-    clearError: () => dispatch({ type: 'clear-error' }),
+    clearError: () => transition({ type: 'clear-error' }),
     registerPlayerPort,
   };
 }

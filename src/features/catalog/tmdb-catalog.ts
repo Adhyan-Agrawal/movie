@@ -1,10 +1,10 @@
 import 'server-only';
 
 import { cache } from 'react';
-import { getCloudflareContext } from '@opennextjs/cloudflare';
 import { serverEnv } from '@/lib/env';
-import { normalizeCast, normalizeEpisodes, normalizeMovie, normalizeTv, slugify, tmdbImageUrl, validYear, type TmdbMovieDetail, type TmdbSeasonDetail, type TmdbTvDetail } from './tmdb-normalize';
+import { normalizeCast, normalizeEpisodes, normalizeMovie, normalizeTv, tmdbImageUrl, validYear, type TmdbMovieDetail, type TmdbSeasonDetail, type TmdbTvDetail } from './tmdb-normalize';
 import type { CastMember, Episode, Season, Title, TitleType } from './types';
+import type { Person, PersonCredit } from '@/features/people/types';
 import type { TitleFilters } from './queries';
 import { normalizeCountryFilter, normalizeLanguageFilter, providerGenre } from './discovery';
 import { PublicDataCache } from './public-data-cache';
@@ -14,6 +14,9 @@ const CACHE_SECONDS = 21_600;
 const LIST_CACHE_SECONDS = 3_600;
 const SEARCH_CACHE_SECONDS = 600;
 const REQUEST_TIMEOUT_MS = 6_000;
+const PERSON_PAYLOAD_BYTES = 1_048_576;
+const PERSON_CREDITS_PER_KIND = 60;
+const PERSON_CREDIT_SCAN_LIMIT = 600;
 const publicData = new PublicDataCache<unknown>({
   maxEntries: 128,
   maxPending: 48,
@@ -30,19 +33,9 @@ interface RequestState {
     timeout: ReturnType<typeof setTimeout>;
   }>;
 }
-const localRequestState: RequestState = { activeRequests: 0, waitingRequests: [] };
-const workerRequestStates = new WeakMap<object, RequestState>();
-
-function requestState(): RequestState {
-  if (!('WebSocketPair' in globalThis)) return localRequestState;
-  const { ctx } = getCloudflareContext();
-  let state = workerRequestStates.get(ctx);
-  if (!state) {
-    state = { activeRequests: 0, waitingRequests: [] };
-    workerRequestStates.set(ctx, state);
-  }
-  return state;
-}
+// Node can coalesce public TMDB reads within one instance. No account data or
+// request headers enter this cache; RLS-backed reads keep their render scope.
+const nodeRequestState: RequestState = { activeRequests: 0, waitingRequests: [] };
 
 function releaseRequestSlot(state: RequestState): void {
   const waiting = state.waitingRequests.shift();
@@ -116,6 +109,46 @@ function publicPayload(path: string, value: unknown): Record<string, unknown> {
   const data = record(value);
   const invalid = () => new Error(`TMDB ${path} returned an invalid payload`);
   if (data !== value || data.success === false) throw invalid();
+  const person = /^\/person\/([1-9][0-9]{0,9})$/.exec(path);
+  if (person) {
+    const compactText = (value: unknown, max: number): string | null => typeof value === 'string'
+      ? value.slice(0, max * 4).replace(/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu, ' ').replace(/\s+/g, ' ').trim().slice(0, max) || null
+      : null;
+    const imagePath = (value: unknown) => typeof value === 'string' && value.length <= 128 && tmdbImageUrl(value, 'w185') ? value : null;
+    const name = compactText(data.name, 200);
+    const combined = record(data.combined_credits);
+    if (data.id !== Number(person[1]) || !name || !Array.isArray(combined.cast) || !Array.isArray(combined.crew)) throw invalid();
+    const credits = (kind: 'cast' | 'crew'): TmdbPersonCredit[] => {
+      const out: TmdbPersonCredit[] = [];
+      const seen = new Set<string>();
+      for (const value of (combined[kind] as unknown[]).slice(0, PERSON_CREDIT_SCAN_LIMIT)) {
+        const credit = record(value);
+        const type = credit.media_type;
+        if ((type !== 'movie' && type !== 'tv') || !Number.isSafeInteger(credit.id) || Number(credit.id) <= 0 || Number(credit.id) > 9_999_999_999 || credit.adult === true) continue;
+        const title = compactText(credit[type === 'movie' ? 'title' : 'name'], 200);
+        if (!title) continue;
+        const character = kind === 'cast' ? compactText(credit.character, 160) : null;
+        const job = kind === 'crew' ? compactText(credit.job, 80) : null;
+        const key = JSON.stringify([type, credit.id, character, job]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({
+          id: credit.id as number, media_type: type,
+          ...(type === 'movie' ? { title, release_date: compactText(credit.release_date, 10) } : { name: title, first_air_date: compactText(credit.first_air_date, 10) }),
+          poster_path: imagePath(credit.poster_path),
+          vote_average: number(credit.vote_average) !== null && Number(credit.vote_average) <= 10 ? credit.vote_average as number : null,
+          character, job,
+          order: Number.isSafeInteger(credit.order) && Number(credit.order) >= 0 && Number(credit.order) <= 10_000 ? credit.order as number : out.length,
+        });
+        if (out.length >= PERSON_CREDITS_PER_KIND) break;
+      }
+      return out;
+    };
+    return {
+      id: data.id, name, known_for_department: compactText(data.known_for_department, 80), profile_path: imagePath(data.profile_path),
+      combined_credits: { cast: credits('cast'), crew: credits('crew') },
+    };
+  }
   if (/^\/(search|discover|trending)\//.test(path) && !Array.isArray(data.results)) throw invalid();
   if (path.startsWith('/genre/')) {
     if (!Array.isArray(data.genres)) throw invalid();
@@ -155,6 +188,31 @@ function publicPayload(path: string, value: unknown): Record<string, unknown> {
   return normalized;
 }
 
+async function personResponseJson(response: Response): Promise<unknown> {
+  if (Number(response.headers.get('content-length')) > PERSON_PAYLOAD_BYTES) {
+    await response.body?.cancel();
+    throw new Error('TMDB person payload exceeded its byte limit');
+  }
+  if (!response.body) throw new Error('TMDB person payload is missing');
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder('utf-8', { fatal: true });
+  let bytes = 0;
+  let text = '';
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > PERSON_PAYLOAD_BYTES) throw new Error('TMDB person payload exceeded its byte limit');
+      text += decoder.decode(chunk.value, { stream: true });
+    }
+    return JSON.parse(text + decoder.decode()) as unknown;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+}
+
 async function request<T>(path: string, params: Record<string, string> = {}): Promise<T> {
   const { TMDB_API_BASE_URL, TMDB_API_KEY } = serverEnv();
   if (!TMDB_API_KEY) throw new Error('TMDB_API_KEY is not configured.');
@@ -164,7 +222,7 @@ async function request<T>(path: string, params: Record<string, string> = {}): Pr
   for (const [key, value] of Object.entries(params)) if (value) url.searchParams.set(key, value);
   const key = publicRequestKey(TMDB_API_BASE_URL, path, params);
   const ttlSeconds = cacheSeconds(path);
-  const state = requestState();
+  const state = nodeRequestState;
   return publicData.read(key, async () => {
     const release = await acquireRequestSlot(state);
     try {
@@ -176,7 +234,7 @@ async function request<T>(path: string, params: Record<string, string> = {}): Pr
         next: { revalidate: ttlSeconds, tags: cacheTags(path) },
       });
       if (!response.ok) throw new TmdbRequestError(path, response.status);
-      return publicPayload(path, await response.json());
+      return publicPayload(path, await (path.startsWith('/person/') ? personResponseJson(response) : response.json()));
     } finally {
       release();
     }
@@ -194,7 +252,7 @@ function maturity(value: string): Title['maturity'] {
 }
 
 function fromNormalized(value: NonNullable<ReturnType<typeof normalizeMovie>>): Title {
-  return { id: `tmdb:${value.type}:${value.tmdbId}`, type: value.type, slug: value.slug, name: value.name, ...(value.originalName ? { originalName: value.originalName } : {}), synopsis: value.synopsis, releaseYear: value.releaseYear ?? 0, ...(value.runtimeMinutes != null ? { runtimeMinutes: value.runtimeMinutes } : {}), maturity: maturity(value.maturity), genres: value.genres, ...(value.posterUrl ? { posterUrl: value.posterUrl } : {}), ...(value.backdropUrl ? { backdropUrl: value.backdropUrl } : {}), ...(value.trailerUrl ? { trailerUrl: value.trailerUrl } : {}), ...(value.score != null ? { score: value.score } : {}), tmdbId: String(value.tmdbId), ...(value.imdbId ? { imdbId: value.imdbId } : {}) };
+  return { id: `tmdb:${value.type}:${value.tmdbId}`, type: value.type, slug: `tmdb-${value.tmdbId}`, name: value.name, ...(value.originalName ? { originalName: value.originalName } : {}), synopsis: value.synopsis, releaseYear: value.releaseYear ?? 0, ...(value.runtimeMinutes != null ? { runtimeMinutes: value.runtimeMinutes } : {}), maturity: maturity(value.maturity), genres: value.genres, ...(value.posterUrl ? { posterUrl: value.posterUrl } : {}), ...(value.backdropUrl ? { backdropUrl: value.backdropUrl } : {}), ...(value.trailerUrl ? { trailerUrl: value.trailerUrl } : {}), ...(value.score != null ? { score: value.score } : {}), tmdbId: String(value.tmdbId), ...(value.imdbId ? { imdbId: value.imdbId } : {}) };
 }
 
 function idFromSlug(slug: string): number | null {
@@ -215,7 +273,7 @@ function listTitle(type: TitleType, item: TmdbListItem, genres: Map<number, stri
   const originCountries = item.origin_country?.map(normalizeCountryFilter).filter((value): value is string => Boolean(value));
   const posterUrl = tmdbImageUrl(item.poster_path, 'w500');
   const backdropUrl = tmdbImageUrl(item.backdrop_path, 'w1280');
-  return { id: `tmdb:${type}:${item.id}`, type, slug: `${slugify(name)}-${item.id}`, name, ...(originalName && originalName !== name ? { originalName } : {}), ...(originalLanguage ? { originalLanguage } : {}), ...(originCountries?.length ? { originCountries } : {}), synopsis: item.overview ?? '', releaseYear: validYear(date ?? null) ?? 0, maturity: type === 'tv' ? 'TV-14' : 'PG-13', genres: (item.genre_ids ?? []).map((id) => genres.get(id)).filter((genre): genre is string => Boolean(genre)), ...(posterUrl ? { posterUrl } : {}), ...(backdropUrl ? { backdropUrl } : {}), ...(typeof item.vote_average === 'number' ? { score: Math.round(item.vote_average * 10) } : {}), tmdbId: String(item.id) };
+  return { id: `tmdb:${type}:${item.id}`, type, slug: `tmdb-${item.id}`, name, ...(originalName && originalName !== name ? { originalName } : {}), ...(originalLanguage ? { originalLanguage } : {}), ...(originCountries?.length ? { originCountries } : {}), synopsis: item.overview ?? '', releaseYear: validYear(date ?? null) ?? 0, maturity: type === 'tv' ? 'TV-14' : 'PG-13', genres: (item.genre_ids ?? []).map((id) => genres.get(id)).filter((genre): genre is string => Boolean(genre)), ...(posterUrl ? { posterUrl } : {}), ...(backdropUrl ? { backdropUrl } : {}), ...(typeof item.vote_average === 'number' ? { score: Math.round(item.vote_average * 10) } : {}), tmdbId: String(item.id) };
 }
 
 type TmdbTitleDetail = TmdbMovieDetail & TmdbTvDetail & {
@@ -274,6 +332,40 @@ export async function getTmdbTitle(type: TitleType, slug: string): Promise<Title
   if (countries?.length) title.originCountries = [...new Set(countries)];
   return title;
 }
+
+/** Explicit provider identities never infer an identity from a database slug. */
+export function getTmdbTitleById(id: string): Promise<Title | null> {
+  const match = /^tmdb:(movie|tv):([1-9][0-9]{0,9})$/.exec(id);
+  if (!match || match[0] !== id) return Promise.resolve(null);
+  return getTmdbTitle(match[1] as TitleType, `${match[1]}-${match[2]}`);
+}
+
+type TmdbPersonCredit = TmdbListItem & { media_type: TitleType; character: string | null; job: string | null; order: number };
+type TmdbPersonDetail = { id: number; name: string; known_for_department: string | null; profile_path: string | null; combined_credits: { cast: TmdbPersonCredit[]; crew: TmdbPersonCredit[] } };
+
+/** One public response and one render-scoped mapping for profile and filmography. */
+export const getTmdbPerson = cache(async (id: string): Promise<{ person: Person; credits: PersonCredit[] } | null> => {
+  const match = /^tmdb:person:([1-9][0-9]{0,9})$/.exec(id);
+  if (!match || match[0] !== id) return null;
+  let data: TmdbPersonDetail;
+  try {
+    data = await request<TmdbPersonDetail>(`/person/${match[1]}`, { append_to_response: 'combined_credits' });
+  } catch (error) {
+    if (error instanceof TmdbRequestError && error.status === 404) return null;
+    throw error;
+  }
+  // Combined credits contain listing fields, not certification or full details.
+  // Reuse the existing card mapper without a genre or per-credit detail fetch.
+  const genres = new Map<number, string>();
+  const credits = (['cast', 'crew'] as const).flatMap((creditType) => data.combined_credits[creditType].map((credit): PersonCredit => ({
+    title: listTitle(credit.media_type, credit, genres), creditType,
+    character: credit.character, job: credit.job, creditOrder: credit.order,
+  })));
+  return {
+    person: { id, name: data.name, knownFor: data.known_for_department, profileUrl: tmdbImageUrl(data.profile_path, 'w185') },
+    credits,
+  };
+});
 
 export async function listTmdbTitles(filters: TitleFilters = {}, page = 1, pageSize = 20): Promise<{ titles: Title[]; total: number }> {
   const types: TitleType[] = filters.type ? [filters.type] : ['movie', 'tv'];

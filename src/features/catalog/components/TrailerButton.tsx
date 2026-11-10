@@ -80,7 +80,7 @@ export function TrailerButton({ trailerUrl, titleName, imdbId, tmdbId, type }: T
             </div>
             <div className="relative aspect-video w-full overflow-hidden rounded-lg border border-border bg-black shadow-raised">
               {loading ? <p role="status" className="flex h-full items-center justify-center text-sm text-content-muted">Finding trailer...</p>
-                : trailer ? <video src={trailer.url} crossOrigin="anonymous" controls autoPlay playsInline preload="metadata" className="h-full w-full" />
+                : trailer ? <video src={trailer.url} crossOrigin="anonymous" controls autoPlay playsInline preload="metadata" className="h-full w-full" onError={() => setTrailer(null)} />
                   : key ? <iframe
                 src={`https://www.youtube-nocookie.com/embed/${key}?autoplay=1&rel=0`}
                 title={`${titleName} trailer`}

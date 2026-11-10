@@ -17,7 +17,8 @@ import { markCheckpointSynced, mediaKey, readCheckpoint, selectResume, writeChec
 import { acquireOrientation } from '../player/orientation';
 import { parseEpisodeNavigationRequest, type EpisodeNavigation } from '../player/episode-navigation';
 import { colors } from '../theme';
-import { parseWatchPartyMediaIdentity, sameWatchPartyMediaIdentity } from '../watch-party/protocol';
+import { sameWatchPartyMediaIdentity } from '../watch-party/protocol';
+import { buildWatchPartyMediaIdentity } from '../watch-party/identity';
 import WatchPartySheet from '../watch-party/WatchPartySheet';
 import { useWatchPartySession } from '../watch-party/useWatchPartySession';
 import { WATCH_PARTY_SERVICE_AVAILABLE } from '../watch-party/config';
@@ -65,11 +66,7 @@ export default function PlayerScreen() {
   const needsConsent = !!active && active.consentRequired && !consented.includes(active.id);
   const failed = !!active && active.id === failedId;
   const nativeEpisodeSurface = ready && !!active && !needsConsent && !failed && active.kind !== 'embed';
-  const partyMedia = parseWatchPartyMediaIdentity(type === 'movie'
-    ? { kind: 'movie', mediaId: titleId }
-    : { kind: 'episode', mediaId: titleId,
-      ...(context.episodeId ? { episodeId: context.episodeId } : {}),
-      ...(season !== undefined && episode !== undefined ? { seasonNumber: season, episodeNumber: episode } : {}) });
+  const partyMedia = buildWatchPartyMediaIdentity({ type, titleId, episodeId: context.episodeId, season, episode });
   const partySurface = ready && active && !needsConsent && !failed
     ? active.kind === 'embed' ? 'embed' as const : 'native' as const : 'unavailable' as const;
   const party = useWatchPartySession({ media: partyMedia, surface: partySurface, type, slug,

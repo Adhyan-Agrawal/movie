@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { isValidElement, type ReactNode } from 'react';
 import type { Title } from '@/features/catalog/types';
+import { DEFAULT_SETTINGS } from '@/features/account/types';
 
 const mocks = vi.hoisted(() => ({
   features: { tmdbConfigured: true, supabaseConfigured: false },
   title: vi.fn(), seasons: vi.fn(), show: vi.fn(), season: vi.fn(), resolve: vi.fn(), commerce: vi.fn(),
   native: vi.fn(), progress: vi.fn(), auth: vi.fn(), cookies: vi.fn(), fetch: vi.fn(),
+  providers: vi.fn(),
+  preferences: vi.fn(),
   shell: () => null,
 }));
 vi.mock('server-only', () => ({}));
@@ -14,10 +17,11 @@ vi.mock('@/lib/env', () => ({ features: mocks.features }));
 vi.mock('@/features/catalog/queries', () => ({ getTitleBySlug: mocks.title, listSeasonsForTitle: mocks.seasons }));
 vi.mock('@/features/catalog/tmdb-catalog', () => ({ getTmdbShowMetadata: mocks.show, getTmdbSeasonMetadata: mocks.season }));
 vi.mock('@/lib/providers/config', () => ({ listProviderConfigs: () => [], getProviderConfig: () => undefined }));
-vi.mock('@/lib/providers/registry', () => ({ resolvePlayback: mocks.resolve, getActiveProviderConfigs: () => [] }));
+vi.mock('@/lib/providers/registry', () => ({ resolvePlayback: mocks.resolve, getActiveProviderConfigs: mocks.providers }));
 vi.mock('@/features/commerce/queries', () => ({ getPlaybackCommerceContext: mocks.commerce }));
 vi.mock('@/features/playback/native-sources', () => ({ resolveNativeSources: mocks.native, findEpisodeId: mocks.native }));
 vi.mock('@/features/playback/progress-queries', () => ({ getPlaybackContext: mocks.progress }));
+vi.mock('@/features/account/preference-queries', () => ({ getRenderAccountPreferences: mocks.preferences }));
 vi.mock('@/lib/supabase/server', () => ({ getSupabaseServerClient: mocks.auth }));
 vi.mock('next/headers', () => ({ cookies: mocks.cookies }));
 vi.mock('@/features/player/PlayerShell', () => ({ PlayerShell: mocks.shell }));
@@ -48,6 +52,8 @@ beforeEach(() => {
   mocks.features.tmdbConfigured = true;
   mocks.title.mockResolvedValue(title);
   mocks.seasons.mockResolvedValue([]);
+  mocks.providers.mockReturnValue([]);
+  mocks.preferences.mockResolvedValue({ ok: false, reason: 'unavailable', message: 'Unavailable' });
   mocks.resolve.mockResolvedValue({ source, sources: [source], attempted: ['private-provider'], error: null });
   mocks.commerce.mockResolvedValue({
     ads: { enabled: false, firstBreakSeconds: 900, intervalSeconds: 900, maxBreaks: 3, allowSkip: true, skipAfterSeconds: 5 },
@@ -110,7 +116,39 @@ describe('nonblocking optional episode navigation forwarding', () => {
   });
 });
 
+describe('watch-page merged provider resume parameters', () => {
+  it.each(['customStart', 'seek&autoplay=false#=', '', undefined])('honors the configured parameter %s without injecting query syntax', async (startParam) => {
+    mocks.features.supabaseConfigured = true;
+    mocks.title.mockResolvedValue({ ...title, id: '123e4567-e89b-42d3-a456-426614174000', type: 'movie' });
+    mocks.native.mockResolvedValue([]);
+    mocks.progress.mockResolvedValue({ viewerKey: 'account:viewer', resumePosition: { positionSeconds: 75.4 } });
+    const embed = { ...source, kind: 'embed', url: 'https://embed.example/watch?existing=1' };
+    mocks.resolve.mockResolvedValue({ source: embed, sources: [embed], error: null });
+    mocks.providers.mockReturnValue([{ id: embed.providerId, startParam }]);
+
+    const props = shellProps(await WatchPage({ params: Promise.resolve({ type: 'movie', slug: title.slug }), searchParams: Promise.resolve({}) }));
+    const received = new URL((props?.source as { url: string }).url);
+    expect(received.origin).toBe('https://embed.example');
+    expect(received.hash).toBe('');
+    expect(received.searchParams.get('existing')).toBe('1');
+    expect([...received.searchParams.keys()]).toEqual(startParam ? ['existing', startParam] : ['existing']);
+    if (startParam) expect(received.searchParams.get(startParam)).toBe('75');
+    else expect(received.href).toBe(embed.url);
+    expect(mocks.fetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('watch-page nonsecret release flags', () => {
+  it('passes a verified account preference snapshot to the profile-scoped player', async () => {
+    mocks.features.supabaseConfigured = true;
+    const snapshot = { accountId: 'viewer', settings: { ...DEFAULT_SETTINGS, autoplayNext: false }, hasSavedPreferences: true };
+    mocks.preferences.mockResolvedValue({ ok: true, snapshot });
+    mocks.progress.mockResolvedValue({ viewerKey: 'account:viewer:profile:profile-one', resumePosition: null });
+    const props = shellProps(await WatchPage({ params: Promise.resolve({ type: 'tv', slug: title.slug }), searchParams: Promise.resolve({ season: '1', episode: '1' }) }));
+    expect(props?.initialAccountPreferences).toEqual(snapshot);
+    expect(mocks.preferences).toHaveBeenCalledTimes(1);
+  });
+
   it.each([true, false])('forwards validated configured=%s independently of source kind and account availability', async (configured) => {
     const secret = 'fixture-only-watch-party-secret-32-characters';
     vi.stubEnv('WATCH_PARTY_SECRET', configured ? secret : '');

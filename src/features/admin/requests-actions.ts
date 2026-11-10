@@ -2,9 +2,11 @@
 
 import { revalidatePath } from 'next/cache';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { getSupabaseServiceClient } from '@/lib/supabase/service';
 import { requirePermission } from '@/lib/permissions/check';
 import { PERMISSIONS } from '@/lib/permissions/permissions';
-import { importTitlesForSearch } from '@/features/catalog/tmdb-sync';
+import { importTitleForRequest } from '@/features/catalog/tmdb-sync';
+import type { AdminTitleRequestRow } from './types';
 
 /**
  * Admin title-request queue actions (Spec Section 4): import a requested title
@@ -16,10 +18,8 @@ import { importTitlesForSearch } from '@/features/catalog/tmdb-sync';
  * (public.has_permission('catalog.create')) enforces the same boundary on the
  * DB side, and every write is attributable to the acting editor.
  *
- * Import runs the same TMDB search-to-import path the public search box uses,
- * capped at 1 title so the request resolves to exactly one match. TMDB being
- * unreachable (some networks block api.themoviedb.org) surfaces the same honest
- * "could not find" error and leaves the request pending for a later retry.
+ * Import requires one exact name/type/year match and a confirmed catalog write.
+ * Unmatched, ambiguous, incomplete, or failed lookups leave the request pending.
  *
  * Only async functions are exported from this 'use server' module.
  */
@@ -28,6 +28,8 @@ import { importTitlesForSearch } from '@/features/catalog/tmdb-sync';
 export interface TitleRequestActionResult {
   ok: boolean;
   error?: string;
+  /** The status committed, but its separate notification write was not confirmed. */
+  requestUpdated?: true;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -36,10 +38,42 @@ function revalidateRequestsPage(): void {
   revalidatePath('/admin/requests');
 }
 
+async function notifyRequestTransition(
+  request: Pick<AdminTitleRequestRow, 'id' | 'account_id' | 'title_name'>,
+  status: 'imported' | 'rejected',
+): Promise<TitleRequestActionResult> {
+  revalidateRequestsPage();
+  revalidatePath('/request');
+  try {
+    if (typeof request.account_id !== 'string' || !UUID_RE.test(request.account_id)
+      || typeof request.title_name !== 'string' || !request.title_name.trim()) throw new Error('Invalid notification recipient.');
+    // Only the winner of a real pending->final transition reaches this insert.
+    // Notifications have service-only INSERT; account reads/updates never use it.
+    const { error } = await getSupabaseServiceClient().from('notifications').insert({
+      account_id: request.account_id,
+      profile_id: null,
+      kind: status === 'imported' ? 'import' : 'moderation',
+      title: status === 'imported' ? 'Your requested title was imported' : 'Your title request was reviewed',
+      body: status === 'imported'
+        ? `Your request for "${request.title_name.trim().slice(0, 200)}" was added to the catalog. Playback availability can vary.`
+        : `Your request for "${request.title_name.trim().slice(0, 200)}" was not approved.`,
+      data: { request_id: request.id, status },
+    }).abortSignal(AbortSignal.timeout(10_000));
+    if (error) throw new Error('Notification write not confirmed.');
+    revalidatePath('/account/notifications');
+    return { ok: true };
+  } catch {
+    // These two writes are not a transaction; never imply the status rolled back.
+    return {
+      ok: false, requestUpdated: true,
+      error: `The request was ${status}, but its account notification could not be confirmed. The request status is saved. Refresh the queue to see it.`,
+    };
+  }
+}
+
 /**
- * Import a pending request: TMDB-search the requested name, and when a match is
- * found, mark the request 'imported'. No match (or TMDB unreachable) leaves it
- * pending so the editor can retry later.
+ * Import a pending request without guessing an identity from TMDB search rank.
+ * Only a confirmed import can change the unchanged pending request's status.
  */
 export async function importRequestedTitleAction(requestId: string): Promise<TitleRequestActionResult> {
   try {
@@ -55,34 +89,42 @@ export async function importRequestedTitleAction(requestId: string): Promise<Tit
   // title_requests is not yet in the generated Supabase types — cast
   // pragmatically. The admin read policy (catalog.read) scopes what we see.
   const { data: row, error: readError } = await (db as any).from('title_requests')
-    .select('*')
+    .select('id, account_id, title_name, media_type, year, status, updated_at')
     .eq('id', requestId)
     .maybeSingle();
   if (readError || !row) {
     return { ok: false, error: readError ? `Could not read the request: ${readError.message}` : 'Request not found.' };
   }
 
-  // Same TMDB search-to-import path the public search box uses, capped at one
-  // title. Failures (network blocks, no match) leave the request pending.
-  let imported: Awaited<ReturnType<typeof importTitlesForSearch>> = [];
-  try {
-    imported = await importTitlesForSearch(row.title_name, 1);
-  } catch {
-    // Fall through to the "could not find" error below.
-  }
-  if (imported.length === 0) {
-    return { ok: false, error: 'Could not find that title on TMDB.' };
+  if (row.status !== 'pending') {
+    return { ok: false, error: 'Only pending requests can be imported.' };
   }
 
-  const { error: updateError } = await (db as any).from('title_requests')
+  let importedId: string | null;
+  try {
+    importedId = await importTitleForRequest(row.title_name, row.media_type, row.year);
+  } catch {
+    return { ok: false, error: 'Could not import the requested title. The request is unchanged; try again later.' };
+  }
+  if (!importedId) {
+    return { ok: false, error: 'Could not confirm a single TMDB match for the requested title, type, and year. The request is unchanged.' };
+  }
+
+  const { data: updated, error: updateError } = await (db as any).from('title_requests')
     .update({ status: 'imported', updated_at: new Date().toISOString() })
-    .eq('id', requestId);
+    .eq('id', requestId)
+    .eq('status', 'pending')
+    .eq('updated_at', row.updated_at)
+    .select('id, account_id, title_name')
+    .maybeSingle();
   if (updateError) {
     return { ok: false, error: `Could not mark the request imported: ${updateError.message}` };
   }
+  if (!updated) {
+    return { ok: false, error: 'The request changed while importing. Reload the queue before trying again.' };
+  }
 
-  revalidateRequestsPage();
-  return { ok: true };
+  return notifyRequestTransition(updated, 'imported');
 }
 
 /** Reject a pending request without importing anything. */
@@ -96,13 +138,16 @@ export async function rejectRequestedTitleAction(requestId: string): Promise<Tit
   if (!UUID_RE.test(requestId ?? '')) return { ok: false, error: 'Invalid request id.' };
 
   const db = await getSupabaseServerClient();
-  const { error } = await (db as any).from('title_requests')
+  const { data: updated, error } = await (db as any).from('title_requests')
     .update({ status: 'rejected', updated_at: new Date().toISOString() })
-    .eq('id', requestId);
+    .eq('id', requestId)
+    .eq('status', 'pending')
+    .select('id, account_id, title_name')
+    .maybeSingle();
   if (error) {
     return { ok: false, error: `Could not reject the request: ${error.message}` };
   }
 
-  revalidateRequestsPage();
-  return { ok: true };
+  if (!updated) return { ok: false, error: 'Only pending requests can be rejected. The request is no longer pending or available.' };
+  return notifyRequestTransition(updated, 'rejected');
 }

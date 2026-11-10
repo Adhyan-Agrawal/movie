@@ -5,7 +5,7 @@ import { AccountNav } from '@/features/account/AccountNav';
 import { UnauthorizedState } from '@/features/account/UnauthorizedState';
 import { SignOutButton } from '@/features/auth/SignOutButton';
 import { features } from '@/lib/env';
-import { getSupabaseServerClient } from '@/lib/supabase/server';
+import { getRenderAccount } from '@/features/auth/render-account';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,24 +15,9 @@ export const metadata: Metadata = {
   robots: { index: false, follow: false },
 };
 
-/**
- * Real session gate (Section 8): resolves the signed-in user from the request
- * cookies. Returns null when Supabase is unconfigured (mock mode) or the
- * request has no session, so the layout falls through to the unauthorized
- * state instead of the account surfaces.
- */
-async function getSessionUser(): Promise<{ email: string | undefined } | null> {
-  if (!features.supabaseConfigured) return null;
-
-  const supabase = await getSupabaseServerClient();
-  const { data, error } = await supabase.auth.getUser();
-  if (error || !data.user) return null;
-
-  return { email: data.user.email };
-}
-
 export default async function AccountLayout({ children }: { children: React.ReactNode }) {
-  const user = await getSessionUser();
+  const account = await getRenderAccount();
+  const user = account.status === 'authenticated' ? account.user : null;
 
   return (
     <Container className="pb-16">
@@ -41,9 +26,10 @@ export default async function AccountLayout({ children }: { children: React.Reac
         description={
           user
             ? `Signed in as ${user.email ?? 'your Lumora account'}`
-            : features.supabaseConfigured ? 'Manage your profiles, preferences, and devices.' : 'Account services are temporarily unavailable.'
+            : account.status === 'unavailable' && features.supabaseConfigured ? 'Your session could not be verified. Please try again shortly.'
+              : features.supabaseConfigured ? 'Manage your profiles, preferences, and devices.' : 'Account services are temporarily unavailable.'
         }
-        actions={user ? <SignOutButton /> : undefined}
+        actions={user || account.status === 'unverified' ? <SignOutButton /> : undefined}
       />
 
       {user ? (
@@ -53,7 +39,7 @@ export default async function AccountLayout({ children }: { children: React.Reac
         </div>
       ) : (
         <div className="py-10">
-          <UnauthorizedState next="/account" unavailable={!features.supabaseConfigured} />
+          <UnauthorizedState next="/account" unavailable={account.status === 'unavailable'} unverified={account.status === 'unverified'} />
         </div>
       )}
     </Container>

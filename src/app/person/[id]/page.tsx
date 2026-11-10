@@ -7,7 +7,7 @@ import { EmptyState } from '@/components/ui/EmptyState';
 import { buttonClasses } from '@/components/ui/Button';
 import { MediaCard } from '@/features/catalog/components/MediaCard';
 import { truncate } from '@/features/catalog/components/title-detail-helpers';
-import { getPerson, getPersonCredits } from '@/features/people/queries';
+import { getPerson, getPersonCredits, isPersonId } from '@/features/people/queries';
 import type { PersonCredit } from '@/features/people/types';
 import type { Title } from '@/features/catalog/types';
 import { publicEnv } from '@/lib/env';
@@ -20,12 +20,9 @@ import { SectionReveal } from '@/components/ui/SectionReveal';
  * Indexable (Spec Section 16): unlike search/watch, person pages are public,
  * stable destinations with real content, so robots default to index/follow and
  * generateMetadata supplies basic Open Graph. RLS scoping happens in the query
- * layer — getPersonCredits reads through the anon client, so it returns only
- * credits whose titles are published/public.
+ * layer: UUID credits retain publication/RLS scoping; explicit TMDB identities
+ * share one bounded public profile/combined-credits response with metadata.
  */
-
-/** Cheap UUID shape check — mirrors the repository guard. */
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function isRemoteUrl(url: string | null | undefined): url is string {
   return Boolean(url && (url.startsWith('https://') || url.startsWith('http://')));
@@ -39,7 +36,7 @@ function canonicalUrl(id: string): string {
 
 export async function generateMetadata({ params }: PersonParams): Promise<Metadata> {
   const { id } = await params;
-  if (!UUID_RE.test(id)) {
+  if (!isPersonId(id)) {
     return { title: 'Person not found', robots: { index: false, follow: false } };
   }
 
@@ -76,7 +73,8 @@ export async function generateMetadata({ params }: PersonParams): Promise<Metada
 
 export default async function PersonPage({ params }: PersonParams) {
   const { id } = await params;
-  if (!UUID_RE.test(id)) notFound();
+  if (!isPersonId(id)) notFound();
+  const virtual = id.startsWith('tmdb:person:');
 
   const person = await getPerson(id);
   if (!person) notFound();
@@ -118,7 +116,7 @@ export default async function PersonPage({ params }: PersonParams) {
            <h1 className="person-name">{person.name}</h1>
            {person.knownFor ? <p className="person-biography">Known for {person.knownFor}</p> : null}
            <dl className="person-facts">
-             <div><dt>In the collection</dt><dd>{credits.length} {credits.length === 1 ? 'title credit' : 'title credits'}</dd></div>
+              <div><dt>{virtual ? 'Shown credits' : 'In the collection'}</dt><dd>{credits.length} {credits.length === 1 ? 'title credit' : 'title credits'}</dd></div>
              {acting.length ? <div><dt>Acting</dt><dd>{acting.length} {acting.length === 1 ? 'credit' : 'credits'}</dd></div> : null}
              {crew.length ? <div><dt>Directing &amp; crew</dt><dd>{crew.length} {crew.length === 1 ? 'credit' : 'credits'}</dd></div> : null}
            </dl>
@@ -134,7 +132,7 @@ export default async function PersonPage({ params }: PersonParams) {
            <ul className="title-grid">
             {knownFor.map((title) => (
               <li key={title.id}>
-                 <MediaCard title={title} />
+                  <MediaCard title={title} showMaturity={!virtual} />
               </li>
             ))}
           </ul>
@@ -150,7 +148,7 @@ export default async function PersonPage({ params }: PersonParams) {
           <EmptyState
             icon="◎"
             title="No credits yet"
-            description={`We don't have any titles linked to ${person.name} yet. Check back after a catalog sync.`}
+            description={virtual ? `No public movie or TV credits are available from TMDB for ${person.name}.` : `We don't have any titles linked to ${person.name} yet. Check back after a catalog sync.`}
           />
         ) : null}
       </div>

@@ -1,5 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { requestIp } from '@/lib/request-ip';
 import {
   normalizeSubtitleCatalog,
   readSubtitleToken,
@@ -41,9 +42,7 @@ function json(body: unknown, status = 200): NextResponse {
   return NextResponse.json(body, { status, headers: privateHeaders() });
 }
 
-function rateLimited(request: NextRequest, kind: 'catalog' | 'download', secret: string): boolean {
-  const forwarded = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  const address = forwarded || request.headers.get('x-real-ip')?.trim() || 'unknown';
+function rateLimited(address: string, kind: 'catalog' | 'download', secret: string): boolean {
   const identity = createHmac('sha256', secret).update(address).digest('base64url');
   const key = `${kind}:${identity}`;
   const now = Date.now();
@@ -214,15 +213,17 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const apiKey = process.env.WYZIE_API_KEY?.trim();
   if (!apiKey) return json({ tracks: [], configured: false });
   const tokenSecret = process.env.WYZIE_SUBTITLE_TOKEN_SECRET?.trim() || apiKey;
+  const address = requestIp(request.headers);
+  if (!address && process.env.NODE_ENV === 'production') return json({ error: 'Subtitle request identity is unavailable.' }, 503);
 
   const token = request.nextUrl.searchParams.get('token');
   if (token) {
-    if (rateLimited(request, 'download', tokenSecret)) return json({ error: 'Too many subtitle requests.' }, 429);
+    if (address && rateLimited(address, 'download', tokenSecret)) return json({ error: 'Too many subtitle requests.' }, 429);
     return download(token, apiKey, tokenSecret);
   }
 
   const catalogRequest = parseCatalogRequest(request.nextUrl.searchParams);
   if (!catalogRequest) return json({ error: 'Invalid subtitle request.' }, 400);
-  if (rateLimited(request, 'catalog', tokenSecret)) return json({ tracks: [], configured: true, available: false, code: 'rate_limited' }, 429);
+  if (address && rateLimited(address, 'catalog', tokenSecret)) return json({ tracks: [], configured: true, available: false, code: 'rate_limited' }, 429);
   return catalog(catalogRequest, apiKey, tokenSecret);
 }

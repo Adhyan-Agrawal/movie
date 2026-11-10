@@ -4,20 +4,24 @@ import { useActionState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Button } from '@/components/ui/Button';
-import { AUTH_INITIAL_STATE, AUTH_SERVICE_UNAVAILABLE, type AuthActionState } from '@/features/auth/state';
+import { AUTH_CALLBACK_INVALID, AUTH_EMAIL_UNVERIFIED, AUTH_INITIAL_STATE, AUTH_SERVICE_UNAVAILABLE, type AuthActionState } from '@/features/auth/state';
 import { signInAction } from '@/features/auth/actions';
+import { safeAuthReturnPath } from '@/features/auth/return-path';
 
 /**
  * Sign-in form (Spec Section 8). Client component using useActionState so the
  * application-owned error renders inline with an accessible alert role.
  */
-export function SignInForm({ next }: { next?: string }) {
+export function SignInForm({ next, initialError }: { next?: string; initialError?: string }) {
   const [state, formAction, pending] = useActionState<AuthActionState, FormData>(
     signInAction,
     AUTH_INITIAL_STATE,
   );
   const searchParams = useSearchParams();
-  const error = state.error ?? (searchParams.get('auth') === 'unavailable' ? AUTH_SERVICE_UNAVAILABLE : null);
+  const auth = searchParams.get('auth');
+  const error = state.error ?? initialError ?? (auth === 'unavailable' ? AUTH_SERVICE_UNAVAILABLE
+    : auth === 'callback' ? AUTH_CALLBACK_INVALID : auth === 'unverified' ? AUTH_EMAIL_UNVERIFIED : null);
+  const returnPath = safeAuthReturnPath(next);
 
   return (
     <form action={formAction} className="flex flex-col gap-4" noValidate>
@@ -57,7 +61,7 @@ export function SignInForm({ next }: { next?: string }) {
         />
       </div>
 
-      <input type="hidden" name="next" value={next ?? ''} />
+      <input type="hidden" name="next" value={returnPath} />
 
       <Button type="submit" disabled={pending} className="w-full">
         {pending ? 'Signing in…' : 'Sign in'}
@@ -65,7 +69,7 @@ export function SignInForm({ next }: { next?: string }) {
 
       <p className="text-center text-sm text-content-muted">
         New to Lumora?{' '}
-        <Link href="/signup" className="text-primary hover:underline">
+        <Link href={`/signup?next=${encodeURIComponent(returnPath)}`} className="text-primary hover:underline">
           Create an account
         </Link>
       </p>

@@ -1,4 +1,5 @@
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { isIP } from 'node:net';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +22,53 @@ const SYSTEM_NAMES = new Set([
   'CI', 'TERM', 'FORCE_COLOR', 'NO_COLOR', 'NEXT_TELEMETRY_DISABLED',
 ]);
 const ENV_ERROR = 'Invalid generated OpenNext environment. Rebuild with cf:build.';
+
+export function validateHttpsUrl(environment, name, { originOnly = false } = {}) {
+  const value = environment[name];
+  let url;
+  try {
+    if (typeof value !== 'string' || value !== value.trim() || /[\u0000-\u0020\u007f]/.test(value)) throw new Error();
+    url = new URL(value);
+  } catch {
+    throw new Error(`${name} must be a public HTTPS URL.`);
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (url.protocol !== 'https:' || url.username || url.password || url.hash
+    || !host || isIP(host) !== 0 || host === 'localhost' || host.endsWith('.localhost')
+    || host.endsWith('.local') || host.endsWith('.internal') || host.endsWith('.home.arpa')
+    || host.endsWith('.example') || host.endsWith('.invalid') || host.endsWith('.test')) {
+    throw new Error(`${name} must be a public HTTPS URL without credentials or a fragment.`);
+  }
+  if (originOnly && (url.pathname !== '/' || url.search)) {
+    throw new Error(`${name} must be an HTTPS origin without a path or query.`);
+  }
+}
+
+export function validateBuildConfiguration(environment) {
+  for (const name of [...PUBLIC_BUILD_NAMES, 'WATCH_PARTY_WORKER_URL']) {
+    const value = environment[name];
+    if (value !== undefined && (typeof value !== 'string' || /[\r\n\0]/.test(value) || value !== value.trim())) {
+      throw new Error(`${name} must be a single-line string without surrounding whitespace.`);
+    }
+  }
+  if (!environment.NEXT_PUBLIC_APP_NAME) throw new Error('NEXT_PUBLIC_APP_NAME is required for a Cloudflare build.');
+  validateHttpsUrl(environment, 'NEXT_PUBLIC_APP_URL', { originOnly: true });
+  const hasSupabaseUrl = Boolean(environment.NEXT_PUBLIC_SUPABASE_URL);
+  const anonKey = environment.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+  if (hasSupabaseUrl !== Boolean(anonKey)) {
+    throw new Error('NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY must be configured together or both left empty.');
+  }
+  if (hasSupabaseUrl) {
+    validateHttpsUrl(environment, 'NEXT_PUBLIC_SUPABASE_URL', { originOnly: true });
+    let role;
+    try { role = JSON.parse(Buffer.from(anonKey.split('.')[1], 'base64url').toString('utf8')).role; } catch { /* Opaque publishable keys are also supported. */ }
+    if (anonKey.startsWith('sb_secret_') || role === 'service_role' || anonKey === environment.SUPABASE_SERVICE_ROLE_KEY) {
+      throw new Error('NEXT_PUBLIC_SUPABASE_ANON_KEY must not contain a private Supabase key.');
+    }
+  }
+  // This nonsecret origin builds the WebSocket CSP, not another public env export.
+  if (environment.WATCH_PARTY_WORKER_URL) validateHttpsUrl(environment, 'WATCH_PARTY_WORKER_URL', { originOnly: true });
+}
 
 export function loadCloudflareEnvironment(root = ROOT, inherited = { ...process.env }) {
   const saved = { ...process.env };
@@ -56,14 +104,15 @@ export function createCommandEnvironment(inherited, { auth = false } = {}) {
 }
 
 export function createBuildEnvironment(inherited, environment, localNames, runtimeNames = []) {
+  validateBuildConfiguration(environment);
   const clean = createCommandEnvironment(inherited);
   // Empty, rather than absent, prevents Next's dotenv loader from restoring private values.
   for (const name of [...localNames, ...runtimeNames]) {
     if (!PUBLIC_BUILD_NAMES.includes(name)) clean[name] = '';
   }
   for (const name of AUTH_NAMES) clean[name] = '';
-  for (const name of PUBLIC_BUILD_NAMES) {
-    if (environment[name] !== undefined) clean[name] = environment[name];
+  for (const name of [...PUBLIC_BUILD_NAMES, 'WATCH_PARTY_WORKER_URL']) {
+    clean[name] = environment[name] ?? '';
   }
   clean.NODE_ENV = 'production';
   clean.CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV = 'false';
@@ -107,6 +156,35 @@ export function sanitizeGeneratedEnvironment(root = ROOT, publicEnvironment) {
   }
 }
 
+export function validateBuiltEnvironment(root, environment) {
+  let modes;
+  try {
+    const source = sanitizeEnvModule(readFileSync(join(root, '.open-next', 'cloudflare', 'next-env.mjs'), 'utf8'));
+    modes = [...source.matchAll(/^export const \w+ = (.*);$/gm)].map((match) => JSON.parse(match[1]));
+  } catch {
+    throw new Error(ENV_ERROR);
+  }
+  const mismatched = PUBLIC_BUILD_NAMES.filter((name) => modes.some((mode) => (mode[name] ?? '') !== (environment[name] ?? '')));
+  if (mismatched.length) {
+    throw new Error(`Built public configuration differs from runtime bindings: ${mismatched.join(', ')}. Rebuild with cf:build; do not patch the generated environment.`);
+  }
+  if (environment.WATCH_PARTY_WORKER_URL) {
+    try {
+      // Read the manifest bundled by this project's OpenNext server, not a newer .next build.
+      const manifest = JSON.parse(readFileSync(join(root, '.open-next', 'server-functions', 'default', '.next', 'routes-manifest.json'), 'utf8'));
+      const rules = manifest.headers.filter((rule) => rule.source === '/((?!api/ad-frame).*)');
+      const policies = rules.flatMap((rule) => rule.headers.filter((header) => header.key.toLowerCase() === 'content-security-policy'));
+      if (rules.length !== 1 || policies.length !== 1) throw new Error();
+      const connect = policies[0].value.split(';').map((directive) => directive.trim().split(/\s+/))
+        .find((directive) => directive[0] === 'connect-src');
+      const expected = `wss://${new URL(environment.WATCH_PARTY_WORKER_URL).host}`;
+      if (!connect?.includes(expected)) throw new Error();
+    } catch {
+      throw new Error('Built Watch Party CSP does not match WATCH_PARTY_WORKER_URL. Rebuild with cf:build.');
+    }
+  }
+}
+
 export function runCloudflareCommand(label, executable, args, environment, root = ROOT) {
   // eslint-disable-next-line no-console
   console.log(`${label}...`);
@@ -133,13 +211,21 @@ export function buildCloudflare({ root = ROOT, buildEnvironment, skipBuild = fal
     throw new Error('No built OpenNext Worker exists. Run cf:build first.');
   }
   sanitizeGeneratedEnvironment(root, skipBuild ? undefined : buildEnvironment);
+  if (!skipBuild) validateBuiltEnvironment(root, buildEnvironment);
 }
 
 export function cloudflareBuild(args = process.argv.slice(2), { root = ROOT, inherited = { ...process.env }, runCommand = runCloudflareCommand } = {}) {
   if (args.some((arg) => !['--preview', '--dry-run', '--skip-build'].includes(arg))
     || (args.includes('--preview') && args.includes('--dry-run'))) throw new Error('Invalid Cloudflare build options.');
-  const { environment, localNames } = loadCloudflareEnvironment(root, inherited);
-  const buildEnvironment = createBuildEnvironment(inherited, environment, localNames);
+  let buildEnvironment;
+  if (args.includes('--skip-build')) {
+    // An artifact-only check has no new configuration to load or inline.
+    buildEnvironment = createCommandEnvironment(inherited);
+    for (const name of AUTH_NAMES) buildEnvironment[name] = '';
+  } else {
+    const { environment, localNames } = loadCloudflareEnvironment(root, inherited);
+    buildEnvironment = createBuildEnvironment(inherited, environment, localNames);
+  }
   buildCloudflare({ root, buildEnvironment, skipBuild: args.includes('--skip-build'), runCommand });
   if (args.includes('--preview') || args.includes('--dry-run')) {
     const preview = args.includes('--preview');

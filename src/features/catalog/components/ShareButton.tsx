@@ -85,18 +85,21 @@ export function ShareButton({
 /** Legacy fallback for browsers without the async Clipboard API. */
 function legacyCopy(text: string): boolean {
   if (typeof document === 'undefined') return false;
+  const focused = document.activeElement;
+  let ta: HTMLTextAreaElement | null = null;
   try {
-    const ta = document.createElement('textarea');
+    ta = document.createElement('textarea');
     ta.value = text;
     ta.setAttribute('readonly', '');
     ta.style.position = 'absolute';
     ta.style.left = '-9999px';
     document.body.appendChild(ta);
     ta.select();
-    const ok = document.execCommand('copy');
-    document.body.removeChild(ta);
-    return ok;
+    return document.execCommand('copy');
   } catch {
     return false;
+  } finally {
+    ta?.remove();
+    if (focused instanceof HTMLElement && focused.isConnected) focused.focus({ preventScroll: true });
   }
 }

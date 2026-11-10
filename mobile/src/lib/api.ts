@@ -49,6 +49,8 @@ export function sameOriginPlaybackUrl(value: unknown): string | null {
 
 export const PLAYBACK_REQUEST_TIMEOUT_MS = 15_000;
 export const PLAYBACK_CATALOG_TIMEOUT_MS = 8_000;
+// Direct metadata can spend 15s resolving and another 12s probing the catalogue.
+export const PLAYBACK_STREAM_CATALOG_TIMEOUT_MS = 35_000;
 export const PLAYBACK_AUTH_TIMEOUT_MS = 350;
 export const PLAYBACK_CONTEXT_TIMEOUT_MS = 1_500;
 
@@ -524,14 +526,25 @@ export async function fetchStreamCatalog(url: string, signal?: AbortSignal): Pro
   if (!safe) return { streams: [] };
   return withPlaybackDeadline(async (requestSignal) => {
     const json = await playbackJson(safe, requestSignal);
+    const now = Date.now();
+    const expiry = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value > now
+      ? Math.min(value, now + 4 * 60 * 60 * 1000) : undefined;
+    const expiresAt = expiry(json.expiresAt);
+    if (json.expiresAt !== undefined && expiresAt === undefined) throw new Error('Stream catalogue has expired.');
     const ids = new Set<string>();
     const streams: StreamCatalog['streams'] = Array.isArray(json.streams) ? json.streams.slice(0, 64).flatMap((value) => {
       const stream = object(value);
       const url = sameOriginPlaybackUrl(stream?.url);
       if (!stream || !url || !shortText(stream.id) || ids.has(stream.id)) return [];
+      const streamExpiry = expiry(stream.expiresAt);
+      if (stream.expiresAt !== undefined && streamExpiry === undefined) return [];
+      const parsed = new URL(url);
+      if (parsed.pathname === '/api/vidnest' && (!parsed.searchParams.get('token')
+        || parsed.searchParams.has('metadata') || parsed.searchParams.has('stream'))) return [];
       ids.add(stream.id);
       const startupLatencyMs = stream.startupLatencyMs;
       return [{ id: stream.id, url,
+        ...(streamExpiry !== undefined ? { expiresAt: streamExpiry } : {}),
         ...(typeof startupLatencyMs === 'number' && Number.isFinite(startupLatencyMs) && startupLatencyMs >= 0
           ? { startupLatencyMs } : {}),
         qualities: Array.isArray(stream.qualities) ? stream.qualities.slice(0, 64).flatMap((value) => qualityOption(value) ?? []) : [],
@@ -539,9 +552,11 @@ export async function fetchStreamCatalog(url: string, signal?: AbortSignal): Pro
         subtitles: Array.isArray(stream.subtitles) ? stream.subtitles.slice(0, 128).flatMap((value) => subtitleTrack(value) ?? []) : [],
       }];
     }) : [];
-    return { streams, ...(shortText(json.recommendedStreamId) && ids.has(json.recommendedStreamId)
+    const deadlines = [expiresAt, ...streams.map((stream) => stream.expiresAt)].filter((value): value is number => value !== undefined);
+    return { streams, ...(deadlines.length ? { expiresAt: Math.min(...deadlines) } : {}),
+      ...(shortText(json.recommendedStreamId) && ids.has(json.recommendedStreamId)
       ? { recommendedStreamId: json.recommendedStreamId } : {}) };
-  }, PLAYBACK_CATALOG_TIMEOUT_MS, signal);
+  }, PLAYBACK_STREAM_CATALOG_TIMEOUT_MS, signal);
 }
 
 export async function fetchSubtitleCatalog(url: string, signal?: AbortSignal): Promise<Subtitle[]> {
@@ -744,7 +759,7 @@ export async function signUp(email: string, password: string): Promise<SignUpOut
 
 export async function signOut(): Promise<void> {
   if (!supabaseConfigured) return;
-  try { await supabase.auth.signOut(); } catch { /* A local sign-out action must not reject into React Native. */ }
+  try { await supabase.auth.signOut({ scope: 'local' }); } catch { /* A local sign-out action must not reject into React Native. */ }
 }
 
 export async function currentUser() {

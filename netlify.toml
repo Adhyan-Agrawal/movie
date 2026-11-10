@@ -1,0 +1,11 @@
+# Netlify detects Next.js and supplies its current OpenNext adapter automatically.
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "22"
+  NETLIFY_NEXT_SKEW_PROTECTION = "true"
+
+# Application variables belong in the Netlify UI with explicit Build/Functions
+# scopes. Never put credentials or a guessed production URL in this file.

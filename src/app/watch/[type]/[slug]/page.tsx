@@ -13,6 +13,7 @@ import type { PlaybackRequest, PlaybackSource } from '@/lib/providers/types';
 import { getActiveProviderConfigs, resolvePlayback } from '@/lib/providers/registry';
 import { PlayerShell } from '@/features/player/PlayerShell';
 import { isStoredCatalogId } from '@/features/account/availability';
+import { getRenderAccountPreferences } from '@/features/account/preference-queries';
 import { episodeNavigationPath } from '@/features/player/episode-navigation';
 import { resolveTitleExternalIds } from '@/features/player/title-external-ids';
 import { getAdSlot } from '@/features/ads/config';
@@ -168,7 +169,7 @@ export default async function WatchPage({
     ...(title.type === 'tv' && episode !== undefined ? { episode } : {}),
   };
 
-  const [resolved, nativeSources, playbackContext, commerceContext] = await Promise.all([
+  const [resolved, nativeSources, playbackContext, commerceContext, initialAccountPreferences] = await Promise.all([
     resolvePlayback(request),
     features.supabaseConfigured
       ? import('@/features/playback/native-sources').then(({ resolveNativeSources }) => resolveNativeSources(title.id, episodeId))
@@ -179,6 +180,9 @@ export default async function WatchPage({
         .catch(() => ({ viewerKey: 'unavailable', resumePosition: null as ResumePosition | null }))
       : Promise.resolve({ viewerKey: 'guest', resumePosition: null as ResumePosition | null }),
     getPlaybackCommerceContext(),
+    features.supabaseConfigured
+      ? getRenderAccountPreferences().then((result) => result.ok ? result.snapshot : null)
+      : Promise.resolve(null),
   ]);
   const providerConfig = getProviderConfig('vidsrc');
 
@@ -197,7 +201,7 @@ export default async function WatchPage({
     const config = providerConfigs.get(s.providerId);
     if (!config?.startParam) return s;
     const joiner = s.url.includes('?') ? '&' : '?';
-    return { ...s, url: `${s.url}${joiner}${config.startParam}=${Math.round(resumeSeconds)}` };
+    return { ...s, url: `${s.url}${joiner}${new URLSearchParams([[config.startParam, String(Math.round(resumeSeconds))]])}` };
   });
 
   // Pre-roll ad zone (Spec Section 11): resolved server-side so the key never
@@ -252,6 +256,7 @@ export default async function WatchPage({
           providerLabel={providerLabel}
           consentRequired={consentRequired}
           viewerKey={playbackContext.viewerKey}
+          initialAccountPreferences={initialAccountPreferences}
           adPolicy={commerceContext.ads}
           reportingAvailable={features.supabaseConfigured && isStoredCatalogId(title.id)}
           watchPartyConfigured={isWatchPartyConfigured()}

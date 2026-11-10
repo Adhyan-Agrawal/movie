@@ -8,7 +8,7 @@ import { DISCOVERY_COLLECTIONS, discoveryHref, loadDiscoveryRows } from './disco
  * Catalog read service (Section 6: route handlers -> services -> repositories).
  *
  * The home page is built ONLY from live catalog rows (via `listTitles`, which
- * prefers TMDB, then reads Postgres under RLS). If neither is configured or
+ * uses direct TMDB when configured, otherwise reads stored Postgres rows under RLS). If neither is configured or
  * the catalog is empty, `hero` is null and `rows`/`continueWatching` are empty
  * so the home page renders an honest empty state — never fabricated content.
  * `degraded` is true when the live source could not be read at all.
@@ -83,7 +83,7 @@ async function loadForYou(): Promise<MediaRow | null> {
   }
 }
 
-/** Public bridge entry point: never reads authentication, history or recommendations. */
+/** Public bridge: anonymous catalog rows only, with no history or recommendations. */
 export function getPublicHomeData(): Promise<HomeData> {
   return getHomeData({ personalize: false });
 }

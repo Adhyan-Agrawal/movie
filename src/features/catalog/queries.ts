@@ -7,7 +7,8 @@ import { matchesDiscovery } from './discovery';
  * Read API over the catalog (Section 6: services -> repositories).
  *
  * Public discovery reads prefer TMDB, with a Postgres-backed repository
- * (`./repository`, server-only) fallback under RLS. There is NO mock
+ * (`./repository`, server-only) fallback under anonymous RLS, never the viewer's
+ * editor/session context. There is NO mock
  * fallback: if Supabase is not configured, or a repository call fails, list
  * functions return `[]` and single-title lookups return `null` so the UI can
  * render honest empty states instead of fabricated content. The repository
@@ -59,35 +60,33 @@ async function withReadDeadline<T>(read: Promise<T>, timeoutMs = 8000): Promise<
 }
 
 // React cache is scoped to the render request, including metadata. Repository
-// reads retain their RLS context and cannot leak drafts across requests.
+// reads use anonymous RLS; admin reads have a separate, session-scoped entry point.
 export const getTitleBySlug = cache(async (type: TitleType, slug: string): Promise<Title | null> => {
-  let publicFailure: unknown;
-  if (features.tmdbConfigured) {
-    try {
-      const { getTmdbTitle } = await import('./tmdb-catalog');
-      const title = await withReadDeadline(getTmdbTitle(type, slug));
-      if (title) return title;
-    } catch (err) {
-      publicFailure = err;
-      warnFailure('getTmdbTitle', err);
-    }
-  }
-  if (!features.supabaseConfigured) {
-    if (publicFailure) throw publicFailure;
-    return null;
-  }
-  try {
+  const canonical = /^tmdb-[1-9][0-9]{0,9}$/.test(slug);
+  if (slug.startsWith('tmdb-') && !canonical) return null;
+  // New provider URLs are unambiguous. Only legacy/owned URLs need a DB lookup.
+  if (!canonical && features.supabaseConfigured) {
     const { repoGetTitleBySlug } = await import('./repository');
-    const title = await repoGetTitleBySlug(type, slug);
-    if (title || !publicFailure) return title;
-  } catch (err) {
-    warnFailure('getTitleBySlug', err);
-    throw publicFailure ?? err;
+    const stored = await repoGetTitleBySlug(type, slug);
+    if (stored) return stored;
   }
-  throw publicFailure;
+  if (!features.tmdbConfigured || !/-(?:[1-9][0-9]{0,9})$/.test(slug)) return null;
+  const { getTmdbTitle } = await import('./tmdb-catalog');
+  const title = await withReadDeadline(getTmdbTitle(type, slug));
+  if (!title || canonical) return title;
+  // Preserve shipped pretty URLs only for their exact public provider title.
+  const { slugify } = await import('./tmdb-normalize');
+  const id = /-([1-9][0-9]{0,9})$/.exec(slug)![1];
+  return slug === `${slugify(title.name)}-${id}` ? title : null;
 });
 
 export const getTitleById = cache(async (id: string): Promise<Title | null> => {
+  if (id.startsWith('tmdb:')) {
+    const match = /^tmdb:(movie|tv):[1-9][0-9]{0,9}$/.exec(id);
+    if (!match || match[0] !== id || !features.tmdbConfigured) return null;
+    const { getTmdbTitleById } = await import('./tmdb-catalog');
+    return await withReadDeadline(getTmdbTitleById(id));
+  }
   if (!features.supabaseConfigured) return null;
   try {
     const { repoGetTitleById } = await import('./repository');
@@ -105,6 +104,7 @@ export const listAllGenres = cache(async (): Promise<string[]> => {
       return await withReadDeadline(listTmdbGenres());
     } catch (err) {
       warnFailure('listTmdbGenres', err);
+      return [];
     }
   }
   if (!features.supabaseConfigured) return [];
@@ -129,6 +129,7 @@ export async function listTitles(filters: TitleFilters = {}): Promise<Title[]> {
       return filters.limit ? result.titles.slice(0, filters.limit) : result.titles;
     } catch (err) {
       warnFailure('listTmdbTitles', err);
+      throw err;
     }
   }
   if (!features.supabaseConfigured) return [];
@@ -158,6 +159,7 @@ export async function listTitlesPage(filters: TitleFilters, page: number, pageSi
       return await withReadDeadline(listTmdbTitles(filters, page, pageSize));
     } catch (err) {
       warnFailure('listTmdbTitlesPage', err);
+      throw err;
     }
   }
   if (!features.supabaseConfigured) return { titles: [], total: 0 };

@@ -208,9 +208,9 @@ export interface ProviderSaveInput {
   priority: number;
   consentRequired: boolean;
   enabled: boolean;
-  /** Provider's preferred media-id style: '' (unspecified), 'imdb', or 'tmdb'. */
+  /** '' clears the preference; omission preserves the stored/built-in value. */
   preferredId?: 'imdb' | 'tmdb' | '';
-  /** Query param the embed accepts to resume at a position (e.g. "startAt"). */
+  /** Resume query param (e.g. "startAt"); blank disables it, omission preserves it. */
   startParam?: string;
 }
 
@@ -269,8 +269,12 @@ function validateProviderInput(input: ProviderSaveInput): string | null {
   }
 
   if (!Number.isInteger(input.priority)) return 'Priority must be a whole number.';
-  if (input.preferredId && input.preferredId !== 'imdb' && input.preferredId !== 'tmdb') {
+  if (input.preferredId !== undefined && input.preferredId !== ''
+    && input.preferredId !== 'imdb' && input.preferredId !== 'tmdb') {
     return 'preferred_id must be imdb, tmdb, or blank.';
+  }
+  if (input.startParam !== undefined && typeof input.startParam !== 'string') {
+    return 'The resume parameter must be text or blank.';
   }
   return null;
 }
@@ -295,13 +299,15 @@ export async function saveProviderAction(input: ProviderSaveInput): Promise<Prov
   const allowedDomains = domains.length > 0 ? domains : [base.hostname];
   const now = new Date().toISOString();
 
-  // `config` jsonb carries the two editor fields with no dedicated column.
+  // Empty strings explicitly clear these options, including built-in defaults.
+  // Omitted fields leave stored options untouched; the editor preserves '' on read.
   const editorConfig: Record<string, string> = {};
-  if (input.preferredId) editorConfig.preferred_id = input.preferredId;
-  if (input.startParam?.trim()) editorConfig.start_param = input.startParam.trim();
+  if (input.preferredId !== undefined) editorConfig.preferred_id = input.preferredId;
+  if (input.startParam !== undefined) editorConfig.start_param = input.startParam.trim();
 
   const { data: user } = await db.auth.getUser();
-  const { data: existing } = await db.from('providers').select('id, config').eq('key', key).maybeSingle();
+  const { data: existing, error: readError } = await db.from('providers').select('id, config').eq('key', key).maybeSingle();
+  if (readError) return { ok: false, error: `Could not read the provider: ${readError.message}` };
 
   if (existing) {
     // Merge into the stored jsonb so an edit never drops keys other tooling set.

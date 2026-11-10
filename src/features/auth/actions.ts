@@ -1,22 +1,19 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { features } from '@/lib/env';
+import { revalidatePath } from 'next/cache';
+import { features, publicEnv } from '@/lib/env';
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { sendWelcomeEmail } from '@/features/email/send';
-import { AUTH_SERVICE_UNAVAILABLE, type AuthActionState } from './state';
-import { safeAuthReturnPath } from './return-path';
+import { AUTH_CONFIGURATION_UNAVAILABLE, AUTH_EMAIL_UNVERIFIED, AUTH_SERVICE_UNAVAILABLE, type AuthActionState } from './state';
+import { authCallbackUrl, safeAuthReturnPath } from './return-path';
+import { isAuthServiceFailure, verifyAccount } from './verified-account';
 
 /**
  * The configured web backend is still Supabase. Never substitute a local D1
  * worker or administratively confirm email addresses when it is unavailable.
  * Only return application-owned messages, not upstream errors or credentials.
  */
-
-function isServiceFailure(error: { status?: number; name?: string }): boolean {
-  return error.status === undefined || error.status === 0 || error.status >= 500
-    || error.name === 'AuthRetryableFetchError';
-}
 
 /** Sign in with email + password. Redirects to `next` (or /account) on success. */
 export async function signInAction(
@@ -32,25 +29,30 @@ export async function signInAction(
   }
 
   try {
-    if (!features.supabaseConfigured) return { error: AUTH_SERVICE_UNAVAILABLE };
+    if (!features.supabaseConfigured) return { error: AUTH_CONFIGURATION_UNAVAILABLE };
     const supabase = await getSupabaseServerClient();
     const { data, error } = await supabase.auth.signInWithPassword({ email, password });
     if (error) {
-      if (isServiceFailure(error)) return { error: AUTH_SERVICE_UNAVAILABLE };
-      if (error.code === 'email_not_confirmed') return { error: 'Confirm your email before signing in.' };
-      return {
-        error: error.status === 429
-          ? 'Too many sign-in attempts. Please wait and try again.'
-          : 'The email or password is incorrect.',
-      };
+      if (isAuthServiceFailure(error)) return { error: AUTH_SERVICE_UNAVAILABLE };
+      if (error.code === 'email_not_confirmed') return { error: AUTH_EMAIL_UNVERIFIED };
+      if (error.status === 429) return { error: 'Too many sign-in attempts. Please wait and try again.' };
+      if (error.code === 'email_provider_disabled') return { error: 'Email sign-in is disabled by the account provider.' };
+      return { error: error.code === 'invalid_credentials' ? 'The email or password is incorrect.' : AUTH_SERVICE_UNAVAILABLE };
     }
     if (!data.user || !data.session) return { error: AUTH_SERVICE_UNAVAILABLE };
+    const account = await verifyAccount(supabase);
+    if (account.status === 'unverified') {
+      const { error: signOutError } = await supabase.auth.signOut({ scope: 'local' });
+      return { error: signOutError ? AUTH_SERVICE_UNAVAILABLE : AUTH_EMAIL_UNVERIFIED };
+    }
+    if (account.status !== 'authenticated' || account.user.id !== data.user.id) return { error: AUTH_SERVICE_UNAVAILABLE };
   } catch {
     return { error: AUTH_SERVICE_UNAVAILABLE };
   }
 
   // Only allow internal redirect targets (never an arbitrary absolute URL).
   const safeNext = safeAuthReturnPath(next);
+  revalidatePath('/', 'layout');
   redirect(safeNext);
 }
 
@@ -62,6 +64,7 @@ export async function signUpAction(
   const email = String(formData.get('email') ?? '').trim();
   const password = String(formData.get('password') ?? '');
   const confirm = String(formData.get('confirm') ?? '');
+  const next = safeAuthReturnPath(String(formData.get('next') ?? ''));
 
   if (!email || !password) {
     return { error: 'Enter your email and a password.' };
@@ -74,11 +77,14 @@ export async function signUpAction(
   }
 
   try {
-    if (!features.supabaseConfigured) return { error: AUTH_SERVICE_UNAVAILABLE };
+    if (!features.supabaseConfigured) return { error: AUTH_CONFIGURATION_UNAVAILABLE };
+    const callback = authCallbackUrl(publicEnv.NEXT_PUBLIC_APP_URL, next);
+    if (!callback) return { error: AUTH_CONFIGURATION_UNAVAILABLE };
     const supabase = await getSupabaseServerClient();
-    const { data, error } = await supabase.auth.signUp({ email, password });
+    const { data, error } = await supabase.auth.signUp({ email, password, options: { emailRedirectTo: callback.href } });
     if (error) {
-      if (isServiceFailure(error)) return { error: AUTH_SERVICE_UNAVAILABLE };
+      if (isAuthServiceFailure(error) || error.status === 401) return { error: AUTH_SERVICE_UNAVAILABLE };
+      if (error.code === 'signup_disabled' || error.code === 'email_provider_disabled') return { error: 'Account creation is disabled by the account provider.' };
       return {
         error: error.status === 429
           ? 'Too many account creation attempts. Please wait and try again.'
@@ -93,16 +99,24 @@ export async function signUpAction(
       };
     }
 
+    const account = await verifyAccount(supabase);
+    if (account.status === 'unverified') {
+      const { error: signOutError } = await supabase.auth.signOut({ scope: 'local' });
+      return { error: signOutError ? AUTH_SERVICE_UNAVAILABLE : AUTH_EMAIL_UNVERIFIED };
+    }
+    if (account.status !== 'authenticated' || account.user.id !== data.user.id) return { error: AUTH_SERVICE_UNAVAILABLE };
+
     // A welcome email is not verification and must not delay an established session.
-    void sendWelcomeEmail({ email }).catch(() => {});
+    void sendWelcomeEmail({ email: account.user.email! }).catch(() => {});
   } catch {
     return { error: AUTH_SERVICE_UNAVAILABLE };
   }
 
-  redirect('/account');
+  revalidatePath('/', 'layout');
+  redirect(next);
 }
 
-/** Sign out and return to home. Safe to call even without a session. */
+/** Sign out only this session and return home. Safe even without a session. */
 export async function signOutAction(): Promise<void> {
   let destination = '/';
   try {
@@ -110,12 +124,13 @@ export async function signOutAction(): Promise<void> {
       destination = '/signin?auth=unavailable';
     } else {
       const supabase = await getSupabaseServerClient();
-      const { error } = await supabase.auth.signOut();
+      const { error } = await supabase.auth.signOut({ scope: 'local' });
       if (error) destination = '/signin?auth=unavailable';
     }
   } catch {
     destination = '/signin?auth=unavailable';
   }
   // Keep the existing form action's void contract without implying a failed logout succeeded.
+  if (destination === '/') revalidatePath('/', 'layout');
   redirect(destination);
 }

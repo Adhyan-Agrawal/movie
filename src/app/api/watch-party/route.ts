@@ -44,7 +44,7 @@ function failure(code: WatchPartyErrorCode, message: string, status: number): Re
 }
 
 async function readBoundedJson(request: Request): Promise<unknown> {
-  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) {
+  if (request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json') {
     throw new ApiError('INVALID_REQUEST', 'JSON is required.', 415);
   }
   const declared = Number(request.headers.get('content-length'));
@@ -214,7 +214,7 @@ export async function POST(request: Request): Promise<Response> {
           participantId: resumed.claims.participantId,
           displayName: resumed.claims.displayName,
           platform: resumed.claims.platform,
-          ttlSeconds: WATCH_PARTY_LIMITS.ticketTtlSeconds,
+          ttlSeconds: Math.min(WATCH_PARTY_LIMITS.ticketTtlSeconds, resumed.claims.exp - Math.floor(now / 1000)),
           nowMs: now,
         }),
         kind: 'connect',

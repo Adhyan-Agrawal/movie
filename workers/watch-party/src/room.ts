@@ -97,6 +97,7 @@ interface SocketAttachment {
   displayName: string;
   platform: 'web' | 'android';
   connectedAtMs: number;
+  resumeIssuedAtMs?: number;
   departed: boolean;
   general: number[];
   chat: number[];
@@ -307,7 +308,8 @@ export class WatchPartyRoom extends DurableObject<Env> {
   }
 
   private allSockets(excluding?: WebSocket): WebSocket[] {
-    return this.ctx.getWebSockets().filter((socket) => socket !== excluding);
+    return this.ctx.getWebSockets().filter((socket) => socket !== excluding && socket.readyState === 1
+      && attachmentOf(socket)?.departed === false);
   }
 
   private participantSockets(participantId: string, excluding?: WebSocket): WebSocket[] {
@@ -361,9 +363,17 @@ export class WatchPartyRoom extends DurableObject<Env> {
         request.participantId, request.requestId, event.revision);
       this.ctx.storage.sql.exec(`DELETE FROM events WHERE revision NOT IN
         (SELECT revision FROM events ORDER BY revision DESC LIMIT ?)`, WATCH_PARTY_LIMITS.replayHistory);
-      this.ctx.storage.sql.exec(`DELETE FROM requests WHERE rowid NOT IN
-        (SELECT rowid FROM requests ORDER BY rowid DESC LIMIT ?)`, WATCH_PARTY_LIMITS.replayHistory * 2);
+      this.pruneRequests();
     });
+  }
+
+  private pruneRequests(now = Date.now()): void {
+    // Ticket admission markers outlive leave/room deletion until the ticket expires.
+    // ':' cannot appear in a client requestId, so clients cannot collide with this namespace.
+    this.ctx.storage.sql.exec("DELETE FROM requests WHERE request_id LIKE 'ticket:%' AND revision <= ?", now);
+    this.ctx.storage.sql.exec(`DELETE FROM requests WHERE request_id NOT LIKE 'ticket:%' AND rowid NOT IN
+      (SELECT rowid FROM requests WHERE request_id NOT LIKE 'ticket:%' ORDER BY rowid DESC LIMIT ?)`,
+    WATCH_PARTY_LIMITS.replayHistory * 2);
   }
 
   private nextMutation(room: RoomRow, now = Date.now()): { revision: number; serverTimeMs: number } {
@@ -407,12 +417,15 @@ export class WatchPartyRoom extends DurableObject<Env> {
       roomId: room.roomId,
     }, this.env.WATCH_PARTY_SECRET);
     const currentRoom = this.readRoom();
-    if (!currentRoom || currentRoom.roomId !== room.roomId) return;
+    if (!currentRoom || currentRoom.roomId !== room.roomId || Date.now() >= currentRoom.expiresAtMs) return;
     const currentParticipant = this.ctx.storage.sql.exec<StoredParticipantRow>(
       'SELECT participant_id, display_name, joined_at_ms, last_seen_at_ms FROM participants WHERE participant_id = ?',
       participantId,
     ).toArray()[0];
-    if (!currentParticipant || attachmentOf(socket)?.departed) return;
+    const attachment = attachmentOf(socket);
+    if (!currentParticipant || !attachment || attachment.departed || socket.readyState !== 1) return;
+    attachment.resumeIssuedAtMs = now;
+    socket.serializeAttachment(attachment);
     room = currentRoom;
     const serverTimeMs = this.reserveServerTime(room, now);
     const snapshot: WatchPartyRoomSnapshotMessage = {
@@ -435,13 +448,26 @@ export class WatchPartyRoom extends DurableObject<Env> {
       participants: this.participants(room),
       chat: this.chatHistory(),
     };
+    const encoder = new TextEncoder();
+    let bytes = encoder.encode(JSON.stringify(snapshot)).byteLength;
+    while (bytes > WATCH_PARTY_LIMITS.maxServerMessageBytes && snapshot.chat.length) {
+      const removed = snapshot.chat.shift()!;
+      bytes -= encoder.encode(JSON.stringify(removed)).byteLength + (snapshot.chat.length ? 1 : 0);
+    }
     send(socket, snapshot);
   }
 
-  private async scheduleAlarm(room: RoomRow): Promise<void> {
-    const times = [room.expiresAtMs];
-    if (room.hostDisconnectDeadlineMs !== null) times.push(room.hostDisconnectDeadlineMs);
-    await this.ctx.storage.setAlarm(Math.max(Date.now() + 1, Math.min(...times)));
+  private async scheduleAlarm(room: RoomRow | null): Promise<void> {
+    const now = Date.now();
+    const times = room ? [room.expiresAtMs] : [];
+    if (room?.hostDisconnectDeadlineMs !== null && room?.hostDisconnectDeadlineMs !== undefined
+      && room.hostDisconnectDeadlineMs > now) times.push(room.hostDisconnectDeadlineMs);
+    const ticketExpiry = this.ctx.storage.sql.exec<{ expiry: number | null }>(
+      "SELECT MIN(revision) AS expiry FROM requests WHERE request_id LIKE 'ticket:%'",
+    ).one().expiry;
+    if (ticketExpiry !== null) times.push(ticketExpiry);
+    if (times.length) await this.ctx.storage.setAlarm(Math.max(now + 1, Math.min(...times)));
+    else await this.ctx.storage.deleteAlarm();
   }
 
   private pruneParticipants(room: RoomRow, now: number): void {
@@ -529,8 +555,8 @@ export class WatchPartyRoom extends DurableObject<Env> {
 
   private projectPosition(playback: PlaybackDraft | WatchPartyPlaybackState, serverTimeMs: number): number {
     if (playback.mode !== 'playing') return playback.positionSeconds;
-    return Math.max(0, playback.positionSeconds
-      + Math.max(0, serverTimeMs - playback.anchorServerTimeMs) / 1000 * playback.playbackRate);
+    return Math.min(86_400, Math.max(0, playback.positionSeconds
+      + Math.max(0, serverTimeMs - playback.anchorServerTimeMs) / 1000 * playback.playbackRate));
   }
 
   private freezePlayback(room: RoomRow, reason: WatchPartyFreezeReason, now: number,
@@ -623,8 +649,7 @@ export class WatchPartyRoom extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec('INSERT INTO requests (participant_id, request_id, revision) VALUES (?, ?, ?)',
           attachment.participantId, message.requestId, room.playback.revision);
-        this.ctx.storage.sql.exec(`DELETE FROM requests WHERE rowid NOT IN
-          (SELECT rowid FROM requests ORDER BY rowid DESC LIMIT ?)`, WATCH_PARTY_LIMITS.replayHistory * 2);
+        this.pruneRequests();
       });
       this.sendAck(socket, room, message.requestId, room.playback.revision);
       return;
@@ -677,8 +702,7 @@ export class WatchPartyRoom extends DurableObject<Env> {
         (SELECT revision FROM chat ORDER BY revision DESC LIMIT ?)`, WATCH_PARTY_LIMITS.chatHistory);
       this.ctx.storage.sql.exec(`DELETE FROM events WHERE revision NOT IN
         (SELECT revision FROM events ORDER BY revision DESC LIMIT ?)`, WATCH_PARTY_LIMITS.replayHistory);
-      this.ctx.storage.sql.exec(`DELETE FROM requests WHERE rowid NOT IN
-        (SELECT rowid FROM requests ORDER BY rowid DESC LIMIT ?)`, WATCH_PARTY_LIMITS.replayHistory * 2);
+      this.pruneRequests();
     });
     this.broadcast(event);
     this.sendAck(socket, room, message.requestId, event.revision);
@@ -726,11 +750,16 @@ export class WatchPartyRoom extends DurableObject<Env> {
       'SELECT revision, payload_json FROM events WHERE revision > ? ORDER BY revision LIMIT ?',
       message.sinceRevision, WATCH_PARTY_LIMITS.replayHistory + 1,
     ).toArray();
+    // A full presence replay can be larger than a snapshot; never exceed clients' frame bound.
+    const replayBytes = rows.reduce((bytes, row) => bytes + new TextEncoder().encode(row.payload_json).byteLength + 1, 256);
     if ((message.sinceRevision < room.revision && rows[0]?.revision !== message.sinceRevision + 1)
-      || rows.length > WATCH_PARTY_LIMITS.replayHistory) {
+      || rows.length > WATCH_PARTY_LIMITS.replayHistory || replayBytes > WATCH_PARTY_LIMITS.maxServerMessageBytes) {
       const attachment = attachmentOf(socket);
       if (attachment) await this.sendSnapshot(socket, room, attachment.participantId);
-      this.sendAck(socket, room, message.requestId);
+      const current = this.readRoom();
+      if (current && current.roomId === room.roomId && !attachmentOf(socket)?.departed) {
+        this.sendAck(socket, current, message.requestId);
+      }
       return;
     }
     const replay: WatchPartyReplayMessage = {
@@ -754,21 +783,27 @@ export class WatchPartyRoom extends DurableObject<Env> {
       await this.closeAndClearRoom(room, 'ROOM_CLOSED');
       return;
     }
+    const departingSockets = this.participantSockets(participantId);
+    for (const participantSocket of departingSockets) {
+      const participantAttachment = attachmentOf(participantSocket);
+      if (participantAttachment) {
+        participantAttachment.departed = true;
+        participantSocket.serializeAttachment(participantAttachment);
+      }
+    }
     if (participantId === room.hostParticipantId && otherConnected) {
       this.freezePlayback(room, 'host-disconnected', Date.now(), socket);
       this.transferHost(room, otherConnected, Date.now());
     }
     this.ctx.storage.sql.exec('DELETE FROM participants WHERE participant_id = ?', participantId);
     const presence = this.presenceEvent(room, Date.now(), socket);
+    if (this.allSockets().length === 0) {
+      room.expiresAtMs = Math.min(room.hardExpiresAtMs, Date.now() + WATCH_PARTY_LIMITS.emptyRoomTtlMs);
+    }
     this.commitEvent(room, presence);
     this.broadcast(presence, socket);
     this.sendAck(socket, room, requestId);
-    for (const participantSocket of this.participantSockets(participantId)) {
-      const participantAttachment = attachmentOf(participantSocket);
-      if (participantAttachment) {
-        participantAttachment.departed = true;
-        try { participantSocket.serializeAttachment(participantAttachment); } catch { /* Closing. */ }
-      }
+    for (const participantSocket of departingSockets) {
       try { participantSocket.close(1000, 'Left room'); } catch { /* Connection already closed. */ }
     }
     const currentRoom = this.readRoom();
@@ -781,6 +816,17 @@ export class WatchPartyRoom extends DurableObject<Env> {
     if (!attachment || attachment.departed || !room) {
       this.sendError(socket, room, 'ROOM_CLOSED', { requestId: message.requestId });
       socket.close(CLOSE_ROOM, 'Room closed');
+      return;
+    }
+    const participant = this.ctx.storage.sql.exec<StoredParticipantRow>(
+      'SELECT participant_id, display_name, joined_at_ms, last_seen_at_ms FROM participants WHERE participant_id = ?',
+      attachment.participantId,
+    ).toArray()[0];
+    if (!participant || participant.display_name !== attachment.displayName) {
+      attachment.departed = true;
+      socket.serializeAttachment(attachment);
+      this.sendError(socket, null, 'PARTICIPANT_NOT_FOUND', { requestId: message.requestId });
+      socket.close(CLOSE_POLICY, 'Participant unavailable');
       return;
     }
     if (Date.now() >= room.expiresAtMs) {
@@ -821,6 +867,10 @@ export class WatchPartyRoom extends DurableObject<Env> {
       case 'client.ping':
         send(socket, { v: 1, type: 'server.pong', requestId: message.requestId,
           clientSentAtMs: message.clientSentAtMs, serverTimeMs: this.reserveServerTime(room) });
+        if (Date.now() - (attachment.resumeIssuedAtMs ?? attachment.connectedAtMs)
+          >= WATCH_PARTY_LIMITS.resumeTtlSeconds * 500) {
+          await this.sendSnapshot(socket, room, attachment.participantId);
+        }
         break;
       case 'room.leave':
         await this.gracefulLeave(socket, room, attachment, message.requestId);
@@ -853,13 +903,16 @@ export class WatchPartyRoom extends DurableObject<Env> {
     }
     const claims = verified.claims;
     const now = Date.now();
+    this.pruneRequests(now);
+    const admittedTicket = this.requestRevision(claims.participantId, `ticket:${claims.jti}`);
     let room = this.readRoom();
     if (room && now >= room.expiresAtMs) {
       await this.closeAndClearRoom(room, 'ROOM_EXPIRED');
-      room = null;
+      room = this.readRoom();
     }
     if (!room) {
       if (claims.action !== 'create') return this.httpError('ROOM_NOT_FOUND', 'The room was not found.', 404);
+      if (admittedTicket !== null) return this.httpError('ROOM_CLOSED', 'The room is closed.', 403);
       room = this.createRoom(claims, now);
     } else {
       if (claims.roomCode !== room.roomCode) return this.httpError('INVALID_TICKET', 'The connection ticket is invalid.', 401);
@@ -875,9 +928,15 @@ export class WatchPartyRoom extends DurableObject<Env> {
       'SELECT participant_id, display_name, joined_at_ms, last_seen_at_ms FROM participants WHERE participant_id = ?',
       claims.participantId,
     ).toArray()[0];
-    if (claims.action === 'resume' && !existing) {
+    if (!existing && (claims.action === 'resume' || admittedTicket !== null)) {
       return this.httpError('PARTICIPANT_NOT_FOUND', 'The participant can no longer resume.', 403);
     }
+    const existingSockets = this.participantSockets(claims.participantId);
+    if (existingSockets.length >= WATCH_PARTY_LIMITS.maxConnectionsPerParticipant) {
+      return this.httpError('TOO_MANY_CONNECTIONS', 'Too many connections are open for this participant.', 409);
+    }
+    const retryAfterMs = this.consumeRoomRate('general', now);
+    if (retryAfterMs !== null) return this.httpError('RATE_LIMITED', 'Too many connections were requested.', 429);
     if (!existing) {
       const count = this.ctx.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM participants').one().count;
       if (count >= WATCH_PARTY_LIMITS.maxParticipants) return this.httpError('ROOM_FULL', 'The room is full.', 409);
@@ -888,9 +947,9 @@ export class WatchPartyRoom extends DurableObject<Env> {
       if (existing.display_name !== claims.displayName) return this.httpError('INVALID_TICKET', 'The connection ticket is invalid.', 401);
       this.ctx.storage.sql.exec('UPDATE participants SET last_seen_at_ms = ? WHERE participant_id = ?', now, claims.participantId);
     }
-    const existingSockets = this.participantSockets(claims.participantId);
-    if (existingSockets.length >= WATCH_PARTY_LIMITS.maxConnectionsPerParticipant) {
-      return this.httpError('TOO_MANY_CONNECTIONS', 'Too many connections are open for this participant.', 409);
+    if (claims.action !== 'resume') {
+      this.ctx.storage.sql.exec('INSERT OR IGNORE INTO requests (participant_id, request_id, revision) VALUES (?, ?, ?)',
+        claims.participantId, `ticket:${claims.jti}`, claims.exp * 1_000);
     }
     const wasConnected = existingSockets.length > 0;
     if (claims.participantId === room.hostParticipantId) room.hostDisconnectDeadlineMs = null;
@@ -981,10 +1040,10 @@ export class WatchPartyRoom extends DurableObject<Env> {
   private async reconcileClose(socket: WebSocket): Promise<void> {
     const attachment = attachmentOf(socket);
     const room = this.readRoom();
-    if (!attachment || attachment.departed || !room
-      || this.participantSockets(attachment.participantId, socket).length > 0) return;
+    if (!attachment || attachment.departed || !room) return;
     attachment.departed = true;
     try { socket.serializeAttachment(attachment); } catch { /* The connection is already gone. */ }
+    if (this.participantSockets(attachment.participantId, socket).length > 0) return;
     const now = Date.now();
     this.ctx.storage.sql.exec('UPDATE participants SET last_seen_at_ms = ? WHERE participant_id = ?',
       now, attachment.participantId);
@@ -1007,25 +1066,38 @@ export class WatchPartyRoom extends DurableObject<Env> {
 
   override async webSocketError(socket: WebSocket): Promise<void> {
     await this.reconcileClose(socket);
+    try { socket.close(1011, 'Connection error'); } catch { /* Already closed. */ }
   }
 
   private async closeAndClearRoom(room: RoomRow, code: 'ROOM_EXPIRED' | 'ROOM_CLOSED'): Promise<void> {
     const closed: WatchPartyRoomClosedMessage = { v: 1, type: 'room.closed', code,
       serverTimeMs: Math.max(Date.now(), room.lastServerTimeMs + 1) };
     this.broadcast(closed);
-    for (const socket of this.allSockets()) {
+    for (const socket of this.ctx.getWebSockets()) {
+      const attachment = attachmentOf(socket);
+      if (attachment) {
+        attachment.departed = true;
+        try { socket.serializeAttachment(attachment); } catch { /* Closed. */ }
+      }
       try { socket.close(CLOSE_ROOM, code === 'ROOM_EXPIRED' ? 'Room expired' : 'Room closed'); } catch { /* Closed. */ }
     }
     this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(`DELETE FROM rate_limits; DELETE FROM requests; DELETE FROM events;
+      this.ctx.storage.sql.exec(`DELETE FROM requests WHERE request_id NOT LIKE 'ticket:%'; DELETE FROM events;
         DELETE FROM chat; DELETE FROM participants; DELETE FROM room;`);
+      this.pruneRequests();
     });
-    await this.ctx.storage.deleteAlarm();
+    await this.scheduleAlarm(null);
   }
 
   override async alarm(): Promise<void> {
+    this.pruneRequests();
     const room = this.readRoom();
-    if (!room) return;
+    if (!room) {
+      const remaining = this.ctx.storage.sql.exec<{ count: number }>('SELECT COUNT(*) AS count FROM requests').one().count;
+      if (remaining === 0) this.ctx.storage.sql.exec('DELETE FROM rate_limits');
+      await this.scheduleAlarm(null);
+      return;
+    }
     const now = Date.now();
     if (now >= room.expiresAtMs || now >= room.hardExpiresAtMs) {
       await this.closeAndClearRoom(room, 'ROOM_EXPIRED');
@@ -1039,9 +1111,6 @@ export class WatchPartyRoom extends DurableObject<Env> {
         const presence = this.presenceEvent(room, now);
         this.commitEvent(room, presence);
         this.broadcast(presence);
-      } else {
-        room.hostDisconnectDeadlineMs = null;
-        this.writeRoom(room);
       }
     }
     this.pruneParticipants(room, now);

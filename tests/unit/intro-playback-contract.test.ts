@@ -9,8 +9,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock('@/lib/env', () => ({ features: mocks.features }));
-vi.mock('@/lib/providers/config', () => ({ listProviderConfigs: () => [] }));
-vi.mock('@/lib/providers/registry', () => ({ resolvePlayback: mocks.resolve }));
+vi.mock('@/lib/providers/registry', () => ({ resolvePlayback: mocks.resolve, getActiveProviderConfigs: () => [] }));
 vi.mock('@/features/commerce/queries', () => ({ getPlaybackCommerceContext: mocks.commerce }));
 
 import { GET } from '@/app/api/playback/route';

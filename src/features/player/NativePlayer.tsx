@@ -9,7 +9,9 @@ import { readGuestEntries, updateGuestPosition } from '@/features/playback/guest
 import { markPlaybackCheckpointSynced, playbackMediaKey, readPlaybackCheckpoint, writePlaybackCheckpoint, type PlaybackCheckpoint } from '@/features/playback/playback-checkpoint';
 import { shiftedCueTiming } from './subtitle-timing';
 import { createFullscreenOrientation, type PlayerOrientation } from './fullscreen-orientation';
-import { readConsent } from '@/components/consent/ConsentBanner';
+import { readConsent, subscribeConsent } from '@/lib/consent';
+import { preferencesForViewer, type AccountPreferencesSnapshot } from '@/features/account/preference-types';
+import { preferredLanguageTrack } from './track-preferences';
 import { DEFAULT_VAST_CONFIGURATION, type PlaybackAdPolicy } from '@/features/commerce/types';
 import { createVastSchedule } from '@/features/ads/vast/scheduler';
 import { VastAdBreak, type VastBreakResult } from '@/features/ads/vast/VastAdBreak';
@@ -18,8 +20,12 @@ import { requestCasting, type CastingHandle, type CastingProgress } from './cast
 import type { IntroMarker } from './intro-markers';
 import { EpisodeControls, type EpisodeNavigationControls } from './PlayerControlsBar';
 import { aggregateStreamOptions, audioStreamId, chooseStream, numberedAudioStreamOptions, preferencesForStream, qualityKey, trackKey, type StreamPreferences, type StreamOption } from './stream-options';
+import { parseWatchPartyMediaIdentity, sameWatchPartyMediaIdentity,
+  type WatchPartyMediaIdentity, type WatchPartyClientFreezeReason, type WatchPartyFreezeReason } from '@/features/watch-party/protocol';
+import type { PartyPlayerIntent, PartyPlayerPort, PartyPlayerSnapshot,
+  PartyPlayerPortRegistrationProps, RegisterPartyPlayerPort } from '@/features/watch-party/web/player-port';
 
-export interface NativePlayerProps {
+export interface NativePlayerProps extends PartyPlayerPortRegistrationProps {
   source: { url: string; kind: 'mp4' | 'hls' | 'dash'; streamCatalogUrl?: string };
   subtitleCatalogUrl?: string;
   introCatalogUrl?: string;
@@ -37,11 +43,15 @@ export interface NativePlayerProps {
   titleSlug: string;
   titleName?: string;
   viewerKey?: string;
+  /** Non-security defaults; manual native track choices always take priority. */
+  accountPreferences?: AccountPreferencesSnapshot | null;
   resumeUpdatedAt?: number;
   episodeId?: string;
   seasonNumber?: number;
   episodeNumber?: number;
   initialPosition?: number;
+  watchPartyMedia?: WatchPartyMediaIdentity | null;
+  watchPartyActive?: boolean;
   posterUrl?: string;
   sources?: Array<{ id: string; label: string }>;
   selectedSourceId?: string | null;
@@ -77,7 +87,8 @@ interface SafariPictureInPictureVideo extends HTMLVideoElement {
   webkitSetPresentationMode?: (mode: 'inline' | 'picture-in-picture') => void;
 }
 
-const REPORT_INTERVAL_MS = 5000;
+const LOCAL_CHECKPOINT_INTERVAL_MS = 5_000;
+const REMOTE_REPORT_INTERVAL_MS = 30_000;
 const MAX_AUTOMATIC_STREAM_SWITCHES = 1;
 const SOURCE_READY_TIMEOUT_MS = 15_000;
 // The initial response can include both the 15s resolver and 12s catalog probe budgets.
@@ -239,8 +250,10 @@ export function NativePlayer(props: NativePlayerProps) {
   const pictureInPictureActionRef = useRef<() => boolean>(() => false);
   const sourceSelectionRef = useRef<(id: string) => void>(() => {});
   const updateSourceRef = useRef<() => void>(() => {});
+  const updatePartyRef = useRef<() => void>(() => {});
   const updateCatalogsRef = useRef<() => void>(() => {});
   const updateAdPolicyRef = useRef<() => void>(() => {});
+  const updateTrackPreferencesRef = useRef<() => void>(() => {});
   const upNextLinkRef = useRef<HTMLAnchorElement | null>(null);
   const [options, setOptions] = useState<{ qualities: StreamOption[]; audioTracks: StreamOption[]; subtitles: StreamOption[] }>({ qualities: [], audioTracks: [], subtitles: [] });
   const [audioStreams, setAudioStreams] = useState<StreamOption[]>([]);
@@ -259,6 +272,7 @@ export function NativePlayer(props: NativePlayerProps) {
   const [fullscreenActive, setFullscreenActive] = useState(false);
   const [catalogStatus, setCatalogStatus] = useState<'loading' | 'ready' | 'unavailable'>('ready');
   const [selectionNotice, setSelectionNotice] = useState<string | null>(null);
+  const [accountPreferenceNotice, setAccountPreferenceNotice] = useState<string | null>(null);
   const [fastestAvailable, setFastestAvailable] = useState(false);
   const [playbackRate, setPlaybackRate] = useState(1);
   const [seekFeedback, setSeekFeedback] = useState<{ side: 'left' | 'right'; seconds: number; sequence: number } | null>(null);
@@ -276,7 +290,9 @@ export function NativePlayer(props: NativePlayerProps) {
   const [pictureInPictureActive, setPictureInPictureActive] = useState(false);
   const [pictureInPicturePending, setPictureInPicturePending] = useState(false);
   const [pictureInPictureNotice, setPictureInPictureNotice] = useState<string | null>(null);
-  const [adBreak, setAdBreak] = useState<{ creative: VastCreative; policy: PlaybackAdPolicy; volume: number; muted: boolean } | null>(null);
+  const [adBreak, setAdBreak] = useState<{ instanceId: number; creative: VastCreative; policy: PlaybackAdPolicy;
+    volume: number; muted: boolean; onDone: () => void } | null>(null);
+  const adSequenceRef = useRef(0);
   const [adLoading, setAdLoading] = useState(false);
   const adDoneRef = useRef<(result: VastBreakResult) => void>(() => {});
   const [introCatalog, setIntroCatalog] = useState<{ url?: string; marker: IntroMarker | null }>({ marker: null });
@@ -411,9 +427,12 @@ export function NativePlayer(props: NativePlayerProps) {
     let cancelled = false;
     let player: Player | null = null;
     let detach = () => {};
-    let flush = () => {};
+    let flush = (_force = true) => {};
     let exitPictureInPictureForCleanup: () => Promise<boolean> = async () => true;
     let pictureInPictureNeedsCleanup = () => false;
+    let suspendParty = () => {};
+    let refreshParty = () => {};
+    let freezeParty = (_reason: WatchPartyClientFreezeReason) => {};
     const startProps = latestProps.current;
     const { source, titleId, titleSlug, titleName, episodeId, seasonNumber, episodeNumber } = startProps;
     const hasCoordinates = seasonNumber !== undefined && episodeNumber !== undefined;
@@ -467,6 +486,8 @@ export function NativePlayer(props: NativePlayerProps) {
     let pendingPlaybackFailure = false;
     let handledFailureGeneration = -1;
     let explicitAudio = false;
+    let manualAudioPreference = false;
+    let manualSubtitlePreference = false;
     let pinnedAudioStream: { stream: DirectStream; option: StreamOption; scope: string | null } | null = null;
     let desired: StreamPreferences = { ...INITIAL_PREFERENCES };
     let lastSubtitleChoice = '';
@@ -499,17 +520,20 @@ export function NativePlayer(props: NativePlayerProps) {
     let introCommand: symbol | null = null;
     let introCommandTimer: ReturnType<typeof setTimeout> | undefined;
     let lastRemote: CastingProgress | null = null;
-    let lastCastReportAt = 0;
+    let lastCastCheckpointAt = 0;
+    let lastRemoteAt = 0;
     let adActive = false;
     let deferredAdBreak = false;
     let adResume: PendingPosition | null = null;
     let adRequest: AbortController | undefined;
+    let adTimer: ReturnType<typeof setTimeout> | undefined;
     let schedulePolicy = startProps.adPolicy ?? DEFAULT_VAST_CONFIGURATION;
     let adSchedule = createVastSchedule(schedulePolicy, resumePosition);
     const failedStreams = new Set<string>();
     setOptions({ qualities: [], audioTracks: [], subtitles: [] });
     setAudioStreams([]); setAudioStreamPin(null);
     setPreferences(desired); setActivePanel(null); setTimingOffset(0); setPlaybackRate(1);
+    setAccountPreferenceNotice(null);
     setProgress({ position: resumePosition, duration: local?.durationSeconds ?? 0 });
     setSwitching(false); setContentBusy(true); setFullscreenActive(false); setSeekFeedback(null); setSelectionNotice(null); setFastestAvailable(false); setCastStatus({ state: 'idle' }); setRemoteProgress(null); setAdBreak(null); setAdLoading(false);
     setPictureInPictureSupport(null); setPictureInPictureActive(false); setPictureInPicturePending(false); setPictureInPictureNotice(null);
@@ -535,6 +559,8 @@ export function NativePlayer(props: NativePlayerProps) {
     };
     const reportFatal = () => {
       if (cancelled || fatalReported) return;
+      freezeParty('source-change');
+      suspendParty();
       fatalReported = true;
       sourceReplacementPending = false;
       sourceReady = false; contentLoading = true;
@@ -570,6 +596,161 @@ export function NativePlayer(props: NativePlayerProps) {
       });
       player = videoPlayer;
       playerRef.current = videoPlayer;
+      let partyPort: PartyPlayerPort | null = null;
+      let partyOwner: RegisterPartyPlayerPort | undefined;
+      let partyIdentity: WatchPartyMediaIdentity | null = null;
+      let partyFreezeReason: WatchPartyFreezeReason | undefined;
+      let partyRate: { actual: number; base: number } | null = null;
+      const partyListeners = new Set<(intent: PartyPlayerIntent) => void>();
+      type IntentKind = Exclude<PartyPlayerIntent['kind'], 'freeze'>;
+      // Native media events can arrive after setters return, including after a source restore.
+      const partyEchoes: Record<IntentKind, Array<{ value: number; expires: number }>> = { play: [], pause: [], seek: [], rate: [] };
+      const expectPartyEcho = (kind: IntentKind, value: number) => {
+        partyEchoes[kind] = [...partyEchoes[kind].filter((entry) => entry.expires > Date.now()),
+          { value, expires: Date.now() + SOURCE_READY_TIMEOUT_MS }].slice(-8);
+        if (kind === 'play') partyEchoes.pause = [];
+        if (kind === 'pause') partyEchoes.play = [];
+      };
+      const clearPartyEchoes = (kind?: IntentKind) => {
+        if (!kind) { for (const key of ['play', 'pause', 'seek', 'rate'] as const) partyEchoes[key] = []; }
+        else {
+          partyEchoes[kind] = [];
+          if (kind === 'play' || kind === 'pause') { partyEchoes.play = []; partyEchoes.pause = []; }
+        }
+      };
+      const basePlaybackRate = () => {
+        const actual = videoPlayer.playbackRate() ?? 1;
+        return partyRate && Math.abs(actual - partyRate.actual) < 0.0001 ? partyRate.base : actual;
+      };
+      const declaredPartyMedia = () => {
+        const latest = latestProps.current;
+        const media = parseWatchPartyMediaIdentity(latest.watchPartyMedia);
+        const coordinates = latest.seasonNumber !== undefined && latest.episodeNumber !== undefined;
+        if (!media || media.mediaId !== latest.titleId || (latest.viewerKey ?? 'guest') !== viewerKey
+          || playbackMediaKey(latest.titleId, coordinates ? undefined : latest.episodeId,
+            latest.seasonNumber, latest.episodeNumber) !== mediaKey) return null;
+        if (media.kind === 'episode' && ((media.episodeId !== undefined && media.episodeId !== latest.episodeId)
+          || (media.seasonNumber !== undefined && media.seasonNumber !== latest.seasonNumber)
+          || (media.episodeNumber !== undefined && media.episodeNumber !== latest.episodeNumber))) return null;
+        if (media.kind === 'movie' && (latest.episodeId || latest.seasonNumber !== undefined || latest.episodeNumber !== undefined)) return null;
+        return media;
+      };
+      const partyContentReady = () => !cancelled && playerRef.current === videoPlayer && !videoPlayer.isDisposed()
+        && sourceReady && resumed && !pendingPosition && !sourceReplacementPending && !fatalReported && !contentLoading
+        && !externalSourceSelecting && !adActive && !castConnecting && !castHandle
+        && !episodeTransitionPending && !latestProps.current.episodeNavigationPending
+        && latestProps.current.source.url === inputSource.url && latestProps.current.source.kind === inputSource.kind
+        && latestProps.current.selectedSourceId === inputSourceId && !videoPlayer.error() && videoPlayer.readyState() >= 2;
+      const readPartySnapshot = (): PartyPlayerSnapshot | null => {
+        const media = declaredPartyMedia();
+        const positionSeconds = videoPlayer.currentTime();
+        const rate = videoPlayer.playbackRate();
+        if (!media || typeof positionSeconds !== 'number' || !Number.isFinite(positionSeconds) || positionSeconds < 0
+          || positionSeconds > 86_400 || typeof rate !== 'number' || !Number.isFinite(rate) || rate < 0.25 || rate > 4) return null;
+        return { media, positionSeconds, playbackRate: rate,
+          mode: videoPlayer.paused() ? partyFreezeReason ? 'frozen' : 'paused' : 'playing',
+          ...(videoPlayer.paused() && partyFreezeReason ? { freezeReason: partyFreezeReason } : {}) };
+      };
+      suspendParty = () => {
+        const owner = partyOwner;
+        partyPort = null; partyOwner = undefined; partyIdentity = null;
+        partyListeners.clear();
+        owner?.(null);
+      };
+      const partyEvent = (kind: IntentKind) => {
+        if (!partyPort || !latestProps.current.watchPartyActive || !partyContentReady()
+          || document.visibilityState === 'hidden' || videoPlayer.seeking()) return;
+        const snapshot = readPartySnapshot();
+        if (!snapshot) return;
+        const value = kind === 'seek' ? snapshot.positionSeconds : kind === 'rate' ? snapshot.playbackRate : 1;
+        partyEchoes[kind] = partyEchoes[kind].filter((entry) => entry.expires > Date.now());
+        if (partyEchoes[kind].some((entry) => Math.abs(entry.value - value) < (kind === 'seek' ? 0.5 : 0.0001))) return;
+        clearPartyEchoes(kind);
+        if (kind === 'play' || kind === 'pause') {
+          partyFreezeReason = undefined;
+          snapshot.mode = kind === 'play' ? 'playing' : 'paused'; delete snapshot.freezeReason;
+        }
+        if (kind === 'rate') partyRate = null;
+        for (const listener of partyListeners) listener({ kind, snapshot });
+      };
+      freezeParty = (reason) => {
+        if (!partyPort || !latestProps.current.watchPartyActive || !sourceReady || adActive
+          || cancelled || videoPlayer.isDisposed() || partyFreezeReason === reason) return;
+        const snapshot = readPartySnapshot();
+        if (!snapshot) return;
+        partyFreezeReason = reason;
+        for (const listener of partyListeners) listener({ kind: 'freeze', freezeReason: reason,
+          snapshot: { ...snapshot, mode: 'frozen', freezeReason: reason } });
+        expectPartyEcho('pause', 1);
+      };
+      refreshParty = () => {
+        if (!latestProps.current.watchPartyActive) {
+          partyFreezeReason = undefined;
+          if (partyRate && !videoPlayer.isDisposed()) {
+            const rate = basePlaybackRate(); partyRate = null;
+            if (videoPlayer.playbackRate() !== rate) { expectPartyEcho('rate', rate); videoPlayer.playbackRate(rate); }
+          }
+        }
+        const media = declaredPartyMedia();
+        const owner = latestProps.current.registerPartyPlayerPort;
+        if (!media || !owner || !partyContentReady() || document.visibilityState === 'hidden' || !readPartySnapshot()) {
+          suspendParty(); return;
+        }
+        if (partyPort && partyOwner === owner && partyIdentity && sameWatchPartyMediaIdentity(partyIdentity, media)) return;
+        suspendParty();
+        const port: PartyPlayerPort = {
+          read: () => {
+            const currentMedia = declaredPartyMedia();
+            return partyPort === port && partyContentReady() && !videoPlayer.seeking()
+              && document.visibilityState !== 'hidden' && currentMedia && sameWatchPartyMediaIdentity(currentMedia, media)
+              ? readPartySnapshot() : null;
+          },
+          apply: async (target) => {
+            if (partyPort !== port || !latestProps.current.watchPartyActive || !port.read()
+              || !sameWatchPartyMediaIdentity(target.playback.media, media)
+              || ![target.positionSeconds, target.playbackRate, target.playback.playbackRate].every(Number.isFinite)
+              || target.positionSeconds < 0 || target.positionSeconds > 86_400
+              || target.playbackRate < 0.25 || target.playbackRate > 4
+              || target.playback.playbackRate < 0.25 || target.playback.playbackRate > 4) return;
+            const active = () => {
+              const currentMedia = declaredPartyMedia();
+              return partyPort === port && partyContentReady() && latestProps.current.watchPartyActive
+                && currentMedia !== null && sameWatchPartyMediaIdentity(currentMedia, media);
+            };
+            partyFreezeReason = target.mode === 'frozen' ? target.freezeReason : undefined;
+            // Room rate is durable intent; drift correction is only a temporary tech rate.
+            partyRate = { actual: target.playbackRate, base: target.playback.playbackRate };
+            lastPlayback.rate = target.playback.playbackRate; setPlaybackRate(target.playback.playbackRate);
+            if (videoPlayer.playbackRate() !== target.playbackRate) {
+              expectPartyEcho('rate', target.playbackRate); videoPlayer.playbackRate(target.playbackRate);
+            }
+            if (!active()) return;
+            if (target.seek) {
+              const duration = videoPlayer.duration() ?? 0;
+              const position = Number.isFinite(duration) && duration > 0
+                ? Math.min(target.positionSeconds, Math.max(0, duration - 0.05)) : target.positionSeconds;
+              if (Math.abs((videoPlayer.currentTime() ?? 0) - position) > 0.01) {
+                expectPartyEcho('seek', position); videoPlayer.currentTime(position);
+              }
+            }
+            if (!active()) return;
+            if (target.mode === 'playing' && videoPlayer.paused()) {
+              expectPartyEcho('play', 1);
+              try { await videoPlayer.play(); } catch (error) { if (active()) throw error; }
+            } else if (target.mode !== 'playing' && !videoPlayer.paused()) {
+              expectPartyEcho('pause', 1); videoPlayer.pause();
+            }
+          },
+          subscribe: (listener) => {
+            const subscription = (intent: PartyPlayerIntent) => { if (partyPort === port) listener(intent); };
+            if (partyPort === port) partyListeners.add(subscription);
+            return () => { partyListeners.delete(subscription); };
+          },
+        };
+        partyPort = port; partyOwner = owner; partyIdentity = media;
+        owner(port);
+      };
+      updatePartyRef.current = refreshParty;
       const playerElement = videoPlayer.el() as HTMLElement;
       playerElement.setAttribute('aria-describedby', keyboardHelpId);
       playerElement.setAttribute('aria-keyshortcuts', KEYBOARD_SHORTCUTS);
@@ -583,7 +764,10 @@ export function NativePlayer(props: NativePlayerProps) {
       let lastRenderedSecond = -1;
       let lastDuration = -1;
       let reporting = false;
-      let queuedReport: { positionSeconds: number; durationSeconds?: number; checkpoint: PlaybackCheckpoint | null } | null = null;
+      type ProgressReport = { episodeId?: string; positionSeconds: number; durationSeconds?: number; checkpoint: PlaybackCheckpoint | null; force: boolean };
+      let queuedReport: ProgressReport | null = null;
+      let acknowledgedReport: ProgressReport | null = null;
+      let lastReportAt = Date.now();
       let refreshQueued = false;
       let suppressClicksUntil = 0;
       let unavailableChoiceNotice = false;
@@ -714,6 +898,7 @@ export function NativePlayer(props: NativePlayerProps) {
       sourceSelectionRef.current = (id) => {
         if (externalSourceSelecting || cancelled || videoPlayer.isDisposed() || episodeTransitionPending
           || latestProps.current.episodeNavigationPending) return;
+        freezeParty('source-change'); suspendParty();
         if (!pictureInPictureCommandPending && !currentPictureInPictureState()) {
           latestProps.current.onSelectSource?.(id);
           return;
@@ -721,7 +906,7 @@ export function NativePlayer(props: NativePlayerProps) {
         externalSourceSelecting = true;
         void exitPictureInPictureBeforeTransition().then((exited) => {
           if (exited && !cancelled && !videoPlayer.isDisposed()) latestProps.current.onSelectSource?.(id);
-        }).finally(() => { externalSourceSelecting = false; });
+        }).finally(() => { externalSourceSelecting = false; if (!cancelled) refreshParty(); });
       };
 
       const currentIntroTarget = () => {
@@ -753,22 +938,25 @@ export function NativePlayer(props: NativePlayerProps) {
         try {
           while (queuedReport) {
             const report = queuedReport;
+            if (acknowledgedReport && acknowledgedReport.episodeId === report.episodeId
+              && acknowledgedReport.positionSeconds === report.positionSeconds && acknowledgedReport.durationSeconds === report.durationSeconds) {
+              queuedReport = null;
+              if (report.checkpoint) markPlaybackCheckpointSynced(viewerKey, mediaKey, report.checkpoint);
+              continue;
+            }
+            if (!report.force && Date.now() - lastReportAt < REMOTE_REPORT_INTERVAL_MS) break;
             queuedReport = null;
+            lastReportAt = Date.now();
             try {
-              const identity = contentProps();
-              const result = await reportProgressAction({ titleId, ...(identity.episodeId ? { episodeId: identity.episodeId } : {}), positionSeconds: report.positionSeconds, durationSeconds: report.durationSeconds, viewerKey });
+              const result = await reportProgressAction({ titleId, ...(report.episodeId ? { episodeId: report.episodeId } : {}), positionSeconds: report.positionSeconds, durationSeconds: report.durationSeconds, viewerKey });
+              acknowledgedReport = result.ok ? report : null;
               if (result.ok && report.checkpoint) markPlaybackCheckpointSynced(viewerKey, mediaKey, report.checkpoint);
             }
-            catch { /* The scoped synchronous checkpoint survives server failures. */ }
+            catch { acknowledgedReport = null; /* The scoped synchronous checkpoint survives server failures. */ }
           }
         } finally { reporting = false; }
       };
-      flush = () => {
-        if (videoPlayer.isDisposed() || !resumed || pendingPosition || !sourceReady || videoPlayer.error()) return;
-        const position = castHandle && lastRemote ? lastRemote.positionSeconds : videoPlayer.currentTime();
-        const duration = castHandle && lastRemote ? lastRemote.durationSeconds : videoPlayer.duration();
-        if (typeof position !== 'number' || !Number.isFinite(position)) return;
-        const durationSeconds = typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : undefined;
+      const saveCheckpoint = (position: number, durationSeconds: number | undefined, force: boolean) => {
         const identity = contentProps();
         const canReport = viewerKey.startsWith('account:') && Boolean(identity.episodeId || (identity.seasonNumber === undefined && identity.episodeNumber === undefined));
         const checkpoint = writePlaybackCheckpoint(viewerKey, mediaKey, position, durationSeconds, canReport);
@@ -776,9 +964,20 @@ export function NativePlayer(props: NativePlayerProps) {
         if (viewerKey === 'guest') {
           updateGuestPosition(identity.titleSlug, position, durationSeconds, { episodeId: identity.episodeId, seasonNumber: identity.seasonNumber, episodeNumber: identity.episodeNumber });
         } else if (canReport) {
-          queuedReport = { positionSeconds: position, durationSeconds, checkpoint };
+          // Heartbeats must not replace an explicit seek/pause waiting behind a stalled write.
+          if (!force && queuedReport?.force) return;
+          queuedReport = { episodeId: identity.episodeId, positionSeconds: position, durationSeconds, checkpoint, force };
           void sendReports();
         }
+      };
+      flush = (force = true) => {
+        if (videoPlayer.isDisposed() || !resumed || pendingPosition || !sourceReady || videoPlayer.error()) return;
+        const position = castHandle && lastRemote ? lastRemote.positionSeconds
+          : adActive && adResume ? adResume.position : videoPlayer.currentTime();
+        const duration = castHandle && lastRemote ? lastRemote.durationSeconds : videoPlayer.duration();
+        if (typeof position !== 'number' || !Number.isFinite(position)) return;
+        const durationSeconds = typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : undefined;
+        saveCheckpoint(position, durationSeconds, force);
       };
       const prepareEpisodeTransition = async () => {
         if (cancelled || videoPlayer.isDisposed() || episodeTransitionPending || latestProps.current.episodeNavigationDisabled) return false;
@@ -877,6 +1076,27 @@ export function NativePlayer(props: NativePlayerProps) {
           .map((stream) => ({ ...stream, subtitles: [...stream.subtitles, ...externalSubtitles] })), current];
       };
       const updatePreferences = () => setPreferences({ ...desired });
+      const explicitConstraints = (): StreamPreferences => ({ ...desired,
+        audio: explicitAudio ? desired.audio : '', subtitle: manualSubtitlePreference ? desired.subtitle : 'off' });
+      const applyAccountDefaults = () => {
+        const saved = preferencesForViewer(viewerKey, latestProps.current.accountPreferences)?.settings;
+        if (!saved || !sourceReady || awaitingCatalogPlayback) { setAccountPreferenceNotice(null); return; }
+        const audio = preferredLanguageTrack(entries(audioList), saved.language);
+        const subtitles = preferredLanguageTrack(runtimeStream().subtitles, saved.language);
+        let changed = false;
+        if (!manualAudioPreference && audio && desired.audio !== trackKey(audio)) {
+          desired.audio = trackKey(audio); changed = true;
+        }
+        if (!manualSubtitlePreference) {
+          const next = saved.captions && subtitles ? trackKey(subtitles) : 'off';
+          if (next !== desired.subtitle) { desired.subtitle = next; changed = true; }
+        }
+        if (changed) updatePreferences();
+        const missing = [!manualAudioPreference && !audio ? 'audio' : '',
+          !manualSubtitlePreference && saved.captions && !subtitles ? 'captions' : ''].filter(Boolean);
+        setAccountPreferenceNotice(sourceReady && !catalogPending && missing.length
+          ? `Preferred ${missing.join(' and ')} language is not offered by this native source. Select another available track manually; no translation or video-source change was made.` : null);
+      };
       const installSidecars = () => {
         const stream = currentMetadata();
         const candidate = [...(stream?.subtitles ?? []), ...externalSubtitles]
@@ -950,6 +1170,7 @@ export function NativePlayer(props: NativePlayerProps) {
           const numbered = numberedAudioStreamOptions(catalog);
           if (pinnedAudioStream && !numbered.some((option) => option.id === pinnedAudioStream!.option.id)) numbered.push(pinnedAudioStream.option);
           setAudioStreams((previous) => JSON.stringify(previous) === JSON.stringify(numbered) ? previous : numbered);
+          applyAccountDefaults();
           installSidecars();
           applyChoices();
         } catch { reportFatal(); }
@@ -959,6 +1180,7 @@ export function NativePlayer(props: NativePlayerProps) {
         refreshQueued = true;
         queueMicrotask(() => { refreshQueued = false; refresh(); });
       }
+      updateTrackPreferencesRef.current = scheduleRefresh;
       const clearSidecars = () => {
         clearInterval(subtitleTimer);
         clearPresentation(); selectedSubtitle = null;
@@ -972,6 +1194,7 @@ export function NativePlayer(props: NativePlayerProps) {
       };
       const loadStream = (stream: DirectStream, kind = currentKind, force = false) => {
         if (!force && stream.url === currentUrl && kind === currentKind) { refresh(); return; }
+        freezeParty('source-change'); suspendParty();
         const generation = ++sourceChangeGeneration;
         sourceReplacementPending = true;
         const replace = () => {
@@ -979,9 +1202,9 @@ export function NativePlayer(props: NativePlayerProps) {
           sourceReplacementPending = false;
           flush();
           pendingPosition = pendingPosition ?? adResume ?? (castHandle && lastRemote
-            ? { position: lastRemote.positionSeconds, playing: !lastRemote.paused, rate: videoPlayer.playbackRate() ?? 1 }
+            ? { position: lastRemote.positionSeconds, playing: !lastRemote.paused, rate: basePlaybackRate() }
             : sourceReady && !videoPlayer.error()
-              ? { position: resumed ? videoPlayer.currentTime() ?? 0 : resumePosition, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 }
+              ? { position: resumed ? videoPlayer.currentTime() ?? 0 : resumePosition, playing: !videoPlayer.paused(), rate: basePlaybackRate() }
               : { ...lastPlayback });
           if (castHandle || castConnecting) disconnectCast(false);
           if (adActive) { adRequest?.abort(); finishAd(); }
@@ -1024,7 +1247,7 @@ export function NativePlayer(props: NativePlayerProps) {
           pendingPlaybackFailure = false;
           failedStreams.add(runtimeStream().id);
           const candidates = availableStreams().filter((stream) => stream.url !== currentUrl && !failedStreams.has(stream.id));
-          const constraints = { ...desired, audio: explicitAudio ? desired.audio : '' };
+          const constraints = explicitConstraints();
           const fallback = automaticSwitches < MAX_AUTOMATIC_STREAM_SWITCHES ? chooseStream(candidates, constraints, 'quality') : undefined;
           if (!fallback) { reportFatal(); return; }
           automaticSwitches += 1;
@@ -1043,7 +1266,7 @@ export function NativePlayer(props: NativePlayerProps) {
           return;
         }
         const id = pinnedAudioStream?.stream.id ?? currentCatalogId;
-        const stream = chooseStream(availableStreams().filter((candidate) => candidate.id === id), desired, 'quality');
+        const stream = chooseStream(availableStreams().filter((candidate) => candidate.id === id), explicitConstraints(), 'quality');
         if (!stream) {
           reportFatal();
           setSelectionNotice('The selected stream is unavailable with your current selections. Your selections are unchanged.');
@@ -1071,7 +1294,8 @@ export function NativePlayer(props: NativePlayerProps) {
             scope: catalogScope(inputSource, inputSourceId) }
             : field === 'audio' && id === 'auto' ? null : pinnedAudioStream;
           const nextExplicitAudio = field === 'audio' ? id !== 'auto' : explicitAudio;
-          const next = { ...desired, [field]: id, ...(!nextExplicitAudio ? { audio: '' } : {}) };
+          const next = { ...desired, ...(!manualSubtitlePreference && field !== 'subtitle' ? { subtitle: 'off' } : {}),
+            [field]: id, ...(!nextExplicitAudio ? { audio: '' } : {}) };
           if (field === 'audio' && id === 'auto') next.audio = 'auto';
           const candidates = numberedStream ? [{ ...numberedStream, subtitles: [...numberedStream.subtitles, ...externalSubtitles] }] : availableStreams();
           const stream = chooseStream(candidates, next, field, runtimeStream().id, nextPin?.stream.id);
@@ -1084,6 +1308,8 @@ export function NativePlayer(props: NativePlayerProps) {
           }
           const retry = fatalReported || Boolean(videoPlayer.error());
           if (manual) {
+            if (field === 'audio') manualAudioPreference = true;
+            if (field === 'subtitle') manualSubtitlePreference = true;
             userSelected = true; explicitAudio = nextExplicitAudio;
             pinnedAudioStream = nextPin;
             setAudioStreamPin(nextPin?.option ?? null);
@@ -1108,35 +1334,39 @@ export function NativePlayer(props: NativePlayerProps) {
       };
       speedRef.current = (rate) => {
         if (![0.5, 0.75, 1, 1.25, 1.5, 2].includes(rate)) return;
+        clearPartyEchoes('rate'); partyRate = null;
+        const changed = videoPlayer.playbackRate() !== rate;
         videoPlayer.playbackRate(rate);
+        if (!changed) partyEvent('rate');
         if (pendingPosition) pendingPosition.rate = rate;
         else lastPlayback.rate = rate;
         setPlaybackRate(rate);
       };
       const saveRemote = (remote: CastingProgress, force = false) => {
+        if (cancelled || videoPlayer.isDisposed() || !Number.isFinite(remote.positionSeconds) || remote.positionSeconds < 0) return;
+        const now = Date.now();
+        const previous = lastRemote;
+        force = force || !previous || remote.paused !== previous.paused
+          || remote.positionSeconds < previous.positionSeconds
+          || (remote.paused && remote.positionSeconds !== previous.positionSeconds)
+          || remote.positionSeconds > previous.positionSeconds + Math.max(0, now - lastRemoteAt) / 1000 * basePlaybackRate() + 1;
         lastRemote = remote;
+        lastRemoteAt = now;
         setRemoteProgress(remote);
         setProgress({ position: remote.positionSeconds, duration: remote.durationSeconds ?? 0 });
         refreshIntro();
-        const now = Date.now();
-        if (!force && now - lastCastReportAt < 5_000) return;
-        lastCastReportAt = now;
-        const identity = contentProps();
-        const canReport = viewerKey.startsWith('account:') && Boolean(identity.episodeId || (identity.seasonNumber === undefined && identity.episodeNumber === undefined));
-        const checkpoint = writePlaybackCheckpoint(viewerKey, mediaKey, remote.positionSeconds, remote.durationSeconds, canReport);
-        if (viewerKey === 'guest') {
-          updateGuestPosition(identity.titleSlug, remote.positionSeconds, remote.durationSeconds, { episodeId: identity.episodeId, seasonNumber: identity.seasonNumber, episodeNumber: identity.episodeNumber });
-        } else if (canReport) {
-          queuedReport = { positionSeconds: remote.positionSeconds, durationSeconds: remote.durationSeconds, checkpoint };
-          void sendReports();
-        }
+        if (!force && now - lastCastCheckpointAt < LOCAL_CHECKPOINT_INTERVAL_MS) return;
+        lastCastCheckpointAt = now;
+        saveCheckpoint(remote.positionSeconds, remote.durationSeconds, force);
       };
       const restoreLocal = () => {
         videoPlayer.controls(true);
         if (!lastRemote) return;
+        expectPartyEcho('seek', lastRemote.positionSeconds);
         videoPlayer.currentTime(lastRemote.positionSeconds);
-        if (lastRemote.paused) videoPlayer.pause();
-        else void videoPlayer.play()?.catch(() => {});
+        if (lastRemote.paused || (latestProps.current.watchPartyActive && partyFreezeReason)) {
+          expectPartyEcho('pause', 1); videoPlayer.pause();
+        } else { expectPartyEcho('play', 1); void videoPlayer.play()?.catch(() => {}); }
         setProgress({ position: lastRemote.positionSeconds, duration: lastRemote.durationSeconds ?? 0 });
       };
       const disconnectCast = (stop: boolean) => {
@@ -1150,7 +1380,7 @@ export function NativePlayer(props: NativePlayerProps) {
         restoreLocal();
         setRemoteProgress(null);
         setCastStatus({ state: 'idle' });
-        refreshIntro();
+        refreshIntro(); refreshParty();
       };
       castActionRef.current = () => {
         if (castConnecting) return;
@@ -1162,6 +1392,7 @@ export function NativePlayer(props: NativePlayerProps) {
         const mediaElement = videoPlayer.el().querySelector('video');
         if (!(mediaElement instanceof HTMLVideoElement)) return;
         const castSource = currentUrl;
+        freezeParty('source-change'); suspendParty();
         castConnecting = true;
         cancelIntroCommand(); refreshIntro();
         setCastStatus({ state: 'connecting', message: 'Preparing device picker' });
@@ -1170,7 +1401,7 @@ export function NativePlayer(props: NativePlayerProps) {
             && !await exitPictureInPictureBeforeTransition()) {
             castConnecting = false;
             setCastStatus({ state: 'error', message: 'Close Picture-in-Picture before casting and try again.' });
-            refreshIntro();
+            refreshIntro(); refreshParty();
             return;
           }
           if (cancelled || videoPlayer.isDisposed() || currentUrl !== castSource) { castConnecting = false; return; }
@@ -1199,10 +1430,12 @@ export function NativePlayer(props: NativePlayerProps) {
                 const track = externalSubtitles.find((candidate) => candidate.url && trackKey(candidate) === desired.subtitle);
                 return track?.url ? { subtitle: { url: track.url, label: track.label, ...(track.language ? { language: track.language } : {}) } } : {};
               })(),
-            }, (remote) => saveRemote(remote), () => disconnectCast(false));
+            }, (remote, force) => {
+              if (currentUrl === castSource) saveRemote(remote, force);
+            }, () => { if (!cancelled && currentUrl === castSource) disconnectCast(false); });
             if (cancelled || videoPlayer.isDisposed() || currentUrl !== castSource) { handle?.dispose(); return; }
             castConnecting = false;
-            if (!handle) { setCastStatus({ state: 'idle', message: 'Device picker opened' }); refreshIntro(); return; }
+            if (!handle) { setCastStatus({ state: 'idle', message: 'Device picker opened' }); refreshIntro(); refreshParty(); return; }
             castHandle = handle;
             videoPlayer.pause();
             videoPlayer.controls(false);
@@ -1212,7 +1445,7 @@ export function NativePlayer(props: NativePlayerProps) {
           } catch (error: unknown) {
             castConnecting = false;
             setCastStatus({ state: 'error', message: error instanceof Error ? error.message : 'Casting could not start.' });
-            if (!cancelled) refreshIntro();
+            if (!cancelled) { refreshIntro(); refreshParty(); }
           }
         })();
       };
@@ -1225,6 +1458,7 @@ export function NativePlayer(props: NativePlayerProps) {
       skipIntroRef.current = () => {
         const target = currentIntroTarget();
         if (target === null || introCommand) return;
+        clearPartyEchoes('seek');
         const command = Symbol('skip-intro');
         introCommand = command;
         setIntroPending(true); setIntroNotice(null);
@@ -1271,19 +1505,31 @@ export function NativePlayer(props: NativePlayerProps) {
       const finishAd = () => {
         if (!adActive || cancelled || videoPlayer.isDisposed()) return;
         adActive = false;
+        const request = adRequest; adRequest = undefined;
+        clearTimeout(adTimer); adTimer = undefined;
+        request?.abort();
         adSchedule.finish();
         setAdBreak(null); setAdLoading(false);
         videoPlayer.controls(true);
         if (adResume) {
+          expectPartyEcho('seek', adResume.position); expectPartyEcho('rate', adResume.rate);
           videoPlayer.currentTime(adResume.position);
           videoPlayer.playbackRate(adResume.rate);
-          if (adResume.playing) void videoPlayer.play()?.catch(() => {});
+          if (adResume.playing && !(latestProps.current.watchPartyActive && partyFreezeReason)) {
+            expectPartyEcho('play', 1); void videoPlayer.play()?.catch(() => {});
+          }
         }
         adResume = null;
+        refreshParty();
         refreshIntro();
       };
       adDoneRef.current = finishAd;
       updateAdPolicyRef.current = () => {
+        if (cancelled || videoPlayer.isDisposed()) return;
+        if (readConsent()?.ads !== true) {
+          if (deferredAdBreak) { deferredAdBreak = false; adSchedule.finish(); }
+          finishAd();
+        }
         const next = latestProps.current.adPolicy ?? DEFAULT_VAST_CONFIGURATION;
         if (JSON.stringify(next) === JSON.stringify(schedulePolicy)) return;
         if (adActive) { adRequest?.abort(); finishAd(); }
@@ -1291,29 +1537,42 @@ export function NativePlayer(props: NativePlayerProps) {
         adSchedule = createVastSchedule(next, pendingPosition?.position ?? (resumed ? videoPlayer.currentTime() ?? resumePosition : resumePosition));
       };
       const beginAd = () => {
+        const policy = latestProps.current.adPolicy;
+        if (!policy?.enabled || readConsent()?.ads !== true || adActive || cancelled || castHandle) {
+          deferredAdBreak = false; adSchedule.finish(); return;
+        }
         if (pictureInPictureCommandPending || currentPictureInPictureState()) {
           deferredAdBreak = true;
           return;
         }
-        const policy = latestProps.current.adPolicy;
-        if (!policy?.enabled || !readConsent()?.ads || adActive || cancelled || castHandle) { deferredAdBreak = false; adSchedule.finish(); return; }
         deferredAdBreak = false;
+        freezeParty('ad-break'); suspendParty();
         adActive = true;
         cancelIntroCommand(); refreshIntro();
         flush();
-        adResume = { position: videoPlayer.currentTime() ?? 0, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
-        videoPlayer.pause(); videoPlayer.controls(false); setActivePanel(null);
-        setAdLoading(true);
+        adResume = { position: videoPlayer.currentTime() ?? 0, playing: !videoPlayer.paused(), rate: basePlaybackRate() };
         const controller = new AbortController(); adRequest = controller;
-        const timer = setTimeout(() => controller.abort(), 10_000);
+        const instanceId = ++adSequenceRef.current;
+        videoPlayer.pause();
+        if (adRequest !== controller || !adActive || readConsent()?.ads !== true) {
+          if (adRequest === controller) finishAd();
+          return;
+        }
+        videoPlayer.controls(false); setActivePanel(null); setAdLoading(true);
+        const timer = setTimeout(() => { if (adRequest === controller) finishAd(); }, 10_000);
+        adTimer = timer;
         void fetch('/api/vast?consent=1', { signal: controller.signal, credentials: 'same-origin', cache: 'no-store' })
           .then(async (response): Promise<{ creative?: VastCreative }> => response.ok && response.status !== 204 ? response.json() as Promise<{ creative?: VastCreative }> : {})
           .then((result) => {
             if (cancelled || controller.signal.aborted || adRequest !== controller || !adActive) return;
+            if (readConsent()?.ads !== true || !latestProps.current.adPolicy?.enabled) { finishAd(); return; }
             if (!result.creative || typeof result.creative.mediaUrl !== 'string' || !Number.isFinite(result.creative.durationSeconds)) { finishAd(); return; }
             setAdLoading(false);
-            setAdBreak({ creative: result.creative, policy, volume: videoPlayer.volume() ?? 1, muted: videoPlayer.muted() ?? false });
-          }).catch(() => { if (adRequest === controller && adActive) finishAd(); }).finally(() => clearTimeout(timer));
+            setAdBreak({ instanceId, creative: result.creative, policy, volume: videoPlayer.volume() ?? 1, muted: videoPlayer.muted() ?? false,
+              onDone: () => { if (adRequest === controller) finishAd(); } });
+          }).catch(() => { if (adRequest === controller && adActive) finishAd(); }).finally(() => {
+            clearTimeout(timer); if (adTimer === timer) adTimer = undefined;
+          });
       };
       const sampleAdSchedule = () => {
         if (cancelled || videoPlayer.isDisposed() || fatalReported || !sourceReady || !resumed || videoPlayer.error()) return;
@@ -1331,11 +1590,12 @@ export function NativePlayer(props: NativePlayerProps) {
       resumeAdSchedule = sampleAdSchedule;
 
       const updateProgress = () => {
+        if (cancelled || videoPlayer.isDisposed()) return;
         const position = pendingPosition?.position ?? videoPlayer.currentTime() ?? 0;
         const rawDuration = videoPlayer.duration();
         const duration = typeof rawDuration === 'number' && Number.isFinite(rawDuration) && rawDuration > 0 ? rawDuration : 0;
         if (!pendingPosition && sourceReady && !videoPlayer.error() && !adActive && !castHandle && Number.isFinite(position)) {
-          lastPlayback = { position, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
+          lastPlayback = { position, playing: !videoPlayer.paused(), rate: basePlaybackRate() };
         }
         if (Math.floor(position) !== lastRenderedSecond || duration !== lastDuration) {
           lastRenderedSecond = Math.floor(position); lastDuration = duration;
@@ -1352,17 +1612,21 @@ export function NativePlayer(props: NativePlayerProps) {
         const position = pendingPosition;
         if (position) {
           const duration = videoPlayer.duration();
-          videoPlayer.currentTime(duration && Number.isFinite(duration) ? Math.min(position.position, Math.max(0, duration - 0.05)) : position.position);
+          const restored = duration && Number.isFinite(duration) ? Math.min(position.position, Math.max(0, duration - 0.05)) : position.position;
+          expectPartyEcho('seek', restored); expectPartyEcho('rate', position.rate);
+          videoPlayer.currentTime(restored);
           videoPlayer.playbackRate(position.rate);
-          if (position.playing) void videoPlayer.play()?.catch(() => {});
-          else videoPlayer.pause();
+          if (position.playing && !(latestProps.current.watchPartyActive && partyFreezeReason)) {
+            expectPartyEcho('play', 1); void videoPlayer.play()?.catch(() => {});
+          } else { expectPartyEcho('pause', 1); videoPlayer.pause(); }
           pendingPosition = null;
           setSwitching(false);
         } else if (!resumed) {
           resumed = true;
           if (resumePosition > 0) {
             const duration = videoPlayer.duration();
-            videoPlayer.currentTime(duration && Number.isFinite(duration) ? Math.min(resumePosition, Math.max(0, duration - 0.05)) : resumePosition);
+            const restored = duration && Number.isFinite(duration) ? Math.min(resumePosition, Math.max(0, duration - 0.05)) : resumePosition;
+            expectPartyEcho('seek', restored); videoPlayer.currentTime(restored);
           }
         }
         resumed = true;
@@ -1379,10 +1643,12 @@ export function NativePlayer(props: NativePlayerProps) {
         if (cancelled) return;
         updateProgress();
         const now = Date.now();
-        if (!videoPlayer.paused() && now - lastFlushAt >= REPORT_INTERVAL_MS) flush();
+        if (!adActive && !castConnecting && !castHandle && !videoPlayer.paused()
+          && now - lastFlushAt >= LOCAL_CHECKPOINT_INTERVAL_MS) flush(false);
         sampleAdSchedule();
       };
       const handleSeeked = () => {
+        if (cancelled || videoPlayer.isDisposed()) return;
         if (!castHandle) cancelIntroCommand();
         contentLoading = videoPlayer.readyState() < 2;
         adSchedule.update({
@@ -1392,19 +1658,31 @@ export function NativePlayer(props: NativePlayerProps) {
           adPlaying: adActive || castConnecting || Boolean(castHandle) || pictureInPictureCommandPending || currentPictureInPictureState(),
         });
         reconcileCues(); updateProgress(); flush();
+        refreshParty(); partyEvent('seek');
       };
-      const handleHidden = () => { if (document.visibilityState === 'hidden') flush(); };
+      const handleHidden = () => {
+        if (document.visibilityState === 'hidden') {
+          freezeParty('background');
+          if (partyPort && latestProps.current.watchPartyActive && !adActive && !videoPlayer.paused()) videoPlayer.pause();
+          suspendParty(); flush();
+        } else refreshParty();
+      };
       const handlePause = () => {
         if (!cancelled && sourceReady && !pendingPosition && !videoPlayer.error() && !adActive && !castHandle) {
-          lastPlayback = { position: videoPlayer.currentTime() ?? lastPlayback.position, playing: false, rate: videoPlayer.playbackRate() ?? lastPlayback.rate };
+          lastPlayback = { position: videoPlayer.currentTime() ?? lastPlayback.position, playing: false, rate: basePlaybackRate() };
           flush();
         }
+        partyEvent('pause');
       };
-      const handleContentLoading = () => { contentLoading = true; setContentBusy(true); refreshIntro(); };
+      const handleContentLoading = () => {
+        if (cancelled || videoPlayer.isDisposed()) return;
+        contentLoading = true; suspendParty(); setContentBusy(true); refreshIntro();
+      };
       const handleContentReady = () => {
         if (cancelled || videoPlayer.isDisposed() || fatalReported || videoPlayer.error() || !sourceReady || videoPlayer.readyState() < 2) return;
         clearTimeout(switchTimer); switchTimer = undefined;
         contentLoading = false; setContentBusy(false); updateProgress(); markReady(); refreshIntro();
+        refreshParty();
         if (!videoPlayer.ended()) contentEnded = false;
       };
       const handleEnded = () => {
@@ -1445,6 +1723,7 @@ export function NativePlayer(props: NativePlayerProps) {
         && !latestProps.current.episodeNavigationPending;
       const togglePlayback = () => {
         if (!keyboardPlaybackReady()) return false;
+        clearPartyEchoes('play');
         if (videoPlayer.paused()) void videoPlayer.play()?.catch(() => {});
         else videoPlayer.pause();
         return true;
@@ -1454,6 +1733,7 @@ export function NativePlayer(props: NativePlayerProps) {
         const duration = videoPlayer.duration();
         const maximum = typeof duration === 'number' && Number.isFinite(duration) && duration > 0 ? duration : Infinity;
         try {
+          clearPartyEchoes('seek');
           videoPlayer.currentTime(Math.max(0, Math.min(maximum, position)));
           if (feedback) showSeek(feedback.side, feedback.seconds);
           return true;
@@ -1515,6 +1795,8 @@ export function NativePlayer(props: NativePlayerProps) {
       const keyboardTargetExcluded = (target: EventTarget | null) => target instanceof Element
         && Boolean(target.closest(KEYBOARD_EXCLUDED_TARGETS));
       const handleKeyboard = (event: KeyboardEvent) => {
+        if (event.target instanceof Element && event.target.closest('.vjs-progress-control')
+          && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) clearPartyEchoes('seek');
         if (event.defaultPrevented || event.isComposing || event.altKey || event.ctrlKey || event.metaKey
           || !(event.target instanceof Element) || keyboardTargetExcluded(event.target)
           || keyboardTargetExcluded(document.activeElement)) return;
@@ -1549,6 +1831,10 @@ export function NativePlayer(props: NativePlayerProps) {
       let lastTap: { side: 'left' | 'right'; at: number; x: number; y: number } | null = null;
       const isControl = (target: EventTarget | null) => target instanceof Element && Boolean(target.closest(CONTROL_TARGETS));
       const handlePointerDown = (event: PointerEvent) => {
+        if (event.target instanceof Element) {
+          if (event.target.closest('.vjs-progress-control')) clearPartyEchoes('seek');
+          else if (event.target.closest('.vjs-play-control') || event.target.closest('.vjs-tech')) clearPartyEchoes('play');
+        }
         if (event.pointerType !== 'touch') return;
         suppressClicksUntil = Date.now() + 700;
         if (!event.isPrimary || isControl(event.target)) { pointer = null; lastTap = null; return; }
@@ -1600,7 +1886,9 @@ export function NativePlayer(props: NativePlayerProps) {
       videoPlayer.on('seeking', refreshIntro);
       videoPlayer.on('durationchange', updateProgress);
       videoPlayer.on('ratechange', () => {
-        const rate = pendingPosition?.rate ?? videoPlayer.playbackRate() ?? 1;
+        if (cancelled || videoPlayer.isDisposed()) return;
+        partyEvent('rate');
+        const rate = pendingPosition?.rate ?? basePlaybackRate();
         if (!pendingPosition && sourceReady) lastPlayback.rate = rate;
         setPlaybackRate(rate);
       });
@@ -1608,10 +1896,13 @@ export function NativePlayer(props: NativePlayerProps) {
       videoPlayer.on('timeupdate', handleTimeUpdate);
       videoPlayer.on('seeked', handleSeeked);
       videoPlayer.on('pause', handlePause);
+      const handlePartyPlay = () => partyEvent('play');
+      const handlePageHide = () => flush();
+      videoPlayer.on('play', handlePartyPlay);
       videoPlayer.on('ended', handleEnded);
       videoPlayer.on('error', () => handlePlaybackError());
       document.addEventListener('visibilitychange', handleHidden);
-      window.addEventListener('pagehide', flush);
+      window.addEventListener('pagehide', handlePageHide);
       playerElement.addEventListener('pointerdown', handlePointerDown, true);
       playerElement.addEventListener('pointermove', handlePointerMove, true);
       playerElement.addEventListener('pointerup', handlePointerUp, true);
@@ -1622,17 +1913,20 @@ export function NativePlayer(props: NativePlayerProps) {
       playerElement.addEventListener('click', handleSkip);
       playerElement.addEventListener('keydown', handleKeyboard, true);
       detach = () => {
+        suspendParty(); clearPartyEchoes();
+        videoPlayer.off('play', handlePartyPlay);
         latestProps.current.registerEpisodeTransition?.(null);
         orientation.dispose();
         catalogRequest?.abort(); subtitleRequest?.abort(); clearTimeout(catalogTimer);
         adRequest?.abort();
+        adRequest = undefined; clearTimeout(adTimer); adTimer = undefined;
         clearTimeout(feedbackTimer);
         clearTimeout(switchTimer);
         clearTimeout(introCommandTimer);
         for (const event of ['addqualitylevel', 'removequalitylevel', 'change']) qualityList.off(event, event === 'change' ? handleQualityChange : scheduleRefresh);
         for (const list of [audioList, textList]) for (const event of ['addtrack', 'removetrack', 'change']) list.off(event, scheduleRefresh);
         document.removeEventListener('visibilitychange', handleHidden);
-        window.removeEventListener('pagehide', flush);
+        window.removeEventListener('pagehide', handlePageHide);
         playerElement.removeEventListener('pointerdown', handlePointerDown, true);
         playerElement.removeEventListener('pointermove', handlePointerMove, true);
         playerElement.removeEventListener('pointerup', handlePointerUp, true);
@@ -1703,13 +1997,13 @@ export function NativePlayer(props: NativePlayerProps) {
                 refresh();
                 if (awaitingCatalogPlayback) {
                   const requestedId = catalogStreamId(inputSource);
-                  const next = chooseStream(requestedId ? catalog.filter((stream) => stream.id === requestedId) : catalog, desired, 'quality');
+                  const next = chooseStream(requestedId ? catalog.filter((stream) => stream.id === requestedId) : catalog, explicitConstraints(), 'quality');
                   if (!next) { unavailable(); return; }
                   awaitingCatalogPlayback = false;
                   recommendationApplied = true;
                   desired = preferencesForStream(next, desired);
                   updatePreferences();
-                  if (!sourceReady) pendingPosition ??= { ...lastPlayback, playing: !videoPlayer.paused(), rate: videoPlayer.playbackRate() ?? 1 };
+                  if (!sourceReady) pendingPosition ??= { ...lastPlayback, playing: !videoPlayer.paused(), rate: basePlaybackRate() };
                   loadStream(next, inputSource.kind, true);
                   return;
                 }
@@ -1773,7 +2067,7 @@ export function NativePlayer(props: NativePlayerProps) {
               && catalog.length && catalogExpiresAt > Date.now()) {
               const requestedId = catalogStreamId(inputSource);
               const next = chooseStream(requestedId ? catalog.filter((stream) => stream.id === requestedId) : catalog,
-                { ...desired, audio: audioStreamId(desired.audio) === undefined ? desired.audio : '' }, 'quality');
+                { ...explicitConstraints(), audio: audioStreamId(desired.audio) === undefined && explicitAudio ? desired.audio : '' }, 'quality');
               if (!next) { setSelectionNotice('That source is unavailable with your current selections. Playback has not changed.'); return; }
               pinnedAudioStream = null; setAudioStreamPin(null);
               if (audioStreamId(desired.audio) !== undefined) { desired.audio = ''; explicitAudio = false; }
@@ -1812,8 +2106,10 @@ export function NativePlayer(props: NativePlayerProps) {
       pictureInPictureActionRef.current = () => false;
       sourceSelectionRef.current = () => {};
       updateSourceRef.current = () => {};
+      updatePartyRef.current = () => {};
       updateCatalogsRef.current = () => {};
       updateAdPolicyRef.current = () => {};
+      updateTrackPreferencesRef.current = () => {};
       speedRef.current = () => {};
       castActionRef.current = () => {};
       castCommandRef.current = () => {};
@@ -1835,6 +2131,16 @@ export function NativePlayer(props: NativePlayerProps) {
   useEffect(() => { updateSourceRef.current(); }, [source.url, source.kind, selectedSourceId, props.retryKey]);
   useEffect(() => { updateCatalogsRef.current(); }, [source.streamCatalogUrl, props.subtitleCatalogUrl]);
   useEffect(() => { updateAdPolicyRef.current(); }, [props.adPolicy]);
+  useEffect(() => { updateTrackPreferencesRef.current(); }, [props.accountPreferences]);
+  useEffect(() => {
+    let active = true;
+    const recheck = () => { if (active) updateAdPolicyRef.current(); };
+    const unsubscribe = subscribeConsent(recheck);
+    recheck();
+    return () => { active = false; unsubscribe(); };
+  }, []);
+  useEffect(() => { updatePartyRef.current(); }, [props.watchPartyMedia, props.watchPartyActive,
+    props.registerPartyPlayerPort, props.episodeNavigationPending]);
 
   useEffect(() => {
     if (!activePanel || !portalTarget) return;
@@ -1875,7 +2181,8 @@ export function NativePlayer(props: NativePlayerProps) {
     return next;
   });
 
-  return <div className="lumora-player-frame relative h-full w-full bg-black">
+  return <div className="lumora-player-frame relative h-full w-full bg-black"
+    data-viewing-motion={preferencesForViewer(viewerKey, props.accountPreferences)?.settings.reducedMotion ? 'reduce' : undefined}>
     <div ref={containerRef} data-vjs-player="" className="h-full w-full" onContextMenu={(event) => event.preventDefault()} />
     {portalTarget ? createPortal(<>
       <p id={keyboardHelpId} className="sr-only">Keyboard shortcuts are available when focus is on the video surface. Open Settings for the full shortcut list.</p>
@@ -1935,6 +2242,7 @@ export function NativePlayer(props: NativePlayerProps) {
               </details>
             </> : null}
             {catalogStatus !== 'ready' ? <p className="lumora-player-catalog-status" role="status">{catalogStatus === 'loading' ? 'Discovering available quality and language options...' : 'Some stream options could not be loaded. Current playback is unaffected.'}</p> : null}
+            {accountPreferenceNotice ? <p className="lumora-player-catalog-status" role="status">{accountPreferenceNotice}</p> : null}
           </div> : null}
         </div>
         {castStatus.message ? <div className={`lumora-player-cast-status is-${castStatus.state}`} role="status">{castStatus.message}</div> : null}
@@ -1959,7 +2267,8 @@ export function NativePlayer(props: NativePlayerProps) {
       {fullscreenActive && props.episodeNavigation && props.onNavigateEpisode ? <div className="lumora-player-episode-controls" data-player-ui=""><EpisodeControls {...props.episodeNavigation} disabled={props.episodeNavigationDisabled} pending={props.episodeNavigationPending} onNavigate={props.onNavigateEpisode} /></div> : null}
       {switching ? <div className={`lumora-player-switch-status${showPing ? ' has-ping' : ''}`} role="status">Updating playback<span>Your position is preserved</span></div> : null}
       {adLoading ? <div className="lumora-vast-loading" role="status">Loading advertisement</div> : null}
-      {adBreak ? <VastAdBreak key={adBreak.creative.id} {...adBreak} onDone={(result) => adDoneRef.current(result)} /> : null}
+      {adBreak ? <VastAdBreak key={adBreak.instanceId} creative={adBreak.creative} policy={adBreak.policy}
+        volume={adBreak.volume} muted={adBreak.muted} onDone={adBreak.onDone} /> : null}
       {seekFeedback ? <div key={seekFeedback.sequence} className={`lumora-player-seek-feedback is-${seekFeedback.side}`} role="status"><span aria-hidden="true">{seekFeedback.side === 'left' ? '-' : '+'}{seekFeedback.seconds}</span><span>{seekFeedback.side === 'left' ? 'Back' : 'Forward'} {seekFeedback.seconds} seconds</span></div> : null}
     </>, portalTarget) : null}
   </div>;

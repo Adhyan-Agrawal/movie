@@ -3,16 +3,17 @@ import { NextRequest } from 'next/server';
 
 const lifetime = vi.hoisted(() => {
   const pending: Promise<unknown>[] = [];
-  const ctx = { waitUntil(promise: Promise<unknown>) {
-    pending.push(promise);
-    void promise.catch(() => undefined);
-  } };
-  return { pending, ctx, available: true };
+  return { pending, available: true };
 });
-vi.mock('@opennextjs/cloudflare', () => ({ getCloudflareContext: () => {
-  if (!lifetime.available) throw new Error('No Worker request context.');
-  return { ctx: lifetime.ctx };
-} }));
+vi.mock('next/server', async (importOriginal) => ({
+  ...await importOriginal<typeof import('next/server')>(),
+  after(task: () => Promise<unknown>) {
+    if (!lifetime.available) throw new Error('No Next request context.');
+    const promise = task();
+    lifetime.pending.push(promise);
+    void promise.catch(() => undefined);
+  },
+}));
 
 const SECRET = 'synthetic-cold-start-secret-at-least-32-characters';
 const MASTER = '#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="a",NAME="English",LANGUAGE="en"\n'
@@ -23,7 +24,9 @@ const BYTES = new Uint8Array(1024);
 BYTES[0] = BYTES[188] = BYTES[376] = 0x47;
 
 function request(query = 'stream=auto', signal?: AbortSignal) {
-  return new NextRequest(`https://app.example/api/vidnest?tmdbId=1283515&type=movie&${query}`, { signal });
+  return new NextRequest(`https://app.example/api/vidnest?tmdbId=1283515&type=movie&${query}`, {
+    signal, headers: { 'x-nf-client-connection-ip': '203.0.113.10' },
+  });
 }
 
 afterEach(async () => {
@@ -42,6 +45,8 @@ describe('VidNest cold-start stage timing', () => {
     vi.resetModules();
     lifetime.available = profile !== 'no-lifetime';
     vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('SITE_ID', '00000000-0000-4000-8000-000000000001');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://app.example');
     vi.stubEnv('VIDNEST_API_SECRET', SECRET);
     vi.stubEnv('TMDB_API_KEY', 'synthetic-public-metadata-key');
     const decoded = new TextEncoder().encode(JSON.stringify({ streams: profile === 'fallback'

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
-import { createVidnestResolver } from '@/features/vidnest/resolver';
+import { createVidnestResolver, type VidnestStream } from '@/features/vidnest/resolver';
 
 const SECRET = 'vidnest-resolver-test-secret-at-least-32-characters';
 const FIRST_KEY = 'vidnest-app-key-first-001';
@@ -30,7 +30,7 @@ function oversizedResponse(byteLength: number, headers?: HeadersInit) {
   return { cancel, response };
 }
 
-async function sealedReply(payload: unknown, nonce: string, appKey: string) {
+async function sealedReply(payload: unknown, nonce: string, appKey: string, plaintext = JSON.stringify(payload)) {
   const digest = await globalThis.crypto.subtle.digest(
     'SHA-256',
     new TextEncoder().encode(`${nonce}|${appKey}`),
@@ -46,7 +46,7 @@ async function sealedReply(payload: unknown, nonce: string, appKey: string) {
   const encrypted = new Uint8Array(await globalThis.crypto.subtle.encrypt(
     { name: 'AES-GCM', iv },
     key,
-    new TextEncoder().encode(JSON.stringify(payload)),
+    new TextEncoder().encode(plaintext),
   ));
   const sealed = new Uint8Array(iv.byteLength + encrypted.byteLength);
   sealed.set(iv);
@@ -236,6 +236,83 @@ describe('embedded VidNest resolver', () => {
     expect(result.streams.slice(0, 4).map((stream) => stream.type)).toEqual(['hls', null, null, null]);
   });
 
+  it('deduplicates before the cap while preserving provider order and distinct carried headers', async () => {
+    const first = { url: 'https://media.example.com/first.m3u8', type: 'hls' };
+    const second = { url: 'https://media.example.com/second.m3u8', type: 'hls' };
+    const third = { url: 'https://media.example.com/third.m3u8', type: 'hls' };
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        const streams = url.pathname.startsWith('/primary/')
+          ? [...Array.from({ length: 40 }, () => first), second]
+          : [...Array.from({ length: 32 }, (_value, index) => index % 2 ? second : first), third,
+            { ...first, headers: { Origin: 'https://player.example.com' } },
+            { ...first, headers: { origin: 'https://player.example.com/' } },
+            { ...first, headers: { Referer: 'https://player.example.com/watch' } }];
+        return json(await sealedReply({ streams }, url.searchParams.get('_n')!, FIRST_KEY));
+      }
+      return url.pathname.endsWith('.js') ? keyBundle(FIRST_KEY) : keyPage();
+    });
+    const onPrimary = vi.fn();
+    const result = await createVidnestResolver({ fetchImpl, servers: ['primary', 'secondary'] })({
+      tmdbId: '550', onPrimary,
+    });
+
+    expect(result.streams).toEqual([
+      { ...first, headers: {} }, { ...second, headers: {} }, { ...third, headers: {} },
+      { ...first, headers: { origin: 'https://player.example.com/' } },
+      { ...first, headers: { referer: 'https://player.example.com/watch' } },
+    ]);
+    expect(onPrimary).toHaveBeenCalledExactlyOnceWith(result.streams.slice(0, 2));
+  });
+
+  it('applies caller validation after URL sanitization but before deduplication and the output cap', async () => {
+    const sharedUrl = 'https://media.example.com/shared.m3u8';
+    const acceptStream = vi.fn((stream: VidnestStream) => stream.type === 'hls');
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        return json(await sealedReply({ streams: [
+          { url: 'https://127.0.0.1/private.m3u8', type: 'hls' },
+          ...Array.from({ length: 32 }, () => ({ url: sharedUrl, type: 'mp4' })),
+          ...Array.from({ length: 32 }, () => ({ url: sharedUrl, type: ' hls ' })),
+          ...Array.from({ length: 40 }, (_value, index) => ({
+            url: `https://media.example.com/tail-${index}.m3u8`, type: 'hls',
+          })),
+        ] }, url.searchParams.get('_n')!, FIRST_KEY));
+      }
+      return url.pathname.endsWith('.js') ? keyBundle(FIRST_KEY) : keyPage();
+    });
+    const onPrimary = vi.fn();
+    const result = await createVidnestResolver({ fetchImpl, servers: ['primary'] })({
+      tmdbId: '550', acceptStream, onPrimary,
+    });
+
+    expect(result.streams.map((stream) => stream.url)).toEqual([
+      sharedUrl, ...Array.from({ length: 31 }, (_value, index) => `https://media.example.com/tail-${index}.m3u8`),
+    ]);
+    expect(acceptStream).toHaveBeenCalled();
+    expect(acceptStream.mock.calls.every(([stream]) => !stream.url.includes('127.0.0.1'))).toBe(true);
+    expect(onPrimary).toHaveBeenCalledExactlyOnceWith(result.streams);
+  });
+
+  it('retains the raw 128-candidate inspection bound even when every earlier candidate is rejected', async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        return json(await sealedReply({ streams: [
+          ...Array.from({ length: 128 }, () => ({ url: 'https://127.0.0.1/private.m3u8' })),
+          { url: 'https://media.example.com/outside-bound.m3u8', type: 'hls' },
+        ] }, url.searchParams.get('_n')!, FIRST_KEY));
+      }
+      return url.pathname.endsWith('.js') ? keyBundle(FIRST_KEY) : keyPage();
+    });
+
+    await expect(createVidnestResolver({ fetchImpl, servers: ['primary'] })({ tmdbId: '550' }))
+      .resolves.toEqual({ provider: 'vidnest', streams: [] });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
   it('bounds providers that ignore abort and also honors caller aborts', async () => {
     vi.useFakeTimers();
     let timeoutSignal: AbortSignal | undefined;
@@ -324,6 +401,30 @@ describe('embedded VidNest resolver', () => {
     expect(pageSignals).toHaveLength(2);
     expect(pageSignals[0]!.aborted).toBe(true);
     expect(pageSignals[1]!.aborted).toBe(false);
+  });
+
+  it('reuses a completed key from another invocation when its own provider reply arrives later', async () => {
+    let releaseReply!: () => void;
+    const replyGate = new Promise<void>((resolve) => { releaseReply = resolve; });
+    let pageRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        if (url.pathname.endsWith('/551')) await replyGate;
+        return json(await sealedReply({ url: 'https://media.example.com/shared.m3u8' }, url.searchParams.get('_n')!, FIRST_KEY));
+      }
+      if (url.pathname.endsWith('.js')) return keyBundle(FIRST_KEY);
+      pageRequests++;
+      return keyPage();
+    });
+    const resolver = createVidnestResolver({ fetchImpl, servers: ['working'] });
+    const first = resolver({ tmdbId: '550' });
+    const second = resolver({ tmdbId: '551' });
+    await expect(first).resolves.toMatchObject({ streams: [{ url: 'https://media.example.com/shared.m3u8' }] });
+    releaseReply();
+
+    await expect(second).resolves.toMatchObject({ streams: [{ url: 'https://media.example.com/shared.m3u8' }] });
+    expect(pageRequests).toBe(1);
   });
 
   it('invokes the global fetch implementation with its required receiver', async () => {
@@ -575,14 +676,169 @@ describe('embedded VidNest resolver', () => {
     });
     expect(keyDiscoveries).toBe(2);
   });
+
+  it.each([true, false])('shares one settled refresh across concurrent and late provider failures (found=%s)', async (found) => {
+    let phase: 'warm' | 'refresh' | 'recovered' = 'warm';
+    let releaseRefresh!: () => void;
+    let releaseLate!: () => void;
+    const refreshGate = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+    const lateGate = new Promise<void>((resolve) => { releaseLate = resolve; });
+    let pageRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        const server = url.pathname.split('/')[1];
+        if (phase === 'warm' && server !== 'primary') return new Response(null, { status: 503 });
+        if (phase === 'refresh' && server === 'late') await lateGate;
+        const key = phase === 'warm' ? FIRST_KEY
+          : phase === 'refresh' && found && server === 'late' ? 'vidnest-app-key-unpublished-003' : SECOND_KEY;
+        return json(await sealedReply({ url: `https://media.example.com/${server}.m3u8` }, url.searchParams.get('_n')!, key));
+      }
+      if (url.pathname.startsWith('/movie/')) {
+        pageRequests++;
+        if (phase === 'refresh') await refreshGate;
+        return keyPage();
+      }
+      return keyBundle(phase === 'warm' || (phase === 'refresh' && !found) ? FIRST_KEY : SECOND_KEY);
+    });
+    const resolver = createVidnestResolver({ fetchImpl, servers: ['primary', 'concurrent', 'late'] });
+    await expect(resolver({ tmdbId: '550' })).resolves.toMatchObject({ streams: [{ url: 'https://media.example.com/primary.m3u8' }] });
+    expect(pageRequests).toBe(1);
+
+    const decrypt = globalThis.crypto.subtle.decrypt.bind(globalThis.crypto.subtle);
+    let failures = 0;
+    vi.spyOn(globalThis.crypto.subtle, 'decrypt').mockImplementation(async (...args) => {
+      try {
+        return await decrypt(...args);
+      } catch (error) {
+        if (++failures === 2) releaseRefresh();
+        throw error;
+      }
+    });
+    phase = 'refresh';
+    const result = await resolver({ tmdbId: '551', onPrimary: () => releaseLate() });
+    expect(failures).toBeGreaterThanOrEqual(2);
+    expect(result.streams.map((stream) => stream.url)).toEqual(found ? [
+      'https://media.example.com/primary.m3u8', 'https://media.example.com/concurrent.m3u8',
+    ] : []);
+    // A failed refresh can scan the fallback page, but cannot start another round for the late provider.
+    expect(pageRequests).toBe(found ? 2 : 3);
+
+    phase = 'recovered';
+    const recovered = await resolver({ tmdbId: '552' });
+    expect(recovered.streams).toHaveLength(3);
+    expect(pageRequests).toBe(found ? 2 : 4);
+    expect(fetchImpl.mock.calls.filter(([input]) => new URL(String(input)).hostname === 'new.vidnest.fun')).toHaveLength(9);
+  });
+
+  it('permits one shared refresh after a cold discovery when a later provider rotates its key', async () => {
+    let releaseTail!: () => void;
+    const tail = new Promise<void>((resolve) => { releaseTail = resolve; });
+    let activeKey = FIRST_KEY;
+    let pageRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        const server = url.pathname.split('/')[1];
+        if (server !== 'primary') await tail;
+        return json(await sealedReply({ url: `https://media.example.com/${server}.m3u8` }, url.searchParams.get('_n')!, activeKey));
+      }
+      if (url.pathname.endsWith('.js')) return keyBundle(activeKey);
+      pageRequests++;
+      return keyPage();
+    });
+    const result = await createVidnestResolver({ fetchImpl, servers: ['primary', 'secondary', 'third'] })({
+      tmdbId: '550', onPrimary: () => { activeKey = SECOND_KEY; releaseTail(); },
+    });
+
+    expect(result.streams.map((stream) => stream.url)).toEqual([
+      'https://media.example.com/primary.m3u8', 'https://media.example.com/secondary.m3u8', 'https://media.example.com/third.m3u8',
+    ]);
+    expect(pageRequests).toBe(2);
+  });
+
+  it('does not rediscover or evict an authenticated key when decrypted JSON is malformed', async () => {
+    let malformed = true;
+    let pageRequests = 0;
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = new URL(String(input));
+      if (url.hostname === 'new.vidnest.fun') {
+        return json(await sealedReply({ url: 'https://media.example.com/recovered.m3u8' }, url.searchParams.get('_n')!,
+          FIRST_KEY, malformed ? '{invalid-json' : undefined));
+      }
+      if (url.pathname.endsWith('.js')) return keyBundle(FIRST_KEY);
+      pageRequests++;
+      return keyPage();
+    });
+    const resolver = createVidnestResolver({ fetchImpl, servers: ['primary'] });
+
+    await expect(resolver({ tmdbId: '550' })).resolves.toEqual({ provider: 'vidnest', streams: [] });
+    expect(pageRequests).toBe(1);
+    malformed = false;
+    await expect(resolver({ tmdbId: '551' })).resolves.toMatchObject({ streams: [{ url: 'https://media.example.com/recovered.m3u8' }] });
+    expect(pageRequests).toBe(1);
+  });
 });
 
 describe('VidNest route resolver selection', () => {
+  it.each(['unsupported', 'expired', 'duplicate', 'cross-provider-unsupported', 'cross-provider-expired', 'cross-provider-duplicate'] as const)(
+    'retains late usable HLS after early %s candidates using the route validation contract',
+    async (profile) => {
+      vi.resetModules();
+      vi.stubEnv('NODE_ENV', 'production');
+      vi.stubEnv('SITE_ID', '00000000-0000-4000-8000-000000000001');
+      vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://app.example');
+      vi.stubEnv('VIDNEST_API_SECRET', SECRET);
+      vi.stubEnv('TMDB_API_KEY', '');
+      const now = Date.UTC(2026, 10, 6);
+      vi.spyOn(Date, 'now').mockReturnValue(now);
+      const first = { url: 'https://media.example.com/first.m3u8', type: 'hls' };
+      const late = { url: 'https://media.example.com/late.m3u8', type: 'hls' };
+      const early = Array.from({ length: 32 }, (_value, index) => profile.includes('unsupported')
+        ? { url: `https://media.example.com/unsupported-${index}.mp4`, type: 'mp4' }
+        : profile.includes('expired') ? { url: `https://media.example.com/expired-${index}.m3u8?exp=${now / 1000 - 1}`, type: 'hls' }
+          : first);
+      const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+        const url = new URL(String(input));
+        if (url.hostname === 'new.vidnest.fun') {
+          const provider = url.pathname.split('/')[1];
+          let streams: unknown[];
+          if (profile.startsWith('cross-provider-')) {
+            if (provider === 'nextgencloudfabric') streams = profile.includes('duplicate') ? [first] : early;
+            else if (provider === 'hollymoviehd') streams = profile.includes('duplicate') ? [...early, late] : [late];
+            else return new Response(null, { status: 503 });
+          } else {
+            if (provider !== 'nextgencloudfabric') return new Response(null, { status: 503 });
+            streams = [...early, late];
+          }
+          return json(await sealedReply({ streams }, url.searchParams.get('_n')!, FIRST_KEY));
+        }
+        if (url.hostname === 'vidnest.fun') return url.pathname.endsWith('.js') ? keyBundle(FIRST_KEY) : keyPage();
+        if (url.hostname === 'media.example.com') return new Response('#EXTM3U\n#EXTINF:6,\nsegment.ts\n');
+        throw new Error('Unexpected offline fixture request');
+      });
+      vi.stubGlobal('fetch', fetchMock);
+      const { GET } = await import('@/app/api/vidnest/route');
+      const index = profile.includes('duplicate') ? 1 : 0;
+      const response = await GET(new NextRequest(`https://app.example/api/vidnest?tmdbId=550&type=movie&stream=${index}`, {
+        headers: { 'x-nf-client-connection-ip': '203.0.113.10' },
+      }));
+
+      expect(response.status).toBe(200);
+      expect(await response.text()).toContain('/api/vidnest?token=');
+      const mediaRequests = fetchMock.mock.calls.filter(([input]) => new URL(String(input)).hostname === 'media.example.com');
+      expect(mediaRequests.map(([input]) => String(input))).toEqual([late.url]);
+      expect(fetchMock.mock.calls.filter(([input]) => new URL(String(input)).hostname === 'new.vidnest.fun')).toHaveLength(6);
+    },
+  );
+
   it.each(['', 'https://deleted-api.example.com', 'https://localhost'])(
     'uses the embedded production resolver even if a retired URL was baked into the build: %s',
     async (retiredUrl) => {
     vi.resetModules();
     vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('SITE_ID', '00000000-0000-4000-8000-000000000001');
+    vi.stubEnv('NEXT_PUBLIC_APP_URL', 'https://app.example');
     vi.stubEnv('VIDNEST_API_SECRET', SECRET);
     vi.stubEnv('VIDNEST_API_URL', retiredUrl);
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -603,11 +859,15 @@ describe('VidNest route resolver selection', () => {
     vi.stubGlobal('fetch', fetchMock);
     const { GET } = await import('@/app/api/vidnest/route');
 
-    const invalid = await GET(new NextRequest('https://app.example/api/vidnest?tmdbId=550&type=tv'));
+    const invalid = await GET(new NextRequest('https://app.example/api/vidnest?tmdbId=550&type=tv', {
+      headers: { 'x-nf-client-connection-ip': '203.0.113.10' },
+    }));
     expect(invalid.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
 
-    const response = await GET(new NextRequest('https://app.example/api/vidnest?tmdbId=550&type=movie&stream=0'));
+    const response = await GET(new NextRequest('https://app.example/api/vidnest?tmdbId=550&type=movie&stream=0', {
+      headers: { 'x-nf-client-connection-ip': '203.0.113.10' },
+    }));
     expect(response.status).toBe(200);
     expect(await response.text()).toContain('/api/vidnest?token=');
     expect(fetchMock.mock.calls.some(([input]) => new URL(String(input)).pathname === '/api/resolve')).toBe(false);

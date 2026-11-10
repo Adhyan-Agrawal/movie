@@ -7,6 +7,7 @@ import {
   normalizeMovie,
   normalizeTv,
   slugify,
+  validYear,
   type NormalizedCastMember,
   type NormalizedEpisode,
   type NormalizedTitle,
@@ -597,6 +598,90 @@ export async function syncCatalogFromTmdb(filters: SyncFilters): Promise<SyncRes
     skipped: 0,
     failed: pairs.length - titles.length,
   };
+}
+
+/**
+ * Import one admin request only when a complete search page identifies exactly
+ * one matching title. Multi-page searches stay unresolved rather than guessing
+ * from popularity. The caller must hold catalog.create; writes use its RLS client.
+ */
+export async function importTitleForRequest(
+  query: string,
+  mediaType: 'movie' | 'tv',
+  year: number | null,
+): Promise<string | null> {
+  if (typeof query !== 'string' || !query.trim() || (mediaType !== 'movie' && mediaType !== 'tv')) return null;
+  if (year !== null && (!Number.isInteger(year) || year < 1878 || year > 2100)) return null;
+
+  const normalizeName = (value: unknown) =>
+    typeof value === 'string' ? value.normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase() : '';
+  const wantedName = normalizeName(query);
+  const matchesName = (name: unknown, originalName: unknown) =>
+    normalizeName(name) === wantedName || normalizeName(originalName) === wantedName;
+  const search = (await tmdbFetch(`/search/${mediaType}`, {
+    query: query.trim(),
+    include_adult: 'false',
+    language: 'en-US',
+    page: '1',
+    ...(year !== null ? { [mediaType === 'movie' ? 'year' : 'first_air_date_year']: String(year) } : {}),
+  })) as {
+    page?: number;
+    total_pages?: number;
+    total_results?: number;
+    results?: {
+      id: number;
+      media_type?: string;
+      title?: string;
+      original_title?: string;
+      name?: string;
+      original_name?: string;
+      release_date?: string;
+      first_air_date?: string;
+    }[];
+  } | null;
+
+  // Missing pagination or rows are incomplete evidence, not a unique match.
+  if (!search || search.page !== 1 || search.total_pages !== 1 || !Array.isArray(search.results)
+    || search.total_results !== search.results.length) return null;
+
+  const matchingIds = new Set<number>();
+  for (const item of search.results) {
+    if (!item || !Number.isSafeInteger(item.id) || item.id <= 0
+      || (item.media_type !== undefined && item.media_type !== mediaType)) return null;
+    const name = mediaType === 'movie' ? item.title : item.name;
+    const originalName = mediaType === 'movie' ? item.original_title : item.original_name;
+    if (typeof name !== 'string' || !name.trim()) return null;
+    if (!matchesName(name, originalName)) continue;
+    if (year !== null) {
+      const date = mediaType === 'movie' ? item.release_date : item.first_air_date;
+      const candidateYear = typeof date === 'string' ? validYear(date) : null;
+      if (candidateYear === null) return null;
+      if (candidateYear !== year) continue;
+    }
+    matchingIds.add(item.id);
+  }
+  if (matchingIds.size !== 1) return null;
+  const [tmdbId] = matchingIds;
+  const title = await fetchTitle(mediaType, tmdbId!);
+  if (!title || title.tmdbId !== tmdbId || title.type !== mediaType
+    || !matchesName(title.name, title.originalName)
+    || (year !== null && title.releaseYear !== year)) return null;
+
+  const db = await getSupabaseServerClient();
+  const { data: existing, error: existingError } = await db.from('titles')
+    .select('id, type, tmdb_id').eq('slug', title.slug).maybeSingle();
+  if (existingError) throw new Error('Could not verify the existing catalog identity.');
+  // The shared importer upserts by slug; never overwrite another media identity.
+  if (existing && (existing.type !== mediaType || existing.tmdb_id !== tmdbId)) return null;
+
+  await upsertTitlesWith(db, [title], { maxSeasonFetches: 30 });
+  const { data: stored, error: storedError } = await db.from('titles')
+    .select('id, type, tmdb_id, slug, release_year')
+    .eq('type', mediaType).eq('tmdb_id', tmdbId!).eq('slug', title.slug).maybeSingle();
+  if (storedError) throw new Error('Could not confirm the imported catalog title.');
+  if (!stored || typeof stored.id !== 'string' || !stored.id || stored.type !== mediaType
+    || stored.tmdb_id !== tmdbId || stored.slug !== title.slug || stored.release_year !== title.releaseYear) return null;
+  return stored.id;
 }
 
 /**

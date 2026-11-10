@@ -1,29 +1,22 @@
 import type { Metadata } from 'next';
-import Link from 'next/link';
-import { buttonClasses } from '@/components/ui/Button';
 import { EmptyState } from '@/components/ui/EmptyState';
-import { getSignedInAccountId } from '@/features/account/queries';
+import { UnauthorizedState } from '@/features/account/UnauthorizedState';
+import { getRenderAccountPreferences } from '@/features/account/preference-queries';
 import { SettingsForm } from '@/features/account/SettingsForm';
 
 export const metadata: Metadata = { title: 'Settings' };
 
 export default async function SettingsPage() {
-  // Namespace the browser-local preference store per signed-in account (the
-  // layout gates this route to signed-in users, but stay defensive when the
-  // read fails so we never save under an empty key).
-  const accountId = await getSignedInAccountId();
-
-  if (!accountId) {
+  const preferences = await getRenderAccountPreferences();
+  if (!preferences.ok) {
+    if (preferences.reason === 'unauthenticated' || preferences.reason === 'unverified') {
+      return <UnauthorizedState next="/account/settings" unverified={preferences.reason === 'unverified'} />;
+    }
     return (
       <EmptyState
         icon="🔒"
-        title="Sign in to manage preferences"
-        description="Playback and display preferences are stored per account. Sign in to set yours."
-        action={
-          <Link href="/signin" className={buttonClasses({ variant: 'primary' })}>
-            Sign in
-          </Link>
-        }
+        title="Preferences unavailable"
+        description={preferences.message}
       />
     );
   }
@@ -35,11 +28,11 @@ export default async function SettingsPage() {
           Playback and preferences
         </h2>
         <p className="text-sm text-content-muted">
-          Personalize language, playback, accessibility, and profile-lock preferences. Choices are saved to this
-          browser for this account.
+          Save playback and accessibility preferences to your account. Profile maturity controls are managed
+          separately and are not changed by these preferences.
         </p>
       </div>
-      <SettingsForm accountId={accountId} />
+      <SettingsForm accountId={preferences.snapshot.accountId} initialPreferences={preferences.snapshot} />
     </section>
   );
 }

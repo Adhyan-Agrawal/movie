@@ -2,6 +2,7 @@
 
 import { getSupabaseServerClient } from '@/lib/supabase/server';
 import { COMPLETION_THRESHOLD, progressFraction } from './progress';
+import { resolveActiveProfileId } from '@/features/account/active-profile';
 
 /**
  * Watch-progress recording (Spec Sections 4, 8, 14). The native player emits
@@ -44,10 +45,8 @@ export async function reportProgressAction(input: ReportProgressInput): Promise<
     const { data: user, error: authError } = await db.auth.getUser();
     if (authError || !user.user) return { ok: false };
 
-    const { data: profiles, error: profileError } = await db.from('profiles').select('id')
-      .eq('account_id', user.user.id).order('created_at', { ascending: true }).limit(1);
-    const profileId = profiles?.[0]?.id;
-    if (profileError || !profileId) return { ok: false };
+    const profileId = await resolveActiveProfileId(db, user.user.id);
+    if (!profileId) return { ok: false };
     const viewerKey = `account:${user.user.id}:profile:${profileId}`;
     if (input.viewerKey !== undefined && input.viewerKey !== viewerKey) return { ok: false };
 

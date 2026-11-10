@@ -134,6 +134,17 @@ describe('Watch Party web UI safety', () => {
     expect(markup).not.toContain('Chat is ready');
   });
 
+  it.each(['reconnecting', 'error', 'leaving'] as const)('labels %s room state as stale and disables room controls', (phase) => {
+    const session = controller({ syncStatus: 'ready', state: { ...controller().state, phase,
+      self: { participantId: HOST_ID, role: 'host' } } });
+    const markup = renderToStaticMarkup(createElement(WatchPartyPanel, { open: true, onClose: vi.fn(), session }));
+    expect(markup).toContain('Last known: 2 connected');
+    expect(markup).toContain('Playback sync and chat are paused until the room reconnects.');
+    expect(markup).not.toContain('Native playback synchronization is available');
+    expect(markup).toMatch(/<button[^>]*disabled=""[^>]*>Make host<\/button>/);
+    if (phase === 'error') expect(markup).toContain('Retry connection');
+  });
+
   it('disables the initial party/report actions and acknowledges reports only after confirmed success', () => {
     const common = { backHref: '/title/movie/example', backLabel: 'Back', sources: [], selectedSourceId: null,
       onSelectSource: vi.fn(), onReportIssue: vi.fn(), watchParty: { available: false, active: false, participantCount: 0, onOpen: vi.fn() } };

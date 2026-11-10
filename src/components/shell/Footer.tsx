@@ -26,8 +26,13 @@ export function Footer() {
             <h2 className="text-xs font-semibold uppercase tracking-wide text-content-subtle">Account</h2>
             <Link href="/account" prefetch={false} className="site-footer-link">Overview</Link>
             <Link href="/account/watchlist" prefetch={false} className="site-footer-link">My watchlist</Link>
-            <Link href="/party" prefetch={false} className="site-footer-link">Watch Party</Link>
-            <Link href="/account/requests" prefetch={false} className="site-footer-link">Request a title</Link>
+            <div>
+              <Link href="/browse" prefetch={false} className="site-footer-link" aria-describedby="footer-watch-party-help">Find a title for Watch Party</Link>
+              <p id="footer-watch-party-help" className="mt-1 max-w-xs text-xs leading-relaxed text-content-subtle">
+                Open a title and use Watch Party in the player, where available.
+              </p>
+            </div>
+            <Link href="/request" prefetch={false} className="site-footer-link">Request a title</Link>
             <Link href="/account/settings" prefetch={false} className="site-footer-link">Settings</Link>
           </nav>
           <nav aria-label="Legal" className="flex flex-col gap-2">

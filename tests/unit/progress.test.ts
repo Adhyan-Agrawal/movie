@@ -10,9 +10,10 @@ import { reportProgressAction } from '@/features/playback/progress-actions';
 import { getSupabaseServerClient, type SupabaseServerClient } from '@/lib/supabase/server';
 
 vi.mock('server-only', () => ({}));
+vi.mock('next/headers', () => ({ cookies: async () => ({ get: () => undefined }) }));
 vi.mock('@/lib/supabase/server', () => ({ getSupabaseServerClient: vi.fn() }));
 vi.mock('@/features/watchlist/queries', () => ({ getDefaultProfileId: vi.fn() }));
-vi.mock('@/features/catalog/queries', () => ({ getTitleById: vi.fn() }));
+vi.mock('@/features/catalog/card-queries', () => ({ getTitleCardsByIds: vi.fn() }));
 
 // Fluent DB doubles only. No request reaches Supabase or mutates a database.
 function queryResult(data: unknown, error: { message: string } | null = null) {

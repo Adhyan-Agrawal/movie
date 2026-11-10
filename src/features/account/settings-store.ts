@@ -1,69 +1,47 @@
-/**
- * Signed-in viewer preference store (Spec Section 4).
- *
- * Storage decision — browser-local, keyed per account. There is no server-side
- * home for account preferences yet: `accounts` and `profiles` have no
- * `preferences` jsonb column (0001_init.sql), no later migration adds one, and
- * running DDL is out of scope. Reusing `site_settings` would be wrong (that is
- * the admin-global key/value store), and the account-scoped jsonb tables that
- * do exist are semantically owned (`notifications.data`, playback/watch rows).
- * So preferences persist under a per-account key in THIS browser, mirroring the
- * app's other client-only stores (guest history, consent, search recents).
- *
- * The UI is explicit about the trade-off: choices survive reload on this device
- * for this account but are not synced across devices and are not yet applied to
- * behavior. When a real account-scoped jsonb column or settings table lands,
- * swap the read/write below for 'use server' actions without changing the form.
- *
- * Client-only: safe to import from any client component; never from server code
- * (reads `localStorage`, so callers hydrate after mount).
- */
+import { accountPreferenceOwnerSchema, normalizeAccountSettings } from './preference-types';
+import type { AccountSettings } from './types';
 
-import {
-  DEFAULT_SETTINGS,
-  LANGUAGE_OPTIONS,
-  MATURITY_LEVELS,
-  toMaturityLevel,
-  type AccountSettings,
-} from './types';
-
+/** Legacy per-account browser choices, now a cache, never the account authority. */
 const STORAGE_PREFIX = 'lumora:settings:v1:';
+export const ACCOUNT_SETTINGS_EVENT = 'lumora:account-settings-updated';
+let acknowledgement: { accountId: string; settings: AccountSettings; version: number } | null = null;
 
-/** Per-account localStorage key so two accounts on one browser never collide. */
+export function getAccountSettingsAcknowledgement(accountId: string) {
+  return acknowledgement?.accountId === accountId ? acknowledgement : null;
+}
+
 export function settingsStorageKey(accountId: string): string {
   return `${STORAGE_PREFIX}${accountId}`;
 }
 
-/** Merge whatever is stored over the defaults, dropping unknown/malformed values. */
-export function readAccountSettings(accountId: string): AccountSettings {
-  if (typeof window === 'undefined') return DEFAULT_SETTINGS;
+/** Only explicit save promotes legacy browser choices to verified auth metadata. */
+export function readAccountSettings(accountId: string): AccountSettings | null {
+  if (typeof window === 'undefined' || !accountPreferenceOwnerSchema.safeParse(accountId).success) return null;
   try {
     const raw = window.localStorage.getItem(settingsStorageKey(accountId));
-    if (!raw) return DEFAULT_SETTINGS;
-    const parsed = JSON.parse(raw) as Partial<AccountSettings>;
-    return {
-      language: LANGUAGE_OPTIONS.some((o) => o.value === parsed.language) ? parsed.language! : DEFAULT_SETTINGS.language,
-      autoplayNext: typeof parsed.autoplayNext === 'boolean' ? parsed.autoplayNext : DEFAULT_SETTINGS.autoplayNext,
-      autoplayPreviews:
-        typeof parsed.autoplayPreviews === 'boolean' ? parsed.autoplayPreviews : DEFAULT_SETTINGS.autoplayPreviews,
-      captions: typeof parsed.captions === 'boolean' ? parsed.captions : DEFAULT_SETTINGS.captions,
-      reducedMotion:
-        typeof parsed.reducedMotion === 'boolean' ? parsed.reducedMotion : DEFAULT_SETTINGS.reducedMotion,
-      maturity: MATURITY_LEVELS.some((m) => m.value === parsed.maturity)
-        ? toMaturityLevel(parsed.maturity as string)
-        : DEFAULT_SETTINGS.maturity,
-    };
+    if (!raw) return null;
+    const value: unknown = JSON.parse(raw);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return normalizeAccountSettings(value);
   } catch {
-    // Corrupt/unreadable entry — treat as unset rather than crashing the form.
-    return DEFAULT_SETTINGS;
+    return null;
   }
 }
 
-/** Persist the account's preferences to this browser's localStorage. */
-export function writeAccountSettings(accountId: string, settings: AccountSettings): void {
+/** Cache only acknowledged account saves; failure must not imply persistence. */
+export function writeAccountSettings(accountId: string, settings: AccountSettings): boolean {
+  if (typeof window === 'undefined' || !accountPreferenceOwnerSchema.safeParse(accountId).success) return false;
+  const normalized = normalizeAccountSettings(settings);
+  acknowledgement = { accountId, settings: normalized, version: (acknowledgement?.version ?? 0) + 1 };
+  let persisted = false;
   try {
-    window.localStorage.setItem(settingsStorageKey(accountId), JSON.stringify(settings));
+    const key = settingsStorageKey(accountId);
+    const serialized = JSON.stringify(normalized);
+    window.localStorage.setItem(key, serialized);
+    persisted = window.localStorage.getItem(key) === serialized;
   } catch {
-    // Private mode / quota — preferences are best-effort by design.
+    // A confirmed server save still applies in this tab when local caching is blocked.
   }
+  try { window.dispatchEvent?.(new Event(ACCOUNT_SETTINGS_EVENT)); } catch { /* The server save is already acknowledged. */ }
+  return persisted;
 }

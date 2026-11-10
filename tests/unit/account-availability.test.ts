@@ -5,13 +5,17 @@ import { renderToStaticMarkup } from 'react-dom/server';
 const mocks = vi.hoisted(() => ({
   features: { supabaseConfigured: false },
   client: vi.fn(), profile: vi.fn(), signin: vi.fn(), signup: vi.fn(),
+  verified: vi.fn(), redirect: vi.fn(),
 }));
 vi.mock('@/lib/env', () => ({ features: mocks.features }));
 vi.mock('@/lib/supabase/server', () => ({ getSupabaseServerClient: mocks.client }));
+vi.mock('@/features/auth/verified-account', () => ({ getVerifiedAccount: mocks.verified }));
+vi.mock('@/features/auth/render-account', () => ({ getRenderAccount: mocks.verified }));
+vi.mock('@/features/auth/SignOutButton', () => ({ SignOutButton: () => 'SIGNOUT_BUTTON' }));
 vi.mock('@/features/watchlist/queries', () => ({ getDefaultProfileId: mocks.profile }));
 vi.mock('@/features/auth/SignInForm', () => ({ SignInForm: () => { mocks.signin(); return 'SIGNIN_FORM'; } }));
 vi.mock('@/features/auth/SignUpForm', () => ({ SignUpForm: () => { mocks.signup(); return 'SIGNUP_FORM'; } }));
-vi.mock('next/navigation', () => ({ usePathname: () => '/title/movie/fixture' }));
+vi.mock('next/navigation', () => ({ usePathname: () => '/title/movie/fixture', redirect: mocks.redirect }));
 vi.mock('next/link', async () => {
   const React = await import('react');
   return { default: (props: any) => React.createElement('a', { href: props.href, className: props.className, 'aria-label': props['aria-label'] }, props.children) };
@@ -23,6 +27,8 @@ import { submitTitleRequestAction } from '@/features/catalog/requests-actions';
 import { reportPlaybackIssueAction } from '@/features/playback/report-actions';
 import SignInPage from '@/app/signin/page';
 import SignUpPage from '@/app/signup/page';
+import AccountLayout from '@/app/account/layout';
+import { TopBar } from '@/components/shell/TopBar';
 import { WatchlistButton } from '@/features/catalog/components/WatchlistButton';
 import { RatingControl } from '@/features/catalog/components/RatingControl';
 import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
@@ -36,6 +42,8 @@ function requestForm() {
 beforeEach(() => {
   vi.clearAllMocks(); mocks.features.supabaseConfigured = false;
   mocks.client.mockRejectedValue(new Error('https://private.example/?secret=do-not-expose'));
+  mocks.verified.mockImplementation(async () => ({ status: mocks.features.supabaseConfigured ? 'unauthenticated' : 'unavailable' }));
+  mocks.redirect.mockImplementation((path: string) => { throw new Error(`NEXT_REDIRECT:${path}`); });
 });
 
 describe('unavailable account service release gates', () => {
@@ -69,7 +77,7 @@ describe('unavailable account service release gates', () => {
 
   it('renders unavailable auth pages rather than active forms or fabricated confirmation', async () => {
     const signin = renderToStaticMarkup(await SignInPage({ searchParams: Promise.resolve({ confirmed: '1', email: 'fixture@example.test' }) }));
-    const signup = renderToStaticMarkup(SignUpPage());
+    const signup = renderToStaticMarkup(await SignUpPage({ searchParams: Promise.resolve({}) }));
     for (const html of [signin, signup]) {
       expect(html).toContain('Accounts are unavailable');
       expect(html).toContain(ACCOUNT_SERVICES_UNAVAILABLE);
@@ -82,7 +90,53 @@ describe('unavailable account service release gates', () => {
   it('preserves configured form rendering', async () => {
     mocks.features.supabaseConfigured = true;
     expect(renderToStaticMarkup(await SignInPage({ searchParams: Promise.resolve({}) }))).toContain('SIGNIN_FORM');
-    expect(renderToStaticMarkup(SignUpPage())).toContain('SIGNUP_FORM');
+    expect(renderToStaticMarkup(await SignUpPage({ searchParams: Promise.resolve({}) }))).toContain('SIGNUP_FORM');
+  });
+
+  it('redirects verified accounts from auth pages without accepting auth-loop or external destinations', async () => {
+    mocks.features.supabaseConfigured = true;
+    mocks.verified.mockResolvedValue({ status: 'authenticated', user: { id: 'viewer', email: 'viewer@example.test' } });
+    await expect(SignInPage({ searchParams: Promise.resolve({ next: '/account/history' }) })).rejects.toThrow('NEXT_REDIRECT:/account/history');
+    await expect(SignUpPage({ searchParams: Promise.resolve({ next: '/a/..//evil.example' }) })).rejects.toThrow('NEXT_REDIRECT:/account');
+    await expect(SignInPage({ searchParams: Promise.resolve({ next: '/signin' }) })).rejects.toThrow('NEXT_REDIRECT:/account');
+  });
+
+  it('does not hide a failed logout by redirecting the still-active account away from its error', async () => {
+    mocks.features.supabaseConfigured = true;
+    mocks.verified.mockResolvedValue({ status: 'authenticated', user: { id: 'viewer', email: 'viewer@example.test' } });
+    expect(renderToStaticMarkup(await SignInPage({ searchParams: Promise.resolve({ auth: 'unavailable' }) }))).toContain('SIGNIN_FORM');
+    expect(mocks.redirect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['unavailable', 'Accounts are unavailable'],
+    ['unverified', 'Confirm your email'],
+    ['unauthenticated', 'Sign in to continue'],
+  ])('keeps the %s account state distinct and does not render protected children', async (status, message) => {
+    mocks.features.supabaseConfigured = true;
+    mocks.verified.mockResolvedValue({ status });
+    const html = renderToStaticMarkup(await AccountLayout({ children: 'PRIVATE_ACCOUNT_CHILD' }));
+    expect(html).toContain(message);
+    expect(html).not.toContain('PRIVATE_ACCOUNT_CHILD');
+    expect(html).not.toContain('Signed in as');
+  });
+
+  it('renders only a verified account identity and its sign-out control', async () => {
+    mocks.features.supabaseConfigured = true;
+    mocks.verified.mockResolvedValue({ status: 'authenticated', user: { id: 'viewer', email: 'viewer@example.test' } });
+    const html = renderToStaticMarkup(await AccountLayout({ children: 'PRIVATE_ACCOUNT_CHILD' }));
+    expect(html).toContain('Signed in as viewer@example.test');
+    expect(html).toContain('SIGNOUT_BUTTON');
+    expect(html).toContain('PRIVATE_ACCOUNT_CHILD');
+  });
+
+  it('distinguishes signed-in, signed-out, and uncertain session states in the header', () => {
+    expect(renderToStaticMarkup(createElement(TopBar, { signedIn: true }))).not.toContain('href="/signin"');
+    expect(renderToStaticMarkup(createElement(TopBar, { signedIn: false }))).toContain('href="/signin"');
+    const unavailable = renderToStaticMarkup(createElement(TopBar, { sessionUnavailable: true }));
+    expect(unavailable).toContain('Account status unavailable');
+    expect(unavailable).not.toContain('href="/signin"');
+    expect(unavailable).toContain('href="/account"');
   });
 
   it('disables unavailable watchlist and rating controls without losing the public summary', () => {

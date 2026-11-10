@@ -89,7 +89,8 @@ function firstList(...values: Array<string[] | undefined>): string[] {
  *             supply `preferredId`/`startParam` when the row's `config` jsonb
  *             does not mention them. This keeps a row that was auto-created by
  *             a simple enable-toggle from silently dropping the built-in's
- *             documented resume/id preference.
+ *             documented resume/id preference. Empty strings explicitly clear
+ *             those options instead of restoring the built-in defaults.
  * @returns A complete `ProviderConfig`, or `null` when the row cannot produce a
  *          functional provider (no usable base URL, or an empty host allowlist
  *          with no built-in to fall back to). Callers skip nulls and log.
@@ -106,13 +107,16 @@ export function dbProviderRowToConfig(row: ProviderDbRow, base?: ProviderConfig)
 
   const cfg = configObject(row.config);
   const preferredIdRaw = cfg.preferred_id;
-  const preferredId = isPreferredIdValue(preferredIdRaw)
-    ? preferredIdRaw
-    : base && isPreferredIdValue(base.preferredId)
-      ? base.preferredId
-      : undefined;
-  const startParam =
-    firstString(typeof cfg.start_param === 'string' ? cfg.start_param : undefined, base?.startParam) ?? undefined;
+  const preferredId = preferredIdRaw === ''
+    ? undefined
+    : isPreferredIdValue(preferredIdRaw)
+      ? preferredIdRaw
+      : base && isPreferredIdValue(base.preferredId)
+        ? base.preferredId
+        : undefined;
+  const startParam = typeof cfg.start_param === 'string'
+    ? firstString(cfg.start_param)
+    : firstString(base?.startParam);
 
   const name = row.name.trim();
   const moviePath = firstString(row.movie_path_template, base?.moviePathTemplate) ?? '';

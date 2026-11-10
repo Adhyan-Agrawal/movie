@@ -286,8 +286,17 @@ export async function listProviderRows(): Promise<AdminProviderRow[]> {
 // ---------------------------------------------------------------------------
 
 export async function listSiteSettings(): Promise<AdminSiteSettingRow[]> {
+  const { GENERIC_SITE_SETTING_KEYS } = await import('./setting-keys');
+  if (GENERIC_SITE_SETTING_KEYS.length === 0) return [];
+
   const db = await getSupabaseServerClient();
-  const { data, error } = await db.from('site_settings').select('*').order('key');
+  // Filter in the database: private/dedicated values must never reach this DTO.
+  const { data, error } = await db
+    .from('site_settings')
+    .select('key, value, is_public, description, updated_by, updated_at')
+    .in('key', GENERIC_SITE_SETTING_KEYS)
+    .eq('is_public', true)
+    .order('key');
   if (error) throw new Error(`listSiteSettings failed: ${error.message}`);
   return data ?? [];
 }

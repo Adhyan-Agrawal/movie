@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+vi.mock('server-only', () => ({}));
+
 import { GET, POST } from '@/app/api/watch-party/route';
 import { WATCH_PARTY_SUBPROTOCOL } from '@watch-party/protocol';
+import mediaVectors from '../fixtures/media-identities.json';
 import {
   generateWatchPartyId,
   signWatchPartyToken,
@@ -29,6 +33,48 @@ function ticketRequest(body: unknown, headers: Record<string, string> = {}): Req
 afterEach(() => vi.unstubAllEnvs());
 
 describe('Watch Party ticket API', () => {
+  it('issues guest create/join/resume tickets without Supabase configuration or network access', async () => {
+    configure();
+    vi.stubEnv('NEXT_PUBLIC_SUPABASE_URL', '');
+    vi.stubEnv('NEXT_PUBLIC_SUPABASE_ANON_KEY', '');
+    vi.stubEnv('SUPABASE_SERVICE_ROLE_KEY', '');
+    const network = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Network is not allowed in this test'));
+    try {
+      expect((await GET()).status).toBe(200);
+      const request = ticketRequest({ v: 1, action: 'create', platform: 'web', displayName: 'Guest',
+        media: { kind: 'movie', mediaId: 'tmdb:movie:27205' } }, { Origin: 'https://app.example.com' });
+      expect(request.headers.has('Authorization')).toBe(false); expect(request.headers.has('Cookie')).toBe(false);
+      const created = await POST(request); expect(created.status).toBe(201);
+      const body = await created.json() as { ticket: string; roomCode: string };
+      const verified = await verifyWatchPartyToken(body.ticket, SECRET, { expectedKind: 'connect' });
+      expect(verified).toMatchObject({ ok: true, claims: { displayName: 'Guest', role: 'host', platform: 'web' } });
+      const joined = await POST(ticketRequest({ v: 1, action: 'join', platform: 'android', displayName: 'Guest 2', roomCode: body.roomCode }));
+      expect(joined.status).toBe(200);
+      const roomId = generateWatchPartyId();
+      const resumeToken = await signWatchPartyToken({ ...watchPartyTokenBase({ roomCode: body.roomCode, roomId,
+        participantId: generateWatchPartyId(), displayName: 'Guest 2', platform: 'android', ttlSeconds: 30 }), kind: 'resume', roomId }, SECRET);
+      expect((await POST(ticketRequest({ v: 1, action: 'resume', platform: 'android', resumeToken }))).status).toBe(200);
+      expect(network).not.toHaveBeenCalled();
+      vi.stubEnv('WATCH_PARTY_SECRET', '');
+      expect((await GET()).status).toBe(503);
+    } finally { network.mockRestore(); }
+  });
+  it('signs canonical public TMDB identities unchanged and rejects ambiguous or capability-shaped media', async () => {
+    configure();
+    for (const platform of ['web', 'android']) {
+      const headers: Record<string, string> = platform === 'web' ? { Origin: 'https://app.example.com' } : {};
+      for (const media of mediaVectors.valid) {
+        const result = await POST(ticketRequest({ v: 1, action: 'create', platform, displayName: 'Host', media }, headers));
+        expect(result.status).toBe(201);
+        const body = await result.json() as { ticket: string };
+        const verified = await verifyWatchPartyToken(body.ticket, SECRET, { expectedKind: 'connect' });
+        expect(verified.ok && verified.claims.kind === 'connect' ? verified.claims.media : null).toEqual(media);
+      }
+      for (const media of mediaVectors.invalid) {
+        expect((await POST(ticketRequest({ v: 1, action: 'create', platform, displayName: 'Host', media }, headers))).status).toBe(400);
+      }
+    }
+  });
   it('returns only public config and the frozen drift contract', async () => {
     configure();
     const result = await GET();
@@ -135,5 +181,21 @@ describe('Watch Party ticket API', () => {
     expect(body.participantId).toBe(participantId);
     const verified = await verifyWatchPartyToken(body.ticket, SECRET, { expectedKind: 'connect' });
     expect(verified.ok && verified.claims.kind === 'connect' ? verified.claims.action : null).toBe('resume');
+  });
+
+  it('does not extend an expiring resume credential when exchanging it', async () => {
+    configure();
+    const roomId = generateWatchPartyId();
+    const claims = { ...watchPartyTokenBase({ roomCode: 'ABCDE23456', roomId,
+      participantId: generateWatchPartyId(), displayName: 'Viewer', platform: 'web', ttlSeconds: 2 }),
+    kind: 'resume' as const, roomId };
+    const resumeToken = await signWatchPartyToken(claims, SECRET);
+    const result = await POST(ticketRequest({ v: 1, action: 'resume', platform: 'web', resumeToken },
+      { Origin: 'https://app.example.com' }));
+    expect(result.status).toBe(200);
+    const body = await result.json() as { ticket: string; ticketExpiresAtMs: number };
+    expect(body.ticketExpiresAtMs).toBe(claims.exp * 1_000);
+    const verified = await verifyWatchPartyToken(body.ticket, SECRET);
+    expect(verified.ok && verified.claims.exp).toBe(claims.exp);
   });
 });

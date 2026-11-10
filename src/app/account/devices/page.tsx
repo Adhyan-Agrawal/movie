@@ -1,5 +1,8 @@
 import type { Metadata } from 'next';
 import { EmptyState } from '@/components/ui/EmptyState';
+import { UnauthorizedState } from '@/features/account/UnauthorizedState';
+import { SessionControlsForm } from '@/features/auth/SessionControlsForm';
+import { getRenderAccount } from '@/features/auth/render-account';
 
 export const metadata: Metadata = { title: 'Devices' };
 
@@ -9,7 +12,12 @@ export const metadata: Metadata = { title: 'Devices' };
  * Sign-in sessions belong to Supabase Auth; this page explains that honestly
  * instead of inventing a device list.
  */
-export default function DevicesPage() {
+export default async function DevicesPage() {
+  const account = await getRenderAccount();
+  if (account.status !== 'authenticated') {
+    return <UnauthorizedState next="/account/devices" unavailable={account.status === 'unavailable'} unverified={account.status === 'unverified'} />;
+  }
+
   return (
     <section aria-labelledby="devices-heading" className="flex flex-col gap-5">
       <div className="flex flex-col gap-1">
@@ -33,8 +41,8 @@ export default function DevicesPage() {
             button in the account header above.
           </li>
           <li>
-            Sessions in other browsers or apps are managed by Supabase Auth — Lumora itself has no sign-out-everywhere
-            or per-device controls yet.
+            Use the controls below to sign out other sessions or every session, including this browser.
+            Sessions are managed by Supabase Auth, not a Lumora device list.
           </li>
           <li>
             Your watch history and watchlist follow your account, not a device, so signing in anywhere picks up where
@@ -42,6 +50,7 @@ export default function DevicesPage() {
           </li>
         </ul>
       </div>
+      <SessionControlsForm />
     </section>
   );
 }

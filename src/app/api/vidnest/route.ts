@@ -1,7 +1,6 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 import { isIP } from 'node:net';
-import { NextRequest, NextResponse } from 'next/server';
-import { getCloudflareContext } from '@opennextjs/cloudflare';
+import { after, NextRequest, NextResponse } from 'next/server';
 import { inspectVidnest } from '@/features/vidnest/resolver';
 import { resolveMegaPlayStreams } from '@/features/megaplay/resolver';
 import { selectHlsRendition } from '@/lib/providers/hls-rendition';
@@ -9,6 +8,7 @@ import { decodedAudioTracks, hasHlsPlaybackUri, hlsStartupPlan, httpsUrl, metada
 import { parseMpegTsAudioLanguages } from '@/lib/providers/mpeg-ts-metadata';
 import type { DirectStream, Track } from '@/lib/providers/types';
 import { isPrivateOrLoopbackHost } from '@/lib/validation/source';
+import { requestIp } from '@/lib/request-ip';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -67,9 +67,7 @@ function cachedValue<T>(cache: Map<string, CacheEntry<T>>, key: string): T | und
   return cache.get(key)?.value;
 }
 
-function allowResolverRequest(request: NextRequest): boolean {
-  const address = request.headers.get('cf-connecting-ip');
-  if (!address) return true;
+function allowResolverRequest(address: string): boolean {
   const now = Date.now();
   for (const [key, entry] of resolverRates) if (entry.resetAt <= now) resolverRates.delete(key);
   if (resolverRates.size >= MAX_CACHE_ENTRIES && !resolverRates.has(address)) resolverRates.delete(resolverRates.keys().next().value!);
@@ -391,6 +389,7 @@ async function resolvedStreams(
       // The capability secret never leaves this route or enters local source resolution.
       const [vidnest, megaPlay] = await Promise.allSettled([
         inspectVidnest({ ...coordinates, signal,
+          acceptStream: (stream) => normalizeResolvedStreams({ streams: [stream] }).length > 0,
           ...(onPrimary ? { onPrimary: (streams) => onPrimary(normalizeResolvedStreams({ streams })) } : {}) }),
         resolveMegaPlayStreams({ tmdbId: coordinates.tmdbId, mediaType: coordinates.mediaType,
           season: coordinates.season, episode: coordinates.episode, signal }),
@@ -919,11 +918,10 @@ async function resolve(request: NextRequest, config: ApiConfig): Promise<NextRes
     let deferred = false;
     if (!metadataRequest) {
       try {
-        const ctx = getCloudflareContext().ctx;
-        ctx.waitUntil(completion.then(() => undefined, () => undefined));
+        after(() => completion.then(() => undefined, () => undefined));
         deferred = true;
       } catch {
-        // Outside Workers there is no request lifetime for deferred subrequests.
+        // Direct invocations without a Next request scope must cancel and drain the tail.
       }
     }
     void completion.catch(() => undefined);
@@ -993,7 +991,11 @@ export async function GET(request: NextRequest) {
 
   try {
     const token = request.nextUrl.searchParams.get('token');
-    if (!token && !allowResolverRequest(request)) return jsonError('Too many playback resolution requests.', 429);
+    if (!token) {
+      const address = requestIp(request.headers);
+      if (!address && process.env.NODE_ENV === 'production') return jsonError('Playback request identity is unavailable.', 503);
+      if (address && !allowResolverRequest(address)) return jsonError('Too many playback resolution requests.', 429);
+    }
     if (request.nextUrl.searchParams.has('rendition') && !token) return jsonError('Quality selection requires a playback capability.', 400);
     if (token && request.nextUrl.searchParams.get('cast') === '1') {
       const payload = readToken(token, config.secret);

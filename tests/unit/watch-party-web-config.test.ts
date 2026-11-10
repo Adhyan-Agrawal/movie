@@ -62,28 +62,28 @@ describe('server-validated nonsecret Watch Party availability', () => {
     }
   });
 
-  it('preserves configured config, create/join tickets and same-origin enforcement', async () => {
+  it.each([MEDIA_ID, 'tmdb:movie:123'])('preserves configured config, create/join tickets and same-origin enforcement for %s', async (mediaId) => {
     const config = await GET(); expect(config.status).toBe(200);
     expect(await config.json()).toMatchObject({ v: 1, websocketUrl: 'wss://party.example/v1/ws', subprotocol: WATCH_PARTY_SUBPROTOCOL });
-    const created = await POST(request({ v: 1, action: 'create', platform: 'web', displayName: 'Viewer', media: { kind: 'movie', mediaId: MEDIA_ID }, positionSeconds: 12 }));
+    const created = await POST(request({ v: 1, action: 'create', platform: 'web', displayName: 'Viewer', media: { kind: 'movie', mediaId }, positionSeconds: 12 }));
     expect(created.status).toBe(201); const body = await created.json();
     expect(body.subprotocols).toEqual([WATCH_PARTY_SUBPROTOCOL, `lumora.ticket.${body.ticket}`]);
     expect(body).not.toHaveProperty('secret');
     expect(await verifyWatchPartyToken(body.ticket, SECRET, { expectedKind: 'connect' })).toMatchObject({ ok: true,
-      claims: { kind: 'connect', action: 'create', role: 'host', media: { kind: 'movie', mediaId: MEDIA_ID }, positionSeconds: 12 } });
+      claims: { kind: 'connect', action: 'create', role: 'host', media: { kind: 'movie', mediaId }, positionSeconds: 12 } });
     const joined = await POST(request({ v: 1, action: 'join', platform: 'web', displayName: 'Viewer', roomCode: body.roomCode }));
     expect(joined.status).toBe(200);
     expect(await verifyWatchPartyToken((await joined.json()).ticket, SECRET, { expectedKind: 'connect' })).toMatchObject({ ok: true, claims: { action: 'join', role: 'member' } });
     expect((await POST(request({ v: 1, action: 'join', platform: 'web', displayName: 'Viewer', roomCode: body.roomCode }, 'https://other.example'))).status).toBe(403);
   });
 
-  it('preserves authenticated resume tickets while rejecting virtual TMDB media identities', async () => {
+  it('preserves authenticated resume tickets while rejecting noncanonical TMDB media identities', async () => {
     const resumeToken = await signWatchPartyToken({ ...watchPartyTokenBase({ roomCode: 'ABCDE23456', roomId: MEDIA_ID,
       participantId: MEDIA_ID, displayName: 'Viewer', platform: 'web', ttlSeconds: WATCH_PARTY_LIMITS.resumeTtlSeconds }), kind: 'resume', roomId: MEDIA_ID }, SECRET);
     const resumed = await POST(request({ v: 1, action: 'resume', platform: 'web', resumeToken }));
     expect(resumed.status).toBe(200);
     expect(await verifyWatchPartyToken((await resumed.json()).ticket, SECRET)).toMatchObject({ ok: true, claims: { action: 'resume', roomId: MEDIA_ID, participantId: MEDIA_ID } });
-    const unsupported = await POST(request({ v: 1, action: 'create', platform: 'web', displayName: 'Viewer', media: { kind: 'movie', mediaId: 'tmdb:movie:123' } }));
-    expect(unsupported.status).toBe(400); expect(await unsupported.json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
+    const invalid = await POST(request({ v: 1, action: 'create', platform: 'web', displayName: 'Viewer', media: { kind: 'movie', mediaId: 'tmdb:movie:0123' } }));
+    expect(invalid.status).toBe(400); expect(await invalid.json()).toMatchObject({ error: { code: 'INVALID_REQUEST' } });
   });
 });

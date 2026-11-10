@@ -77,6 +77,7 @@ export function createHarness(options = {}) {
     Linking: { openURL: (url) => { calls.push({ name: 'openURL', args: [url] }); return options.openURL?.(url) ?? Promise.resolve(); } },
   };
   const defaults = {
+    getCachedHome: () => null,
     currentUser: () => Promise.resolve(null), fetchContinueWatching: () => Promise.resolve([]), listAllGenres: () => Promise.resolve([]),
     searchTitles: () => Promise.resolve([]), searchPeople: () => Promise.resolve([]), getPerson: () => Promise.resolve(null), getPersonCredits: () => Promise.resolve([]),
     isInWatchlist: () => Promise.resolve(false), getMyRating: () => Promise.resolve(null), getResumePosition: () => Promise.resolve(null),

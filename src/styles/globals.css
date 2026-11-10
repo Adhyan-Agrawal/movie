@@ -1522,6 +1522,19 @@ html { scroll-padding-top: 6rem; }
   }
 }
 
+/* Account motion preferences add to, never replace, the device preference. */
+[data-viewing-motion='reduce'],
+[data-viewing-motion='reduce'] *,
+[data-viewing-motion='reduce'] *::before,
+[data-viewing-motion='reduce'] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.001ms !important;
+  scroll-behavior: auto !important;
+}
+[data-viewing-motion='reduce'] [data-reveal-state] { opacity: 1 !important; transform: none !important; }
+[data-viewing-motion='reduce'] .media-card-image { transform: none !important; }
+
 /* Screen-reader-only utility */
 .sr-only {
   position: absolute;

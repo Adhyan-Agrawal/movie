@@ -7,13 +7,14 @@ import { Logo } from '@/components/ui/Logo';
 import { Icon } from '@/components/ui/Icon';
 import { Rail } from './Rail';
 import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
+import { AUTH_SERVICE_UNAVAILABLE } from '@/features/auth/state';
 
 /**
  * Top bar with a command-search entry point (Section 5). Becomes opaque on
  * scroll for legibility over content. The search field routes to /search;
  * the full command palette is a later slice.
  */
-export function TopBar({ signedIn = false, accountsAvailable = true }: { signedIn?: boolean; accountsAvailable?: boolean }) {
+export function TopBar({ signedIn = false, accountsAvailable = true, sessionUnavailable = false }: { signedIn?: boolean; accountsAvailable?: boolean; sessionUnavailable?: boolean }) {
   const [scrolled, setScrolled] = useState(false);
 
   useEffect(() => {
@@ -48,7 +49,8 @@ export function TopBar({ signedIn = false, accountsAvailable = true }: { signedI
           <Icon name="search" />
           <span className="hidden xl:inline">Find your next story</span>
         </Link>
-        {!accountsAvailable ? <span className="site-signin hidden sm:inline-flex text-content-muted" title={ACCOUNT_SERVICES_UNAVAILABLE}>Accounts offline</span> : !signedIn ? (
+        {!accountsAvailable ? <span className="site-signin hidden sm:inline-flex text-content-muted" title={ACCOUNT_SERVICES_UNAVAILABLE}>Accounts offline</span>
+          : sessionUnavailable ? <span role="status" className="site-signin hidden sm:inline-flex text-content-muted" title={AUTH_SERVICE_UNAVAILABLE}>Account status unavailable</span> : !signedIn ? (
           <Link
             href="/signin"
             prefetch={false}

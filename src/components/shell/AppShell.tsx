@@ -4,8 +4,10 @@ import { Footer } from './Footer';
 import { InstallPrompt } from '@/components/pwa/InstallPrompt';
 import { AdSlot } from '@/features/ads/AdSlot';
 import { ConsentGate } from '@/features/ads/ConsentGate';
-import { isSignedIn } from '@/features/playback/progress-queries';
+import { getRenderAccount } from '@/features/auth/render-account';
 import { features } from '@/lib/env';
+import { ViewingPreferencesProvider } from '@/features/account/ViewingPreferencesProvider';
+import { accountPreferencesSnapshot } from '@/features/account/preference-types';
 
 /**
  * AppShell (Section 5). Landmarks: nav (rail + mobile), header (top bar),
@@ -14,14 +16,19 @@ import { features } from '@/lib/env';
  */
 export async function AppShell({ children }: { children: React.ReactNode }) {
   const accountsAvailable = features.supabaseConfigured;
-  const signedIn = accountsAvailable && await isSignedIn().catch(() => false);
+  const account = await getRenderAccount();
+  const signedIn = account.status === 'authenticated';
   return (
+    <ViewingPreferencesProvider
+      mode={!accountsAvailable || account.status === 'unauthenticated' ? 'guest' : signedIn ? 'account' : 'unavailable'}
+      initialPreferences={account.status === 'authenticated' ? accountPreferencesSnapshot(account.user.id, account.user.user_metadata) : null}
+    >
     <div className="site-shell min-h-dvh min-w-0">
       <a href="#main" className="skip-link">
         Skip to content
       </a>
       <div className="flex min-h-dvh min-w-0 flex-col">
-        <TopBar signedIn={signedIn} accountsAvailable={accountsAvailable} />
+        <TopBar signedIn={signedIn} accountsAvailable={accountsAvailable} sessionUnavailable={accountsAvailable && account.status === 'unavailable'} />
         {/* pb-24 (6rem) clears the bottom nav; the safe-area inset is added on
             top so the last row isn't tucked under the home indicator. */}
         <main
@@ -43,5 +50,6 @@ export async function AppShell({ children }: { children: React.ReactNode }) {
       <InstallPrompt />
       <MobileNav accountsAvailable={accountsAvailable} />
     </div>
+    </ViewingPreferencesProvider>
   );
 }

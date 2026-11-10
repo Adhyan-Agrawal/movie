@@ -1,11 +1,17 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { Container } from '@/components/ui/Container';
 import { buttonClasses } from '@/components/ui/Button';
 import { Logo } from '@/components/ui/Logo';
 import { SignInForm } from '@/features/auth/SignInForm';
 import { features } from '@/lib/env';
 import { ACCOUNT_SERVICES_UNAVAILABLE } from '@/features/account/availability';
+import { getVerifiedAccount } from '@/features/auth/verified-account';
+import { safeAuthReturnPath } from '@/features/auth/return-path';
+import { AUTH_EMAIL_UNVERIFIED, AUTH_SERVICE_UNAVAILABLE } from '@/features/auth/state';
+
+export const dynamic = 'force-dynamic';
 
 export const metadata: Metadata = {
   title: 'Sign in',
@@ -21,13 +27,18 @@ export const metadata: Metadata = {
 export default async function SignInPage({
   searchParams,
 }: {
-  searchParams: Promise<{ next?: string | string[]; confirmed?: string | string[]; email?: string | string[] }>;
+  searchParams: Promise<{ next?: string | string[]; confirmed?: string | string[]; email?: string | string[]; auth?: string | string[] }>;
 }) {
   const params = await searchParams;
   const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
-  const next = first(params.next);
+  const next = safeAuthReturnPath(first(params.next));
   const confirmed = first(params.confirmed);
   const email = first(params.email);
+  const account = await getVerifiedAccount();
+  // Do not hide a failed logout or callback behind an existing session redirect.
+  if (account.status === 'authenticated' && !['unavailable', 'callback', 'unverified'].includes(first(params.auth) ?? '')) redirect(next);
+  const initialError = account.status === 'unverified' ? AUTH_EMAIL_UNVERIFIED
+    : account.status === 'unavailable' ? AUTH_SERVICE_UNAVAILABLE : undefined;
 
   return (
     <Container className="pb-16">
@@ -51,7 +62,7 @@ export default async function SignInPage({
         ) : null}
 
         <div className="rounded-lg border border-border bg-surface/40 p-6">
-          {features.supabaseConfigured ? <SignInForm next={next} /> : <p role="status" className="text-sm leading-relaxed text-content-muted">{ACCOUNT_SERVICES_UNAVAILABLE}</p>}
+          {features.supabaseConfigured ? <SignInForm next={next} initialError={initialError} /> : <p role="status" className="text-sm leading-relaxed text-content-muted">{ACCOUNT_SERVICES_UNAVAILABLE}</p>}
         </div>
 
         <Link href="/" className={buttonClasses({ variant: 'ghost', size: 'sm', className: 'self-center' })}>
